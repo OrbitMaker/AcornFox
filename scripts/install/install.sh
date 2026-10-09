@@ -63,15 +63,51 @@ setup_github_proxies() {
 # github_download URL OUT：依次直连、走代理下载 GitHub 文件
 github_download() {
     local url="$1" out="$2" p
+    # 连续 15 秒低于 50KB/s 就放弃当前源换下一个：国内直连 GitHub 常只有十几 KB/s，
+    # 不限速时要等满 --max-time 才会轮到代理。所有源都太慢时，最后不限速再试一次。
     for p in "${GITHUB_PROXIES[@]}"; do
         if [ -n "$p" ]; then
             log_info "尝试通过 ${p} 下载"
         fi
-        if curl -fL --connect-timeout 10 --max-time 600 --retry 2 -o "$out" "${p}${url}"; then
+        if curl -fL --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15 -o "$out" "${p}${url}"; then
             return 0
         fi
     done
-    return 1
+    log_info "所有下载源都较慢，不限速重试一次"
+    curl -fL --connect-timeout 10 --max-time 1800 --retry 2 -o "$out" "${GITHUB_PROXIES[0]}${url}"
+}
+
+# 国内镜像：Gitee 发行版与 GitHub Release 的文件相同（同一份 SHA256SUMS 校验）。
+# 中国大陆服务器先从 Gitee 下载，失败再走 GitHub 直连和代理；ACORNFOX_GITEE_REPO 设为空可关闭。
+ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox-rebuild}"
+
+# release_download VERSION ASSET OUT：下载某个版本的 Release 文件
+release_download() {
+    local version="$1" asset="$2" out="$3"
+    if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
+        log_info "从 Gitee 镜像下载 ${asset}"
+        if curl -fL --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15 -o "$out" \
+            "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}"; then
+            return 0
+        fi
+        log_warn "Gitee 镜像下载失败，改从 GitHub 下载"
+    fi
+    github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
+}
+
+# latest_tag：最新版本号。中国大陆先查 Gitee 发行版 API（Gitee 的 releases/latest
+# 页面不跳转到版本页，不能沿用 GitHub 的做法），再走 GitHub 的 releases/latest 跳转
+latest_tag() {
+    local tag
+    if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
+        tag=$(curl -fsS -m 15 "https://gitee.com/api/v5/repos/${ACORNFOX_GITEE_REPO}/releases/latest" 2>/dev/null \
+            | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$tag" ]; then
+            echo "$tag"
+            return 0
+        fi
+    fi
+    github_latest_tag
 }
 
 # verify_sha256 FILE ASSET VERSION：用同一 Release 的 SHA256SUMS 校验下载文件，不一致则删除并中止。
@@ -79,7 +115,7 @@ github_download() {
 verify_sha256() {
     local file="$1" asset="$2" version="$3" sums want got
     sums=$(mktemp)
-    if ! github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/SHA256SUMS" "$sums"; then
+    if ! release_download "$version" SHA256SUMS "$sums"; then
         rm -f "$sums" "$file"
         error_exit "下载 SHA256SUMS 失败，无法校验 ${asset}"
     fi
@@ -140,16 +176,16 @@ detect_os() {
     case "$OS" in
         ubuntu)
             if [[ ! "$OS_VERSION" =~ ^(20.04|22.04|24.04)$ ]]; then
-                log_warn "未测试的 Ubuntu 版本: $OS_VERSION，继续安装可能遇到问题"
+                log_warn "未测试的 Ubuntu 版本: ${OS_VERSION}，继续安装可能遇到问题"
             fi
             ;;
         debian)
             if [[ ! "$OS_VERSION" =~ ^(11|12)$ ]]; then
-                log_warn "未测试的 Debian 版本: $OS_VERSION，继续安装可能遇到问题"
+                log_warn "未测试的 Debian 版本: ${OS_VERSION}，继续安装可能遇到问题"
             fi
             ;;
         *)
-            error_exit "不支持的操作系统: $OS，目前仅支持 Ubuntu 和 Debian"
+            error_exit "不支持的操作系统: ${OS}，目前仅支持 Ubuntu 和 Debian"
             ;;
     esac
 }
@@ -159,11 +195,13 @@ detect_location() {
     log_info "检测服务器地理位置..."
 
     IN_CHINA=false
+    CLOUD=""
 
-    # 方法 1: 检查云厂商元数据
+    # 方法 1: 检查云厂商元数据（同时记下云厂商，用来优先选它的内网软件源）
     # 阿里云
     if curl -s -m 2 http://100.100.100.200/latest/meta-data/region-id 2>/dev/null | grep -q "cn-"; then
         IN_CHINA=true
+        CLOUD=aliyun
         log_info "检测到阿里云中国区域"
         return
     fi
@@ -172,6 +210,7 @@ detect_location() {
     if curl -s -m 2 http://metadata.tencentyun.com/latest/meta-data/placement/region 2>/dev/null | grep -q "ap-"; then
         if curl -s -m 2 http://metadata.tencentyun.com/latest/meta-data/placement/region 2>/dev/null | grep -qE "ap-beijing|ap-shanghai|ap-guangzhou|ap-chengdu|ap-chongqing"; then
             IN_CHINA=true
+            CLOUD=tencent
             log_info "检测到腾讯云中国区域"
             return
         fi
@@ -307,17 +346,15 @@ EOF
 update_apt() {
     log_info "更新软件包列表..."
 
-    # 如果在中国，配置 APT 使用国内镜像（云厂商镜像已自带国内源时不改动）
-    if $IN_CHINA && grep -rqsE 'mirrors\.(aliyun|tencent|cloud\.tencent|huaweicloud|tuna\.tsinghua|ustc)|mirrors\.[a-z]+\.com' /etc/apt/sources.list /etc/apt/sources.list.d/; then
-        log_info "APT 已使用国内镜像，保持不变"
-    elif $IN_CHINA; then
+    # 中国大陆只在软件源指向境外官方地址时才替换。云厂商镜像自带的内网源（如阿里云
+    # mirrors.cloud.aliyuncs.com）走内网，冷启动 apt update 实测 17 秒，换成公网
+    # mirrors.aliyun.com 要 251 秒，所以其他任何源都原样保留。
+    local official='//(archive|security|ports)\.ubuntu\.com|//(deb|security)\.debian\.org'
+    if $IN_CHINA && grep -rqsE "$official" /etc/apt/sources.list /etc/apt/sources.list.d/; then
         log_info "配置 APT 使用国内镜像..."
         case "$OS" in
             ubuntu)
-                # 备份原始源
-                cp /etc/apt/sources.list /etc/apt/sources.list.bak || true
-
-                # 使用阿里云镜像
+                cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
                 cat > /etc/apt/sources.list << EOF
 deb http://mirrors.aliyun.com/ubuntu/ ${OS_CODENAME} main restricted universe multiverse
 deb http://mirrors.aliyun.com/ubuntu/ ${OS_CODENAME}-updates main restricted universe multiverse
@@ -326,8 +363,7 @@ deb http://mirrors.aliyun.com/ubuntu/ ${OS_CODENAME}-security main restricted un
 EOF
                 ;;
             debian)
-                cp /etc/apt/sources.list /etc/apt/sources.list.bak || true
-
+                cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
                 cat > /etc/apt/sources.list << EOF
 deb http://mirrors.aliyun.com/debian/ ${OS_CODENAME} main contrib non-free
 deb http://mirrors.aliyun.com/debian/ ${OS_CODENAME}-updates main contrib non-free
@@ -335,6 +371,18 @@ deb http://mirrors.aliyun.com/debian-security ${OS_CODENAME}-security main contr
 EOF
                 ;;
         esac
+        # Ubuntu 24.04 / Debian 12 的默认源在 deb822 格式的 *.sources 里，指向官方地址的
+        # 一并停用，否则境外源仍会参与 update
+        local f
+        for f in /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            if grep -qE "$official" "$f"; then
+                mv "$f" "$f.bak"
+                log_info "已停用境外官方源 ${f}（备份为 $f.bak）"
+            fi
+        done
+    elif $IN_CHINA; then
+        log_info "APT 已使用非官方境外源（云厂商内网源或国内镜像），保持不变"
     fi
 
     apt_get update -qq || error_exit "更新软件包列表失败"
@@ -370,29 +418,45 @@ install_docker() {
     log_info "安装 Docker..."
 
     # 国内镜像站在 Docker 新版本发布后会有一段时间不一致（索引大小不符、包 404、读超时），
-    # 每个源试两次，都不行再换下一个；全部失败时退回发行版仓库自带的 docker.io。
-    local sources=() src attempt installed=false
+    # 依次换源；全部失败时退回发行版仓库自带的 docker.io。
+    # 每项是 "软件包地址|GPG 密钥地址"。云厂商内网源只有 http，签名密钥仍从 https 获取，
+    # 包的真实性由签名保证。
+    local sources=() entry src gpg attempt installed=false
     if $IN_CHINA; then
-        sources=("https://mirrors.aliyun.com/docker-ce" "https://mirrors.cloud.tencent.com/docker-ce" "https://mirrors.tuna.tsinghua.edu.cn/docker-ce")
+        case "${CLOUD:-}" in
+            aliyun) sources+=("http://mirrors.cloud.aliyuncs.com/docker-ce|https://mirrors.aliyun.com/docker-ce") ;;
+            tencent) sources+=("http://mirrors.tencentyun.com/docker-ce|https://mirrors.cloud.tencent.com/docker-ce") ;;
+        esac
+        sources+=("https://mirrors.aliyun.com/docker-ce|https://mirrors.aliyun.com/docker-ce"
+                  "https://mirrors.cloud.tencent.com/docker-ce|https://mirrors.cloud.tencent.com/docker-ce"
+                  "https://mirrors.tuna.tsinghua.edu.cn/docker-ce|https://mirrors.tuna.tsinghua.edu.cn/docker-ce")
     else
-        sources=("https://download.docker.com")
+        sources=("https://download.docker.com|https://download.docker.com")
     fi
 
-    for src in "${sources[@]}"; do
+    for entry in "${sources[@]}"; do
+        src="${entry%%|*}"
+        gpg="${entry##*|}"
         log_info "使用 Docker 源: ${src}"
-        if ! curl -fsSL --connect-timeout 10 --max-time 60 "${src}/linux/${OS}/gpg" \
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 "${gpg}/linux/${OS}/gpg" \
             | gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg; then
-            log_warn "无法从 ${src} 获取 GPG 密钥，换下一个源"
+            log_warn "无法从 ${gpg} 获取 GPG 密钥，换下一个源"
             continue
         fi
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] ${src}/linux/${OS} ${OS_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+        # 索引不一致（镜像站同步中）时 update 就会失败，重试同一个源也没用，直接换源；
+        # update 成功但下载包失败多半是偶发，再试一次
+        if ! apt_get update -qq; then
+            log_warn "Docker 源 ${src} 索引不可用（镜像站可能正在同步），换下一个源"
+            continue
+        fi
         for attempt in 1 2; do
-            if apt_get update -qq && apt_get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+            if apt_get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
                 installed=true
                 break 2
             fi
-            log_warn "Docker 源 ${src} 第 ${attempt} 次安装失败（镜像站可能正在同步）"
-            sleep 5
+            log_warn "从 ${src} 安装 Docker 第 ${attempt} 次失败"
+            sleep 3
         done
     done
 
@@ -478,17 +542,40 @@ install_caddy() {
     log_info "安装 Caddy..."
 
     if $IN_CHINA; then
-        # apt 源 dl.cloudsmith.io 在大陆不稳定，改为从 GitHub Releases 下载二进制
-        log_info "从 GitHub Releases 下载 Caddy..."
+        # apt 源 dl.cloudsmith.io 在大陆不稳定，国内镜像站也没有同步它；Ubuntu/Debian 仓库里的
+        # caddy 2.6.2 不支持 persist_config。所以下载官方二进制：AcornFox 发行版在 Gitee 上附带
+        # 同一份 Caddy 安装包与官方校验文件，先从 Gitee 取，失败再走 GitHub 直连和代理。
         ARCH=$(dpkg --print-architecture)
         CADDY_VERSION="2.8.4"
+        local caddy_tag="" name
+        if [ -n "$ACORNFOX_GITEE_REPO" ]; then
+            caddy_tag="$ACORNFOX_VERSION"
+            [ "$caddy_tag" = "latest" ] && caddy_tag=$(latest_tag 2>/dev/null || true)
+        fi
+        local official="https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}"
+        local mirror="https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${caddy_tag}"
+        name="caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz"
+        if [ -n "$caddy_tag" ] && curl -fL --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15 \
+            -o "/tmp/${name}" "${mirror}/${name}"; then
+            log_info "已从 Gitee 镜像下载 ${name}"
+        else
+            log_info "从 GitHub 下载 ${name}..."
+            github_download "${official}/${name}" "/tmp/${name}" \
+                || error_exit "下载 Caddy 失败；可设置 ACORNFOX_GITHUB_PROXY 指定可用的 GitHub 加速地址后重试"
+        fi
+        # 校验文件只有几 KB，优先取 Caddy 官方的，与镜像上的安装包互相独立；取不到再用镜像副本
+        name="caddy_${CADDY_VERSION}_checksums.txt"
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "/tmp/${name}" "${official}/${name}"; then
+            if [ -n "$caddy_tag" ] && curl -fsSL --connect-timeout 10 --max-time 60 -o "/tmp/${name}" "${mirror}/${name}"; then
+                log_warn "Caddy 官方校验文件取不到，改用 Gitee 镜像上的副本"
+            else
+                github_download "${official}/${name}" "/tmp/${name}" || error_exit "下载 Caddy 校验文件失败"
+            fi
+        fi
+        mv "/tmp/caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz" /tmp/caddy.tar.gz
+        mv "/tmp/caddy_${CADDY_VERSION}_checksums.txt" /tmp/caddy_checksums.txt
 
-        github_download "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz" /tmp/caddy.tar.gz \
-            || error_exit "下载 Caddy 失败；可设置 ACORNFOX_GITHUB_PROXY 指定可用的 GitHub 加速地址后重试"
-
-        # Caddy 官方随发布提供 SHA-512 校验文件
-        github_download "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_checksums.txt" /tmp/caddy_checksums.txt \
-            || error_exit "下载 Caddy 校验文件失败"
+        # 无论从哪里下载，都按 Caddy 官方发布的 SHA-512 校验
         CADDY_WANT=$(awk -v a="caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz" '$2 == a {print $1; exit}' /tmp/caddy_checksums.txt)
         rm -f /tmp/caddy_checksums.txt
         if [ -z "$CADDY_WANT" ] || [ "$(sha512sum /tmp/caddy.tar.gz | awk '{print $1}')" != "$CADDY_WANT" ]; then
@@ -676,14 +763,13 @@ download_acornfox() {
 
     if [ "$VERSION" = "latest" ]; then
         log_info "获取最新版本号..."
-        VERSION=$(github_latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 安装本地文件"
+        VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 安装本地文件"
         log_info "最新版本: $VERSION"
     fi
 
-    DOWNLOAD_URL="https://github.com/${ACORNFOX_REPO}/releases/download/${VERSION}/acornfox_linux_${ARCH}"
-    log_info "下载地址: $DOWNLOAD_URL"
+    log_info "下载 AcornFox ${VERSION}（acornfox_linux_${ARCH}）"
 
-    if github_download "$DOWNLOAD_URL" /tmp/acornfox; then
+    if release_download "$VERSION" "acornfox_linux_${ARCH}" /tmp/acornfox; then
         log_success "下载完成"
     else
         error_exit "下载 AcornFox 失败，请检查网络或版本号；也可设置 ACORNFOX_GITHUB_PROXY 或使用 --binary"
@@ -765,7 +851,7 @@ generate_admin_token() {
 # 元数据接口出错时会返回 HTML 页面，所以每个结果都要校验是 IPv4。
 detect_public_host() {
     if [ -n "$PUBLIC_HOST" ]; then
-        log_info "应用访问地址主机: $PUBLIC_HOST（手动指定）"
+        log_info "应用访问地址主机: ${PUBLIC_HOST}（手动指定）"
         return
     fi
     local url ip
@@ -777,13 +863,13 @@ detect_public_host() {
         ip=$(curl -fs -m 2 "$url" 2>/dev/null || true)
         if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
             PUBLIC_HOST="$ip"
-            log_info "应用访问地址主机: $PUBLIC_HOST（云厂商元数据）"
+            log_info "应用访问地址主机: ${PUBLIC_HOST}（云厂商元数据）"
             return
         fi
     done
     PUBLIC_HOST=$(hostname -I 2>/dev/null | awk '{print $1}')
     if [ -n "$PUBLIC_HOST" ]; then
-        log_warn "未从云厂商元数据取到公网 IP，暂用本机地址 $PUBLIC_HOST；如不对，用 --public-host 重新安装或修改 acornfox-server 服务"
+        log_warn "未从云厂商元数据取到公网 IP，暂用本机地址 ${PUBLIC_HOST}；如不对，用 --public-host 重新安装或修改 acornfox-server 服务"
     else
         log_warn "无法确定服务器地址，部署输出的访问地址将不含主机名；可用 --public-host 指定"
     fi
@@ -956,6 +1042,9 @@ main() {
     # 解析参数
     parse_args "$@"
     setup_github_proxies
+    # 记下网络环境判断，upgrade.sh 直接沿用，不必再依赖外部 IP 查询
+    mkdir -p /etc/acornfox
+    echo "ACORNFOX_IN_CHINA=${IN_CHINA}" > /etc/acornfox/install.env
 
     # 安装流程
     update_apt
