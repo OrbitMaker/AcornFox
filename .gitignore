@@ -1,0 +1,31 @@
+# Local operator configuration. The checked-in example contains no credentials.
+config/cluster.env
+config/*.local
+
+# Generated artifacts and temporary files.
+.cache/
+artifacts/
+.playwright-cli/
+output/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.log
+.omx/
+
+# Local macOS/editor noise.
+.DS_Store
+.idea/
+.vscode/
+
+# Frontend prototype dependencies and build output.
+node_modules/
+dist/
+dist-stub/
+dist-core/
+dist-core-stub/
+
+# Locally built binaries and release output (scripts/build-release.sh writes dist/).
+/acornfox/acornfox
+/acornfox/acornfox-*
+!/acornfox/acornfox-*/
