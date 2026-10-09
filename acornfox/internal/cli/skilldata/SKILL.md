@@ -13,12 +13,14 @@ AcornFox 把带 Dockerfile 的项目部署到用户自己的 Linux 服务器（�
 
 ### 1. 判断网络环境
 
-安装源按网络选择：中国大陆用 Gitee 镜像，其他地区用 GitHub。用户电脑和服务器可能不在同一地区，**两边分别判断**（在服务器上判断时，把下面这段经 `ssh USER@HOST '…'` 执行）：
+安装源按网络选择：中国大陆用 Gitee 镜像，其他地区用 GitHub。用户电脑和服务器可能不在同一地区，**两边分别判断**：
 
 ```bash
-cc=$(curl -s -m 5 "http://ip-api.com/json/?fields=countryCode" | grep -o '"[A-Z][A-Z]"' | tr -d '"')
+cc=$(curl -s -m 5 'http://ip-api.com/line/?fields=countryCode')
 if [ "$cc" = CN ] || { [ -z "$cc" ] && ! curl -s -m 6 -o /dev/null https://github.com; }; then echo cn; else echo global; fi
 ```
+
+在服务器上判断时，用 `ssh USER@HOST "curl -s -m 5 'http://ip-api.com/line/?fields=countryCode'"` 取国家代码（输出 `CN` 即中国大陆）；输出为空时再用 `ssh USER@HOST 'curl -s -m 6 -o /dev/null https://github.com && echo ok'` 判断能否直连 GitHub。不要把整段脚本套进 ssh 的引号里，引号嵌套容易出错。
 
 | 结果 | 安装脚本地址前缀 |
 | --- | --- |
@@ -59,6 +61,8 @@ acornfox deploy --json --image nginx:1.27-alpine --app my-app
 - 成功：`{"ok":true,"url":"http://IP:端口",...}`，把 `url` 告诉用户。
 - 失败：`{"ok":false,"diagnosis":{"stage","code","message","log_excerpt","hint"}}`，按下文修复后重新部署。
 
+用户说「重新部署」「再部署一次」时：本地代码或 Dockerfile 有改动就用 `deploy` 上传新代码；没有改动、只是想让环境变量或设置生效，才用 `redeploy`（它只重建当前版本，不上传本地代码）。拿不准时先问用户。
+
 首次部署后当前目录会生成 `.acornfox`（只记服务器名和应用名，不含凭据），之后的命令无需再指定 `--app`。
 
 ## 状态与诊断
@@ -79,6 +83,7 @@ acornfox logs --json [--tail 200]      # 容器日志
 | `dockerfile_missing` | 按项目类型生成 Dockerfile |
 | `too_large` | 补 `.dockerignore`，排除 node_modules、构建产物、大文件 |
 | `build_failed` | 读 `log_excerpt`，修依赖或构建命令 |
+| `registry_timeout` | 构建时下载依赖超时：服务器在中国大陆时，Dockerfile 里改用国内镜像源（见下文 Dockerfile 要点）后重新部署 |
 | `pull_failed` / `pull_timeout` / `image_not_found` | 基础镜像拉不下来：核对镜像名和标签；服务器在中国大陆时请用户配置 Docker 镜像加速 |
 | `port_not_listening` | 程序要监听 `0.0.0.0`（不是 127.0.0.1），端口与 `--port` 一致 |
 | `container_exited` / `start_failed` | 看 `log_excerpt` 和 `acornfox logs`，修启动命令或缺失的环境变量 |
@@ -116,7 +121,7 @@ acornfox stop --json
 acornfox start --json
 acornfox restart --json
 acornfox rollback --json        # 回到上一个成功版本
-acornfox stats --json           # CPU、内存
+acornfox stats APP --json       # 该应用的 CPU、内存、网络（不带应用名则是整台服务器）
 acornfox domain add example.com --json
 ```
 
@@ -124,6 +129,7 @@ acornfox domain add example.com --json
 
 ## Dockerfile 要点
 
+- 服务器在中国大陆时，安装依赖一开始就用国内镜像源，否则 npm / pip / Go 下载常会超时：npm 加 `--registry=https://registry.npmmirror.com`，pip 加 `-i https://mirrors.aliyun.com/pypi/simple`，Go 设 `ENV GOPROXY=https://goproxy.cn,direct`。
 - 程序监听 `0.0.0.0:$PORT`，`EXPOSE` 与 `--port` 一致。
 - 用多阶段构建和 `.dockerignore` 控制体积（上传上限 200 MB）。
 - 需要持久化的数据写到固定目录，再用 `volume add` 挂载。
