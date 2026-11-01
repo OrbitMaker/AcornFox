@@ -334,9 +334,9 @@ func TestAppSetCPUDecimalToMilli(t *testing.T) {
 		t.Fatalf("saveProject: %v", err)
 	}
 	var gotMilli *int
-	h.api.updateAppFn = func(ctx context.Context, app string, s client.AppSettings) (client.App, error) {
+	h.api.updateAppFn = func(ctx context.Context, app string, s client.AppSettings) (client.AppUpdate, error) {
 		gotMilli = s.CPUMilli
-		return client.App{Name: app}, nil
+		return client.AppUpdate{App: client.App{Name: app}}, nil
 	}
 	code, _, errOut := h.run("--json", "app", "set", "--cpu", "0.5")
 	if code != exitOK {

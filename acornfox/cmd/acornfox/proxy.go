@@ -1,9 +1,7 @@
-//go:build !windows
-
 // This file implements the "acornfox proxy" subcommand (N2). On the server the
 // CLI reaches the API over SSH: `ssh ... acornfox proxy` connects to the local
 // API unix socket and relays a single byte stream between the SSH session's
-// stdin/stdout and the socket. See docs/n2-contract.md section 1.
+// stdin/stdout and the socket.
 package main
 
 import (

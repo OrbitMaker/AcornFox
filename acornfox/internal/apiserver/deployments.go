@@ -46,7 +46,15 @@ func (s *server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	}
 	healthPath := r.URL.Query().Get("health_path")
 
-	if _, _, err := s.store.EnsureApp(ctx, app); err != nil {
+	// A new app takes the default limits, which must fit under the memory cap.
+	s.resMu.Lock()
+	if !s.checkNewAppRoom(w, ctx, app) {
+		s.resMu.Unlock()
+		return
+	}
+	_, _, err := s.store.EnsureApp(ctx, app)
+	s.resMu.Unlock()
+	if err != nil {
 		s.mapStoreError(w, err)
 		return
 	}

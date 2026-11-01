@@ -29,7 +29,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
     shasum -a 256 acornfox_* > SHA256SUMS
 fi
-cp "$ROOT/scripts/install/install.sh" "$ROOT/scripts/install/upgrade.sh" "$ROOT/scripts/install/install-cli.sh" "$DIST/"
+cp "$ROOT/scripts/install/install.sh" "$ROOT/scripts/install/upgrade.sh" "$ROOT/scripts/install/uninstall.sh" "$ROOT/scripts/install/install-cli.sh" "$DIST/"
 
 # install.sh 在中国大陆先从 Gitee 发行版取 Caddy，所以随每个版本附带同一份官方安装包、
 # 校验文件与许可证（Apache-2.0）。版本号以 install.sh 为准，下载后按官方 SHA-512 校验。

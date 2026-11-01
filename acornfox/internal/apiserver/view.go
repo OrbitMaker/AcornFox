@@ -68,7 +68,9 @@ type appView struct {
 	MemoryMB          int                `json:"memory_mb"`
 	CPUMilli          int                `json:"cpu_milli"`
 	URL               string             `json:"url"`
-	ObservedState     string             `json:"observed_state"` // running | stopped | missing | unavailable
+	LANURL            string             `json:"lan_url,omitempty"` // http://<LAN address>:<port> when reachable from the local network
+	Exposure          string             `json:"exposure"`          // effective: local | lan | public | afx_cloud
+	ObservedState     string             `json:"observed_state"`    // running | stopped | missing | unavailable
 	Observed          *observedContainer `json:"observed,omitempty"`
 	Live              *state.Deployment  `json:"live,omitempty"`
 	Latest            *state.Deployment  `json:"latest,omitempty"` // newest deployment (may be pending or failed while Live keeps serving)

@@ -9,7 +9,7 @@ import (
 	"github.com/acornfox/acornfox/internal/client"
 )
 
-// Exit codes per docs/n2-contract.md section 3.
+// Exit codes (stable; AI workbenches branch on them).
 const (
 	exitOK          = 0 // success
 	exitOpFailed    = 1 // operation completed but failed (e.g. deploy failed)

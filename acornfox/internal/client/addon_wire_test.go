@@ -47,6 +47,9 @@ func (*wireRunner) StartContainer(context.Context, string, string) (runner.Conta
 }
 func (*wireRunner) RemoveContainer(context.Context, string, string) error { return nil }
 func (*wireRunner) RemoveNetwork(context.Context, string) error           { return nil }
+func (*wireRunner) UpdateResources(context.Context, runner.UpdateResourcesRequest) error {
+	return nil
+}
 func (w *wireRunner) RemoveVolume(_ context.Context, _, name string) error {
 	w.removedVolumes = append(w.removedVolumes, name)
 	return nil

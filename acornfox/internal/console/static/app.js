@@ -1,4 +1,4 @@
-// AcornFox 网页控制台 · 一拨即开（docs/console-design.md、docs/brand.md）。
+// AcornFox 网页控制台。
 // 不依赖框架，ES2020。所有内容用 createElement + textContent 生成，用户数据
 // 永远不进 innerHTML（安全策略：不内联脚本 / 样式、不用 eval、不加载外部资源）。
 // 结构：顶栏 + 四个页面（我的应用 / 应用中心 / 服务器 / 设置）+ 应用详情页。
@@ -8,6 +8,8 @@
 // ---------------------------------------------------------------------------
 
 const POLL_MS = 3000;
+const HOME_TOOLS_MIN = 6;                       // 应用数达到这个值时首页出现工具栏、隐藏“部署新应用”卡片
+const HOME_PAGE_SIZE = { grid: 12, list: 15 };  // 卡片 4 行 × 3 列；列表一屏左右
 
 // 应用的显示状态：卡片、标题和提醒共用。
 const STATUS = {
@@ -43,8 +45,8 @@ const ADDON_DESC = {
 };
 
 const SKILL_PROMPT = "请安装 AcornFox Skill：下载 https://acornfox.com/skill/SKILL.md ，保存为你 skills 目录下的 acornfox/SKILL.md（Claude Code 是 ~/.claude/skills，Codex 是 ~/.codex/skills），然后按这个 Skill 把当前项目部署到我的服务器。";
-const UPGRADE_CN = "curl -fsSL https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/upgrade.sh | sudo bash";
-const UPGRADE_GLOBAL = "curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/upgrade.sh | sudo bash";
+const UPGRADE_CN = "curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash";
+const UPGRADE_GLOBAL = "curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash";
 
 // 应用中心首批预告（目录服务上线前只展示，不提供安装）。
 const STORE_PREVIEW = [
@@ -78,6 +80,14 @@ function el(tag, attrs, children) {
 function text(s) { return document.createTextNode(s); }
 
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+// appIcon 是首字母图标，按名字固定配一种颜色（8 种，避开红橙黄，深色模式另有一套），
+// 首字母相同的应用也能分开。
+function appIcon(name, extra) {
+  let h = 0;
+  for (const c of name || "") h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return el("span", { class: "app-icon" + (extra ? " " + extra : ""), "aria-hidden": "true", dataset: { hue: String(h % 8) }, text: firstChar(name) });
+}
 
 // firstChar 取名字的第一个字，用作应用图标。
 function firstChar(name) {
@@ -225,6 +235,7 @@ function statusForAI(a) {
   if (a.live) lines.push("当前版本：第 " + a.live.seq + " 版（" + deploymentSource(a.live) + "）");
   if (a.latest && a.live && a.latest.id !== a.live.id) lines.push("最新一次部署：第 " + a.latest.seq + " 版，" + deployStatusText(a.latest.status));
   if (a.url) lines.push("访问地址：" + a.url);
+  if (a.lan_url) lines.push("局域网地址：" + a.lan_url);
   const addons = (a.addons || []).map((x) => (ADDON_NAMES[x.kind] || x.kind) + "（" + addonStateText(x.observed_state) + "）");
   if (addons.length) lines.push("数据库：" + addons.join("、"));
   lines.push("资源上限：内存 " + a.memory_mb + " MB，CPU " + (a.cpu_milli / 1000).toFixed(1) + " 核");
@@ -287,6 +298,11 @@ const state = {
   connectionLost: false,
   loaded: false,
   busy: {},            // 正在提交的操作，避免重复点击
+  resources: null,     // GET /v1/resources：整机上限与各容器已分配
+  focusLimits: false,  // 从概览“调整上限”进入配置标签时，把资源上限卡片滚到视口中间
+  // 多应用首页（应用数 ≥ HOME_TOOLS_MIN 时出现工具栏）。筛选、搜索、页码只在本页有效，视图记在浏览器里。
+  homeQuery: "", homeFilter: "all", homeSort: "attn", homePage: 1, homeView: loadHomeView(),
+  limitDraft: null,    // 正在拖动、还没保存的上限：{ key: "app:名字" | "host", memory, cpu }
 };
 
 let pollTimer = null;
@@ -415,17 +431,22 @@ function selectionInside(node) {
   return node.contains(sel.anchorNode) || node.contains(sel.focusNode);
 }
 
+// 滑块由 syncSliders 定位，不参与内容比较，也不随内容替换，这样才能从旧位置滑到新位置。
+function isDecor(n) { return n.nodeType === 1 && n.classList.contains("slider"); }
+function contentNodes(node) { return Array.from(node.childNodes).filter((n) => !isDecor(n)); }
+
 function sameChildren(a, b) {
-  if (a.childNodes.length !== b.childNodes.length) return false;
-  for (let i = 0; i < a.childNodes.length; i++) {
-    if (!a.childNodes[i].isEqualNode(b.childNodes[i])) return false;
+  const cur = contentNodes(a);
+  if (cur.length !== b.childNodes.length) return false;
+  for (let i = 0; i < cur.length; i++) {
+    if (!cur[i].isEqualNode(b.childNodes[i])) return false;
   }
   return true;
 }
 
 function swapChildren(target, next) {
   if (sameChildren(target, next)) return false;
-  clear(target);
+  for (const n of contentNodes(target)) target.removeChild(n);
   while (next.firstChild) target.append(next.firstChild);
   return true;
 }
@@ -437,7 +458,7 @@ function regionKey(node) {
 // patch 把 next 的内容合到 target：结构相同时逐个区域比较，只替换变化的；
 // 日志框只更新文字并保留滚动位置；用户正在选择的区域本轮不动。
 function patch(target, next) {
-  const a = Array.from(target.childNodes), b = Array.from(next.childNodes);
+  const a = contentNodes(target), b = Array.from(next.childNodes);
   const sameShape = a.length === b.length && a.every((n, i) => regionKey(n) === regionKey(b[i]));
   if (!sameShape) { swapChildren(target, next); return; }
   for (let i = 0; i < a.length; i++) {
@@ -452,10 +473,16 @@ function patch(target, next) {
       continue;
     }
     if (cur.nodeType === 1 && selectionInside(cur)) continue;
+    // 正在拖动上限滑块的卡片本轮不动，等保存或取消后再刷新
+    if (cur.nodeType === 1 && cur.dataset.editing === "1" && nxt.nodeType === 1 && nxt.dataset.editing === "1") continue;
+    // 整张替换的卡片：里面的滑块和按钮引用的是同一次生成的卡片，只换一部分会让它们指向页面上不存在的那张
+    if (cur.nodeType === 1 && cur.dataset.atomic === "1") { cur.replaceWith(nxt); continue; }
     if (cur.nodeType === 1 && cur.dataset.region && cur.nodeName === nxt.nodeName) {
       patch(cur, nxt);
       for (const attr of ["class", "aria-label", "aria-checked", "aria-selected"]) {
-        const v = nxt.getAttribute(attr);
+        let v = nxt.getAttribute(attr);
+        // 切换动效播放期间数据回来重绘，保留 playEnter 加的 class，动画不被打断
+        if (attr === "class") for (const c of ["enter-r", "enter-l"]) if (cur.classList.contains(c)) v = (v ? v + " " : "") + c;
         if (v == null) cur.removeAttribute(attr); else if (cur.getAttribute(attr) !== v) cur.setAttribute(attr, v);
       }
       continue;
@@ -472,10 +499,13 @@ function render() {
   renderFatal();
   if (state.fatal) return;
   renderConnectionBanner();
+  renderEdgeBanner();
   renderChrome();
   const next = document.createElement("div");
   buildPage(next);
   patch(scope, next);
+  scope.classList.toggle("is-home", state.loaded && state.route.page === "home" && state.apps.length > 0);
+  syncSliders();
   if (activeKey && !active.isConnected) {
     const replacement = Array.from(document.querySelectorAll(FOCUSABLE)).filter((n) => focusKey(n) === activeKey)[activeIndex];
     if (replacement) replacement.focus({ preventScroll: true });
@@ -502,6 +532,20 @@ function renderConnectionBanner() {
   document.body.append(el("div", { id: "conn-banner", class: "banner", role: "status" }, el("div", { class: "inner", text: "与服务器的连接中断，正在重试…" })));
 }
 
+// 网关组件（Caddy 容器）还没就绪时提示：首次启动要下载镜像，这期间应用网址打不开。
+function renderEdgeBanner() {
+  const existing = $("edge-banner");
+  const e = state.edge;
+  const show = e && (e.state === "preparing" || e.state === "error") && !state.connectionLost && !state.fatal;
+  if (!show) { if (existing) existing.remove(); return; }
+  const text = e.state === "preparing"
+    ? "正在准备网关组件（首次启动要下载 Caddy 镜像，约 50 MB），完成前应用网址暂时打不开。"
+    : "网关组件（Caddy）启动失败，正在重试：" + (e.message || "") + "。可在终端运行 acornfox doctor 查看。";
+  if (existing && existing.dataset.text === text) return;
+  if (existing) existing.remove();
+  document.body.append(el("div", { id: "edge-banner", class: "banner", role: "status", dataset: { text } }, el("div", { class: "inner", text })));
+}
+
 function currentPage() {
   return state.route.page === "app" || state.route.page === "new" ? "home" : state.route.page;
 }
@@ -510,12 +554,12 @@ function renderChrome() {
   const label = $("server-label");
   const serverText = state.server || (state.loaded ? "服务器" : "正在连接…");
   if (label.textContent !== serverText) label.textContent = serverText;
+  // 服务器标签只表示连接状态；需要处理的问题统一交给铃铛
   const dot = $("server-dot");
-  const attention = attentionItems().length;
-  const dotCls = !state.loaded ? "dot stopped" : attention ? "dot error" : "dot";
+  const dotCls = !state.loaded || state.connectionLost ? "dot stopped" : "dot";
   if (dot.className !== dotCls) dot.className = dotCls;
-  const chipTitle = !state.loaded ? "正在连接服务器" : attention ? `${attention} 项需要处理` : "服务器运行正常";
-  $("server-chip").setAttribute("title", chipTitle);
+  $("server-chip").setAttribute("title", !state.loaded ? "正在连接服务器" : state.connectionLost ? "与服务器的连接中断" : "已连接服务器");
+  renderBell();
 
   const page = currentPage();
   const nav = el("div");
@@ -552,21 +596,298 @@ function buildHome(page) {
   if (state.apps.length === 0) { buildStart(page, true); return; }
   const running = state.apps.filter((a) => deriveStatus(a) === "running").length;
   const items = attentionItems();
-  const summary = [`${state.apps.length} 个应用`, `${running} 个运行中`];
-  if (items.length) summary.push(`${items.length} 项需要处理`);
+  const sub = el("p", { class: "sub" }, text(`${state.apps.length} 个应用 · ${running} 个运行中`));
+  // 需要处理的问题在顶栏铃铛里；这里的数字点一下也能打开铃铛面板
+  if (items.length) sub.append(text(" · "), el("button", { type: "button", class: "sub-alert", onclick: (e) => { e.stopPropagation(); openNotify(); } }, text(`${items.length} 项需要处理`)));
   page.append(el("div", { class: "page-head", dataset: { region: "head" } }, [
-    el("div", {}, [el("h1", { text: "我的应用" }), el("p", { class: "sub", text: summary.join(" · ") })]),
+    el("div", {}, [el("h1", { text: "我的应用" }), sub]),
     linkButton("新建应用", "btn primary knob", "#/new"),
   ]));
-  if (items.length) page.append(attentionStrip(items));
-  const grid = el("div", { class: "apps", dataset: { region: "apps" } });
-  for (const a of state.apps) grid.append(appCard(a));
-  grid.append(el("a", { class: "add-card", href: "#/new", "aria-label": "部署新应用" }, [
-    el("b", { text: "＋ 部署新应用" }),
-    el("span", { class: "faint", text: "让 AI 部署你的项目，或用命令行部署目录、Git 仓库、镜像。" }),
-  ]));
-  page.append(grid);
+  // 应用少时保持原样：卡片网格加“部署新应用”卡片；多了才出现工具栏、列表视图和翻页。
+  const tools = state.apps.length >= HOME_TOOLS_MIN;
+  const view = tools ? state.homeView : "grid";
+  const list = tools ? homeFilteredApps() : state.apps;
+  if (tools) page.append(homeToolbar(view));
+  const size = HOME_PAGE_SIZE[view];
+  const pages = tools ? Math.max(1, Math.ceil(list.length / size)) : 1;
+  if (state.homePage > pages) state.homePage = pages;
+  const shown = tools ? list.slice((state.homePage - 1) * size, state.homePage * size) : list;
+  if (!list.length) {
+    page.append(el("div", { class: "home-empty", dataset: { region: "empty" } }, [
+      el("span", { text: state.homeQuery ? `没有匹配「${state.homeQuery}」的应用` : "这个筛选下没有应用" }),
+      button("清除筛选", "btn sm", () => { state.homeQuery = ""; state.homeFilter = "all"; state.homePage = 1; render(); }, "清除搜索和筛选"),
+    ]));
+  } else if (view === "list") {
+    page.append(appList(shown));
+  } else {
+    const grid = el("div", { class: "apps", dataset: { region: "apps" } });
+    for (const a of shown) grid.append(appCard(a));
+    if (!tools) grid.append(el("a", { class: "add-card", href: "#/new", "aria-label": "部署新应用" }, [
+      el("b", { text: "＋ 部署新应用" }),
+      el("span", { class: "faint", text: "让 AI 部署你的项目，或用命令行部署目录、Git 仓库、镜像。" }),
+    ]));
+    page.append(grid);
+  }
+  if (tools && list.length) page.append(homePager(list.length, pages, size));
   page.append(ambientLine());
+  page.append(el("div", { class: "home-decor", "aria-hidden": "true", dataset: { region: "decor" } }));
+}
+
+// ---------------------------------------------------------------------------
+// 多应用首页：搜索、状态筛选、排序、卡片/列表视图、翻页。全部在浏览器里完成，不改接口。
+// ---------------------------------------------------------------------------
+
+const HOME_FILTERS = [["all", "全部"], ["running", "运行中"], ["stopped", "已停止"], ["deploying", "部署中"], ["attention", "需处理"]];
+const HOME_SORTS = [["attn", "需处理优先"], ["recent", "最近部署"], ["name", "名称"], ["mem", "内存从高到低"]];
+const HOME_RANK = { failed: 0, crashed: 0, deploying: 1, running: 2, stopped: 3 };
+
+function loadHomeView() {
+  try {
+    const v = localStorage.getItem("af-home-view");
+    if (v === "grid" || v === "list") return v;
+  } catch (_) { /* 无痕模式等读不到时用默认 */ }
+  // 手机宽度第一次打开默认列表，一屏能看到更多应用
+  return typeof window !== "undefined" && window.matchMedia && window.matchMedia("(max-width: 760px)").matches ? "list" : "grid";
+}
+
+function homeFilterKey(a) {
+  const st = deriveStatus(a);
+  return st === "failed" || st === "crashed" ? "attention" : st;
+}
+
+function lastChange(a) {
+  const d = a.latest || a.live;
+  return d ? Date.parse(d.updated_at || d.created_at) || 0 : 0;
+}
+
+function homeFilteredApps() {
+  const q = state.homeQuery.trim().toLowerCase();
+  const list = state.apps.filter((a) =>
+    (state.homeFilter === "all" || homeFilterKey(a) === state.homeFilter) &&
+    (!q || a.name.toLowerCase().includes(q) || String(a.public_port || "").includes(q)));
+  const by = {
+    attn: (a, b) => HOME_RANK[deriveStatus(a)] - HOME_RANK[deriveStatus(b)] || lastChange(b) - lastChange(a),
+    recent: (a, b) => lastChange(b) - lastChange(a),
+    name: (a, b) => a.name.localeCompare(b.name),
+    mem: (a, b) => (b.memory_mb || 0) - (a.memory_mb || 0) || a.name.localeCompare(b.name),
+  }[state.homeSort] || (() => 0);
+  return list.sort(by);
+}
+
+function viewIcon(kind) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  const shapes = kind === "grid"
+    ? [["rect", { x: "2.5", y: "2.5", width: "4.5", height: "4.5", rx: "1.2" }], ["rect", { x: "9", y: "2.5", width: "4.5", height: "4.5", rx: "1.2" }], ["rect", { x: "2.5", y: "9", width: "4.5", height: "4.5", rx: "1.2" }], ["rect", { x: "9", y: "9", width: "4.5", height: "4.5", rx: "1.2" }]]
+    : [["path", { d: "M3 4h10M3 8h10M3 12h10" }]];
+  for (const [tag, attrs] of shapes) {
+    const n = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    n.setAttribute("fill", "none"); n.setAttribute("stroke", "currentColor"); n.setAttribute("stroke-width", "1.4"); n.setAttribute("stroke-linecap", "round");
+    svg.append(n);
+  }
+  return svg;
+}
+
+function homeToolbar(view) {
+  // 搜索框的值用属性（property）设置而不写进 HTML 属性：patch 只比较 HTML 属性，
+  // 这样输入时搜索框节点保持不变，光标和输入法都不受重绘影响。
+  const input = el("input", { type: "search", class: "home-search", placeholder: "搜索应用名或端口", "aria-label": "搜索应用", autocomplete: "off" });
+  input.value = state.homeQuery;
+  input.addEventListener("input", () => { state.homeQuery = input.value; state.homePage = 1; render(); });
+  const counts = { all: state.apps.length };
+  for (const a of state.apps) { const k = homeFilterKey(a); counts[k] = (counts[k] || 0) + 1; }
+  const chips = el("div", { class: "home-chips", role: "group", "aria-label": "按状态筛选" }, HOME_FILTERS.map(([k, label]) =>
+    el("button", {
+      type: "button", class: "chip" + (k === "attention" ? " warn" : ""), "aria-pressed": state.homeFilter === k ? "true" : "false",
+      onclick: () => { state.homeFilter = k; state.homePage = 1; render(); },
+    }, [text(label), el("b", { text: String(counts[k] || 0) })])));
+  const sort = el("select", { class: "home-sort", "aria-label": "排序" }, HOME_SORTS.map(([k, label]) => el("option", { value: k, text: label })));
+  sort.value = state.homeSort;
+  sort.addEventListener("change", () => { state.homeSort = sort.value; state.homePage = 1; render(); });
+  const setView = (v) => () => {
+    state.homeView = v; state.homePage = 1;
+    try { localStorage.setItem("af-home-view", v); } catch (_) { /* 记不住也能用 */ }
+    render();
+  };
+  const views = el("div", { class: "view-seg", role: "group", "aria-label": "视图" }, [
+    el("button", { type: "button", "aria-label": "卡片视图", "aria-pressed": view === "grid" ? "true" : "false", onclick: setView("grid") }, viewIcon("grid")),
+    el("button", { type: "button", "aria-label": "列表视图", "aria-pressed": view === "list" ? "true" : "false", onclick: setView("list") }, viewIcon("list")),
+  ]);
+  return el("div", { class: "home-tools", dataset: { region: "tools" } }, [
+    el("label", { class: "home-search-wrap" }, [el("span", { class: "sr-only", text: "搜索应用" }), input]),
+    chips, sort, views,
+  ]);
+}
+
+function appList(apps) {
+  const box = el("div", { class: "app-list", role: "list", dataset: { region: "app-list" } });
+  box.append(el("div", { class: "app-row head", "aria-hidden": "true" }, ["", "应用", "状态", "访问地址", "内存上限", "运行"].map((t) => el("span", { text: t }))));
+  for (const a of apps) {
+    const st = deriveStatus(a);
+    const live = isRunning(a) && st !== "stopped";
+    const on = a.desired !== "stopped";
+    box.append(el("div", { class: "app-row", role: "listitem", dataset: { region: "row:" + a.name } }, [
+      appIcon(a.name),
+      el("div", { class: "app-title" }, [
+        el("a", { class: "app-name", href: appHash(a.name), text: a.name }),
+        el("span", { class: "app-sub", text: appSubLine(a) }),
+      ]),
+      el("span", { class: "cell-status" }, statusBadge(st)),
+      a.url && live
+        ? el("a", { class: "cell-url mono", href: a.url, target: "_blank", rel: "noopener", text: a.url.replace(/^https?:\/\//, "") })
+        : el("span", { class: "cell-url mono off", text: a.url ? "未运行" : "—" }),
+      el("span", { class: "cell-mem mono", text: mbText(a.memory_mb > 0 ? a.memory_mb : 256) }),
+      switchNode(on, a.name + " 运行开关", () => toggleRun(a.name, on), { sm: true, disabled: st === "deploying" || !!state.busy[a.name] }),
+    ]));
+  }
+  return box;
+}
+
+// pageList 页数多时折叠成“1 … 4 5 6 … 12”。
+function pageList(page, pages) {
+  if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1);
+  const out = [1];
+  const from = Math.max(2, page - 1), to = Math.min(pages - 1, page + 1);
+  if (from > 2) out.push("…");
+  for (let i = from; i <= to; i++) out.push(i);
+  if (to < pages - 1) out.push("…");
+  out.push(pages);
+  return out;
+}
+
+function homePager(total, pages, size) {
+  const page = state.homePage;
+  const nav = el("nav", { class: "pager", "aria-label": "翻页", dataset: { region: "pager" } });
+  if (pages <= 1) { nav.append(el("span", { class: "pager-info", text: `共 ${total} 个` })); return nav; }
+  const go = (p) => () => {
+    state.homePage = p;
+    render();
+    const top = document.querySelector(".home-tools");
+    if (top) window.scrollTo({ top: Math.max(0, top.getBoundingClientRect().top + window.scrollY - 64), behavior: reducedMotion() ? "auto" : "smooth" });
+  };
+  const from = (page - 1) * size + 1, to = Math.min(page * size, total);
+  const btns = el("div", { class: "pager-btns" });
+  btns.append(el("button", { type: "button", class: "pg", "aria-label": "上一页", disabled: page === 1, onclick: go(page - 1) }, el("span", { "aria-hidden": "true", text: "‹" })));
+  for (const p of pageList(page, pages)) {
+    if (p === "…") { btns.append(el("span", { class: "pg gap", "aria-hidden": "true", text: "…" })); continue; }
+    btns.append(el("button", { type: "button", class: "pg", "aria-label": `第 ${p} 页`, "aria-current": p === page ? "page" : false, onclick: go(p) }, text(String(p))));
+  }
+  btns.append(el("button", { type: "button", class: "pg", "aria-label": "下一页", disabled: page === pages, onclick: go(page + 1) }, el("span", { "aria-hidden": "true", text: "›" })));
+  nav.append(el("span", { class: "pager-info", text: `第 ${from}–${to} 个，共 ${total} 个` }), btns);
+  return nav;
+}
+
+// ---------------------------------------------------------------------------
+// 铃铛：需要处理的问题。顶栏铃铛显示数量，点开是问题面板；出现没提醒过的新问题时
+// 铃铛轻晃一下，右上角弹出小卡片 6 秒。“提醒过”记在浏览器里，下次打开不再弹。
+// ---------------------------------------------------------------------------
+
+const SEEN_KEY = "af-seen-alerts";
+let popTimer = null;
+
+function alertKey(it) { return [it.app, it.deploymentID || "", (it.diag && it.diag.code) || ""].join("|"); }
+
+function loadSeen() {
+  try { return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || "[]")); } catch (_) { return new Set(); }
+}
+
+function saveSeen(set) {
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(Array.from(set).slice(-100))); } catch (_) { /* 记不住就每次都提醒 */ }
+}
+
+function renderBell() {
+  const n = state.loaded ? attentionItems().length : 0;
+  const count = $("bell-count");
+  const label = n ? `需要处理 ${n} 项` : "需要处理：没有问题";
+  if (count.textContent !== String(n)) count.textContent = String(n);
+  count.hidden = n === 0;
+  if ($("bell").getAttribute("aria-label") !== label) $("bell").setAttribute("aria-label", label);
+  if (layerOpen($("notify"))) swapChildren($("notify"), notifyContent());
+}
+
+function alertItemNode(it, onAct) {
+  const forAI = copyForAI(it.diag, it.app, it.deploymentID);
+  return el("div", { class: "notify-item" }, [
+    appIcon(it.app),
+    el("div", { class: "notify-text" }, [
+      el("b", { text: it.title }),
+      el("span", { text: it.why }),
+      el("div", { class: "row" }, [
+        linkButton("查看", "btn sm", appHash(it.app), { "aria-label": "查看 " + it.app, onclick: onAct }),
+        button("复制给 AI", "btn sm", () => { copyToClipboard(forAI, "已复制，粘贴给你的 AI 即可"); if (onAct) onAct(); }, "复制 " + it.app + " 的诊断给 AI"),
+      ]),
+    ]),
+  ]);
+}
+
+function notifyContent() {
+  const items = attentionItems();
+  const frag = document.createDocumentFragment();
+  const head = el("div", { class: "notify-head" }, [el("b", { text: items.length ? `需要处理 · ${items.length}` : "需要处理" })]);
+  if (items.length) {
+    const all = items.map((it) => copyForAI(it.diag, it.app, it.deploymentID)).join("\n\n");
+    head.append(button("全部复制给 AI", "btn ghost sm", () => copyToClipboard(all, "已复制，粘贴给你的 AI 即可"), "把全部问题复制给 AI"));
+  }
+  frag.append(head);
+  if (!items.length) {
+    frag.append(el("div", { class: "notify-empty" }, [el("span", { class: "dot", "aria-hidden": "true" }), text("一切正常，没有需要处理的事")]));
+    return frag;
+  }
+  const list = el("div", { class: "notify-list" });
+  for (const it of items) list.append(alertItemNode(it, closeNotify));
+  frag.append(list, el("p", { class: "notify-foot faint", text: "部署失败不影响旧版本继续服务。" }));
+  return frag;
+}
+
+function openNotify() {
+  hidePop();
+  const panel = $("notify");
+  swapChildren(panel, notifyContent());
+  showLayer(panel);
+  $("bell").setAttribute("aria-expanded", "true");
+  $("bell").classList.add("open");
+  // 打开面板就算看过了，之后不再弹卡片
+  const seen = loadSeen();
+  for (const it of attentionItems()) seen.add(alertKey(it));
+  saveSeen(seen);
+}
+
+function closeNotify() {
+  hideLayer($("notify"));
+  $("bell").setAttribute("aria-expanded", "false");
+  $("bell").classList.remove("open");
+}
+
+function toggleNotify() { if (layerOpen($("notify"))) closeNotify(); else openNotify(); }
+
+function hidePop() {
+  clearTimeout(popTimer);
+  hideLayer($("notify-pop"));
+}
+
+// checkNewAlerts 在每轮数据刷新后调用：有没提醒过的问题就晃铃铛、弹卡片。
+function checkNewAlerts() {
+  if (!state.loaded || layerOpen($("notify"))) return;
+  const seen = loadSeen();
+  const fresh = attentionItems().filter((it) => !seen.has(alertKey(it)));
+  if (!fresh.length) return;
+  for (const it of fresh) seen.add(alertKey(it));
+  saveSeen(seen);
+  const icon = $("bell").querySelector("svg");
+  icon.classList.remove("ring");
+  void icon.getBoundingClientRect();
+  icon.classList.add("ring");
+  const pop = $("notify-pop");
+  clear(pop);
+  pop.append(alertItemNode(fresh[0], hidePop));
+  if (fresh.length > 1) pop.append(el("button", { type: "button", class: "notify-more", onclick: (e) => { e.stopPropagation(); openNotify(); } }, text(`还有 ${fresh.length - 1} 个新问题 ›`)));
+  pop.append(button("×", "notify-close", hidePop, "关闭提醒"));
+  showLayer(pop);
+  clearTimeout(popTimer);
+  popTimer = setTimeout(hidePop, 6000);
 }
 
 // attentionItems：最多三条，依次为部署失败、未在运行、域名证书失败。
@@ -597,22 +918,6 @@ function stageName(stage) {
   return i == null ? "部署" : STEPS[i];
 }
 
-function attentionStrip(items) {
-  const box = el("section", { class: "attention", "aria-label": "需要处理", dataset: { region: "attention" } });
-  for (const it of items) {
-    const forAI = copyForAI(it.diag, it.app, it.deploymentID);
-    box.append(el("div", { class: "attention-item" }, [
-      badge("error", "需要处理"),
-      el("div", { class: "what" }, [el("b", { text: it.title }), el("span", { class: "why", text: it.why })]),
-      el("div", { class: "row" }, [
-        linkButton("查看", "btn sm", appHash(it.app), { "aria-label": "查看 " + it.app }),
-        button("复制给 AI", "btn sm primary", () => copyToClipboard(forAI, "已复制，粘贴给你的 AI 即可"), "复制 " + it.app + " 的诊断给 AI"),
-      ]),
-    ]));
-  }
-  return box;
-}
-
 function appHash(name, tab) {
   return "#/app/" + encodeURIComponent(name) + (tab && tab !== "overview" ? "/" + tab : "");
 }
@@ -632,7 +937,7 @@ function appCard(a) {
   const latest = a.latest;
   const art = el("article", { class: "app-card", dataset: { region: "app:" + a.name } });
   art.append(el("div", { class: "app-top" }, [
-    el("span", { class: "app-icon", "aria-hidden": "true", text: firstChar(a.name) }),
+    appIcon(a.name),
     el("div", { class: "app-title" }, [
       el("a", { class: "app-name", href: appHash(a.name), text: a.name }),
       el("span", { class: "app-sub", text: appSubLine(a) }),
@@ -666,17 +971,25 @@ function urlRow(url, live, name) {
   ]);
 }
 
+// ambientLine：首页底部的服务器入口，点开是“服务器”页。CPU、内存、磁盘到 80%
+// （与服务器页指标条变黄的阈值一致）时黄点并带出那几项，正常时只显示“服务器信息”。
 function ambientLine() {
-  const parts = [];
-  if (state.server) parts.push("服务器 " + state.server);
   const h = state.host;
-  if (h && h.available !== false) {
-    if (typeof h.cpu_percent === "number") parts.push(`CPU ${Math.round(h.cpu_percent)}%`);
-    if (h.memory_total) parts.push(`内存 ${pct(h.memory_used, h.memory_total)}%`);
-    if (h.disk_total) parts.push(`磁盘 ${pct(h.disk_used, h.disk_total)}%`);
+  const ok = h && h.available !== false;
+  const unavailable = h && h.available === false; // 还没取到主机数据时按正常显示，不闪灰点
+  const hot = [];
+  if (ok) {
+    if (typeof h.cpu_percent === "number" && h.cpu_percent >= 80) hot.push(`CPU ${Math.round(h.cpu_percent)}%`);
+    if (h.memory_total && pct(h.memory_used, h.memory_total) >= 80) hot.push(`内存 ${pct(h.memory_used, h.memory_total)}%`);
+    if (h.disk_total && pct(h.disk_used, h.disk_total) >= 80) hot.push(`磁盘 ${pct(h.disk_used, h.disk_total)}%`);
   }
-  parts.push("应用端口 18810–18899");
-  return el("p", { class: "faint", dataset: { region: "ambient" }, text: parts.join(" · ") });
+  const dot = unavailable ? "dot stopped" : hot.length ? "dot warning" : "dot";
+  const label = ["服务器信息", ...hot].join(" · ");
+  return el("a", { class: "server-pill", href: "#/server", "aria-label": "查看" + label, dataset: { region: "ambient" } }, [
+    el("span", { class: dot, "aria-hidden": "true" }),
+    el("span", { text: label }),
+    el("span", { class: "chev", "aria-hidden": "true", text: "›" }),
+  ]);
 }
 
 // buildStart：没有应用时的首页，也是“新建应用”页。
@@ -727,7 +1040,7 @@ function buildStore(page) {
   for (const [name, desc] of STORE_PREVIEW) {
     grid.append(el("article", { class: "store-card" }, [
       el("div", { class: "app-top" }, [
-        el("span", { class: "app-icon", "aria-hidden": "true", text: firstChar(name) }),
+        appIcon(name),
         el("div", { class: "app-title" }, [el("span", { class: "app-name", text: name }), el("span", { class: "app-sub", text: "AI 助手 · 热门开源" })]),
       ]),
       el("p", { class: "desc", text: desc }),
@@ -751,7 +1064,8 @@ function buildServer(page) {
   const sub = [];
   if (ok && h.uptime_seconds) sub.push("已运行 " + uptimeText(h.uptime_seconds));
   if (ok && typeof h.load1 === "number") sub.push("负载 " + h.load1.toFixed(2));
-  sub.push("经 SSH 访问 · 控制台不对公网开放");
+  const vm = ok && h.source === "docker_vm";
+  sub.push(vm ? "本机运行 · 下面是 Docker 虚拟机的资源" : "经 SSH 访问 · 控制台不对公网开放");
   page.append(el("div", { class: "page-head", dataset: { region: "head" } }, [
     el("div", {}, [
       el("div", { class: "row" }, [el("h1", { text: state.server || "服务器" }), ok ? badge("running", "运行正常") : badge("stopped", "资源暂不可用")]),
@@ -762,11 +1076,12 @@ function buildServer(page) {
     const memoryPct = h.memory_total > 0 ? pct(h.memory_used, h.memory_total) : null;
     const diskPct = h.disk_total > 0 ? pct(h.disk_used, h.disk_total) : null;
     page.append(el("div", { class: "metric-tiles", "aria-label": "主机当前资源", dataset: { region: "tiles" } }, [
-      hostTile("CPU", typeof h.cpu_percent === "number" ? numberText(h.cpu_percent, "%") : "采样中", typeof h.cpu_percent === "number" ? h.cpu_percent : null, "最近几秒的平均值"),
-      hostTile("内存", memoryPct !== null ? memoryPct + "%" : "不可用", memoryPct, bytePair(h.memory_used, h.memory_total)),
-      hostTile("磁盘", diskPct !== null ? diskPct + "%" : "不可用", diskPct, diskPct !== null && diskPct >= 80 ? "已超过 80%，请清理或扩容" : bytePair(h.disk_used, h.disk_total)),
+      hostTile(vm ? "CPU（虚拟机）" : "CPU", typeof h.cpu_percent === "number" ? numberText(h.cpu_percent, "%") : "采样中", typeof h.cpu_percent === "number" ? h.cpu_percent : null, vm ? `应用容器合计 · 虚拟机 ${h.cpu_cores || "?"} 核` : "最近几秒的平均值"),
+      hostTile(vm ? "内存（虚拟机）" : "内存", memoryPct !== null ? memoryPct + "%" : "不可用", memoryPct, vm ? "应用容器合计 " + bytePair(h.memory_used, h.memory_total) : bytePair(h.memory_used, h.memory_total)),
+      vm && diskPct === null ? hostTile("磁盘", "—", null, "在 Docker 设置里查看虚拟机磁盘") : hostTile("磁盘", diskPct !== null ? diskPct + "%" : "不可用", diskPct, diskPct !== null && diskPct >= 80 ? "已超过 80%，请清理或扩容" : bytePair(h.disk_used, h.disk_total)),
     ]));
   }
+  page.append(hostLimitsCard());
   const rows = state.apps.map((a) => {
     const st = deriveStatus(a);
     return el("tr", {}, [
@@ -853,9 +1168,9 @@ function buildSettings(page) {
   page.append(el("div", { class: "footer-links", dataset: { region: "links" } }, [
     el("span", { text: "AcornFox · AGPL-3.0 开源" }),
     el("a", { href: "https://acornfox.com", target: "_blank", rel: "noopener", text: "官网" }),
-    el("a", { href: "https://github.com/OrbitMaker/AcornFox-rebuild", target: "_blank", rel: "noopener", text: "GitHub" }),
-    el("a", { href: "https://gitee.com/VIP13390/AcornFox-rebuild", target: "_blank", rel: "noopener", text: "Gitee" }),
-    el("a", { href: "https://github.com/OrbitMaker/AcornFox-rebuild/issues", target: "_blank", rel: "noopener", text: "问题反馈" }),
+    el("a", { href: "https://github.com/OrbitMaker/AcornFox", target: "_blank", rel: "noopener", text: "GitHub" }),
+    el("a", { href: "https://gitee.com/VIP13390/AcornFox", target: "_blank", rel: "noopener", text: "Gitee" }),
+    el("a", { href: "https://github.com/OrbitMaker/AcornFox/issues", target: "_blank", rel: "noopener", text: "问题反馈" }),
   ]));
 }
 
@@ -887,7 +1202,7 @@ function buildApp(page) {
     switchNode(on, a.name + " 运行开关", () => toggleRun(a.name, on), { disabled: st === "deploying" || !!state.busy[a.name] }),
   ]));
   page.append(el("div", { class: "detail-head", dataset: { region: "head" } }, [
-    el("span", { class: "app-icon lg", "aria-hidden": "true", text: firstChar(a.name) }),
+    appIcon(a.name, "lg"),
     el("div", { class: "title" }, [
       el("div", { class: "row" }, [el("h1", { text: a.name }), statusBadge(st, st === "failed" && oldVersionServing(a) ? "新版本部署失败" : null)]),
       el("span", { class: "muted", text: sub.filter(Boolean).join(" · ") }),
@@ -968,10 +1283,17 @@ function overviewTab(a) {
     if (d.status === "ready") urls.append(el("div", { class: "row" }, [urlRow("https://" + d.name, running, a.name), badge("running", "HTTPS 已生效")]));
   }
   urls.append(urlRow(a.url, running && a.desired !== "stopped", a.name));
+  if (a.lan_url) urls.append(el("div", { class: "row" }, [urlRow(a.lan_url, running && a.desired !== "stopped", a.name), el("span", { class: "faint", text: "局域网" })]));
+  const expoText = { local: "只本机能打开", lan: "本机和局域网能打开", public: "所有网卡和域名", afx_cloud: "经 AFX 云" }[a.exposure];
+  if (expoText) urls.append(el("p", { class: "faint", text: "暴露方式：" + expoText + "（acornfox app set --app " + a.name + " --expose local|lan|public）" }));
   left.append(card([cardHead("访问地址"), urls], "", "urls"));
 
   left.append(card([
-    cardHead("资源", el("span", { class: "faint", text: `上限 ${a.memory_mb} MB 内存 · ${(a.cpu_milli / 1000).toFixed(1)} 核` })),
+    cardHead("资源", el("span", { class: "row" }, [
+      el("span", { class: "faint", text: `上限 ${a.memory_mb} MB 内存 · ${(a.cpu_milli / 1000).toFixed(1)} 核` }),
+      // 跳到“配置”标签并把资源上限卡片滚到视口中间（onRoute 里处理）
+      linkButton("调整上限 →", "btn ghost sm", appHash(a.name, "config"), { onclick: () => { state.focusLimits = true; } }),
+    ])),
     running ? appMetricsPanel(a) : el("p", { class: "muted", text: "应用未运行，没有资源数据。" }),
   ], "", "resources"));
 
@@ -1069,15 +1391,254 @@ function configTab(a) {
     el("dt", { text: "容器端口" }), el("dd", { class: "mono", text: String(a.port || 0) }),
     el("dt", { text: "访问端口" }), el("dd", { class: "mono", text: a.public_port ? String(a.public_port) : "—" }),
     el("dt", { text: "健康检查" }), el("dd", { class: "mono", text: a.health_path || "/" }),
-    el("dt", { text: "内存上限" }), el("dd", { class: "mono", text: a.memory_mb + " MB" }),
-    el("dt", { text: "CPU 上限" }), el("dd", { class: "mono", text: (a.cpu_milli / 1000).toFixed(1) + " 核" }),
   ])], "", "params"));
+  frag.append(appLimitsCard(a));
   frag.append(card([
     cardHead("怎么修改"),
-    el("p", { class: "muted", text: "此处只读。在 AI 工作台里说明要改什么，或在你的电脑上运行下面的命令，改完点“重新部署”生效。密钥值不会显示或返回。" }),
+    el("p", { class: "muted", text: "内存和 CPU 上限在上面直接拖动修改。其余配置在 AI 工作台里说明要改什么，或在你的电脑上运行下面的命令，改完点“重新部署”生效。密钥值不会显示或返回。" }),
     copyBlock(`acornfox env set KEY=VALUE --app ${a.name}\nacornfox env set KEY=VALUE --secret --app ${a.name}\nacornfox volume add /容器内目录 --app ${a.name}`, "命令已复制", "复制配置命令", true),
   ], "stack", "how"));
   return frag;
+}
+
+// ---------------------------------------------------------------------------
+// 资源上限：应用的内存、CPU 上限拖动修改，立即生效不重启；服务器页设置整机
+// 最多分配给应用的内存和 CPU。内存严格不超分，CPU 只限单个应用。规则以服务端为准，
+// 这里只把滑块范围限制在服务端会接受的区间。
+// ---------------------------------------------------------------------------
+
+function needsResources() {
+  const r = state.route;
+  return r.page === "server" || (r.page === "app" && state.detailTab === "config");
+}
+
+let resourcesGen = 0;
+
+async function loadResources(rerender) {
+  const gen = ++resourcesGen;
+  try {
+    const body = await api.get("/v1/resources");
+    if (gen !== resourcesGen) return; // 同 detailGen：晚到的旧结果不覆盖新的
+    state.resources = body;
+    if (rerender) render();
+  } catch (e) { if (rerender) handleError(e); }
+}
+
+function mbText(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : Math.round(mb) + " MB"; }
+function coreText(milli) { return (milli / 1000).toFixed(1) + " 核"; }
+function roundUp(v, step) { return Math.ceil(v / step) * step; }
+
+// limitSlider 是一行“名称 + 当前值 + 滑块 + 两端说明”。onInput 只更新草稿和这一行的文字，
+// 不触发整页重绘，拖动才不会被打断。log 为真时用对数刻度：内存范围可能从 256 MB 到几十 GB，
+// 均匀刻度下常用的几百 MB 挤在最左边拖不准。
+function limitSlider(o) {
+  const max = Math.max(o.min, o.max);
+  const useLog = o.log && max > o.min * 4;
+  const toValue = (p) => useLog
+    ? Math.min(max, Math.max(o.min, Math.round(o.min * Math.pow(max / o.min, p / 1000) / o.step) * o.step))
+    : p;
+  const toPos = (v) => useLog ? Math.round(1000 * Math.log(v / o.min) / Math.log(max / o.min)) : v;
+  const value = el("span", { class: "limit-value mono", text: o.format(o.value) });
+  const input = el("input", useLog
+    ? { type: "range", min: "0", max: "1000", step: "1", value: String(toPos(o.value)), "aria-label": o.label, "aria-valuetext": o.format(o.value) }
+    : { type: "range", min: String(o.min), max: String(max), step: String(o.step), value: String(o.value), "aria-label": o.label, "aria-valuetext": o.format(o.value) });
+  input.addEventListener("input", () => {
+    const v = toValue(Number(input.value));
+    value.textContent = o.format(v);
+    input.setAttribute("aria-valuetext", o.format(v));
+    o.onInput(v, input);
+  });
+  return el("div", { class: "limit-row" }, [
+    el("div", { class: "limit-top" }, [el("span", { text: o.label }), value]),
+    input,
+    el("div", { class: "limit-ends faint" }, [el("span", { text: o.left }), el("span", { text: o.right })]),
+  ]);
+}
+
+// startDraft 在第一次拖动时建草稿、标记卡片正在编辑，并显示保存/取消。
+function startDraft(key, base, cardNode) {
+  if (!state.limitDraft || state.limitDraft.key !== key) state.limitDraft = Object.assign({ key }, base);
+  cardNode.dataset.editing = "1";
+  const actions = cardNode.querySelector(".limit-actions");
+  if (actions) actions.hidden = false;
+}
+
+function endDraft(cardNode) {
+  state.limitDraft = null;
+  if (cardNode) delete cardNode.dataset.editing;
+}
+
+function appLimitsCard(a) {
+  const key = "app:" + a.name;
+  const res = state.resources;
+  const draft = state.limitDraft && state.limitDraft.key === key ? state.limitDraft : null;
+  const memNow = a.memory_mb > 0 ? a.memory_mb : 256;
+  const cpuNow = a.cpu_milli > 0 ? a.cpu_milli : 1000;
+  const minMem = (res && res.min_app_memory_mb) || 256;
+  const minCPU = (res && res.min_app_cpu_milli) || 500;
+  const node = card([], "stack", "limits:" + a.name);
+  node.dataset.atomic = "1";
+  node.append(cardHead("资源上限", el("span", { class: "faint", text: "保存后立即生效，应用不重启" })));
+  if (!res) { node.append(el("p", { class: "muted", text: "正在读取整机分配情况…" })); return node; }
+
+  // 内存最多 = 整机上限 − 其他容器已分配；没有上限时沿用旧的 16 GB。
+  const memCap = res.memory.cap_mb > 0 ? res.memory.cap_mb : 16384;
+  const memMax = Math.max(memNow, Math.floor((res.memory.cap_mb > 0 ? memCap - res.memory.allocated_mb + memNow : memCap) / 64) * 64);
+  const usage = state.appMetrics && Number.isFinite(state.appMetrics.memory_usage_mb) && state.appMetrics.memory_usage_mb > 0 ? state.appMetrics.memory_usage_mb : null;
+  // 运行中的应用不能调到当前用量以下（服务端留 32 MB 余量）
+  const memMin = usage ? Math.min(memNow, Math.max(minMem, roundUp(usage + 32, 64))) : minMem;
+  const cpuMax = Math.max(cpuNow, res.cpu.cap_milli > 0 ? res.cpu.cap_milli : 16000);
+  const mem = draft ? draft.memory : memNow;
+  const cpu = draft ? draft.cpu : cpuNow;
+  const hint = el("span", { class: "faint", text: "" });
+  const onInput = (field) => (v) => {
+    startDraft(key, { memory: memNow, cpu: cpuNow }, node);
+    state.limitDraft[field] = v;
+    hint.textContent = state.limitDraft.memory > memNow ? `整机内存还剩 ${mbText(memMax - state.limitDraft.memory)} 可分配` : "";
+  };
+  node.append(limitSlider({
+    label: "内存", value: mem, min: memMin, max: memMax, step: 64, log: true, format: mbText, onInput: onInput("memory"),
+    left: usage ? `最少 ${mbText(memMin)} · 现在用了 ${mbText(usage)}` : `最少 ${mbText(memMin)}`,
+    right: `最多 ${mbText(memMax)}`,
+  }));
+  node.append(limitSlider({
+    label: "CPU", value: cpu, min: minCPU, max: cpuMax, step: 100, format: coreText, onInput: onInput("cpu"),
+    left: `最少 ${coreText(minCPU)}`, right: `最多 ${coreText(cpuMax)}`,
+  }));
+  const actions = el("div", { class: "limit-actions", hidden: draft ? false : true }, [
+    hint,
+    el("span", { class: "grow" }),
+    button("取消", "btn", () => { endDraft(node); render(); }, "取消修改资源上限"),
+    button("保存", "btn primary", () => saveAppLimits(a.name, node), "保存资源上限"),
+  ]);
+  if (draft) node.dataset.editing = "1";
+  node.append(actions);
+  return node;
+}
+
+async function saveAppLimits(name, node) {
+  const d = state.limitDraft;
+  if (!d || state.busy["limits:" + name]) return;
+  state.busy["limits:" + name] = true;
+  try {
+    const body = await api.send("PATCH", appPath(name), { memory_mb: d.memory, cpu_milli: d.cpu });
+    // 先用返回的新值更新页面再清草稿，并让保存前发出的详情请求作废，免得闪回旧值
+    if (body.app && state.openApp === name) { detailGen++; state.detail = Object.assign({}, state.detail, body.app); }
+    endDraft(node);
+    if (body.applied_now) toast("已保存，立即生效，应用没有重启");
+    else if (body.apply_error) toast(body.apply_error);
+    else toast("已保存，下次部署时生效");
+    await Promise.all([loadDetail(name), loadResources(false)]);
+  } catch (e) {
+    handleError(e);
+  } finally {
+    delete state.busy["limits:" + name];
+    render();
+  }
+}
+
+const ALLOC_COLORS = ["var(--brand)", "var(--alloc-2)", "var(--alloc-3)", "var(--alloc-4)"];
+
+function hostLimitsCard() {
+  const res = state.resources;
+  const node = card([], "stack", "host-limits");
+  node.dataset.atomic = "1";
+  node.append(cardHead("分配给应用的资源", el("span", { class: "faint", text: "内存加起来不能超过上限；CPU 只限制单个应用" })));
+  if (!res) { node.append(el("p", { class: "muted", text: "正在读取…" })); return node; }
+  const m = res.memory, c = res.cpu;
+  if (!(m.host_mb > 0)) {
+    node.append(el("p", { class: "muted", text: `已分配内存 ${mbText(m.allocated_mb)}。读不到整机内存，暂时不能设置上限。` }));
+    return node;
+  }
+  const draft = state.limitDraft && state.limitDraft.key === "host" ? state.limitDraft : null;
+  const capMem = draft ? draft.memory : m.cap_mb;
+  const capCPU = draft ? draft.cpu : c.cap_milli;
+
+  // 条形图：每个应用和数据库一段，后面是还可分配、留给系统和其他程序。
+  const bar = el("div", { class: "alloc-bar", role: "img" });
+  const legend = el("div", { class: "alloc-legend" });
+  const width = (mb) => Math.max(0, mb / m.host_mb * 100).toFixed(2) + "%";
+  const appColor = {};
+  res.items.forEach((it) => {
+    if (!(it.app in appColor)) appColor[it.app] = ALLOC_COLORS[Object.keys(appColor).length % ALLOC_COLORS.length];
+    const label = it.kind === "app" ? it.app : `${it.app} · ${ADDON_NAMES[it.kind] || it.kind}`;
+    const seg = el("span", { class: "seg" + (it.kind === "app" ? "" : " addon"), title: `${label}：${mbText(it.memory_mb)}` });
+    seg.style.width = width(it.memory_mb);
+    seg.style.background = appColor[it.app];
+    bar.append(seg);
+  });
+  const free = el("span", { class: "seg free", title: "还可分配" });
+  const freeMB = Math.max(0, capMem - m.allocated_mb);
+  free.style.width = width(freeMB);
+  bar.append(free);
+  const reserved = el("span", { class: "seg reserved", title: "留给系统和其他程序" });
+  reserved.style.width = width(Math.max(0, m.host_mb - Math.max(capMem, m.allocated_mb)));
+  bar.append(reserved);
+  bar.setAttribute("aria-label", `内存已分配 ${mbText(m.allocated_mb)}，上限 ${mbText(capMem)}，整机 ${mbText(m.host_mb)}`);
+  for (const app of Object.keys(appColor)) {
+    const mb = res.items.filter((it) => it.app === app).reduce((sum, it) => sum + it.memory_mb, 0);
+    const sw = el("i", { "aria-hidden": "true" });
+    sw.style.background = appColor[app];
+    legend.append(el("span", {}, [sw, text(`${app} ${mbText(mb)}`)]));
+  }
+  legend.append(el("span", {}, [el("i", { class: "free", "aria-hidden": "true" }), text(`还可分配 ${mbText(freeMB)}`)]));
+  legend.append(el("span", {}, [el("i", { class: "reserved", "aria-hidden": "true" }), text("留给系统和其他程序")]));
+
+  const summary = el("span", { class: "faint", text: `已分配 ${mbText(m.allocated_mb)} / 上限 ${mbText(capMem)}${m.auto && !draft ? "（自动）" : ""} · 整机 ${mbText(m.host_mb)}` });
+  node.append(el("div", { class: "limit-top" }, [el("b", { text: "内存" }), summary]));
+  node.append(bar, legend);
+
+  const memMin = Math.max(res.min_app_memory_mb || 256, roundUp(m.allocated_mb, 256));
+  const memMax = Math.floor(m.host_mb / 256) * 256;
+  const onInput = (field) => (v) => {
+    startDraft("host", { memory: m.cap_mb, cpu: c.cap_milli }, node);
+    state.limitDraft[field] = v;
+    if (field === "memory") {
+      const f = Math.max(0, v - m.allocated_mb);
+      free.style.width = width(f);
+      reserved.style.width = width(Math.max(0, m.host_mb - Math.max(v, m.allocated_mb)));
+      summary.textContent = `已分配 ${mbText(m.allocated_mb)} / 上限 ${mbText(v)} · 整机 ${mbText(m.host_mb)}`;
+    }
+  };
+  node.append(limitSlider({
+    label: "最多分配给应用", value: capMem, min: memMin, max: memMax, step: 256, format: mbText, onInput: onInput("memory"),
+    left: `不能低于已分配的 ${mbText(m.allocated_mb)}`, right: `整机 ${mbText(m.host_mb)}`,
+  }));
+  if (c.host_milli > 0) {
+    node.append(limitSlider({
+      label: "单个应用 CPU 最多", value: capCPU, min: Math.max(res.min_app_cpu_milli || 500, roundUp(c.max_app_milli, 500)), max: c.host_milli, step: 500,
+      format: coreText, onInput: onInput("cpu"),
+      left: `不能低于已设的 ${coreText(c.max_app_milli)}`, right: `整机 ${coreText(c.host_milli)}${c.auto && !draft ? " · 自动" : ""}`,
+    }));
+  }
+  const autoBtn = !m.auto || !c.auto ? button("恢复自动", "btn ghost", () => saveHostLimits(node, { memory_mb: 0, cpu_milli: 0 }), "恢复自动上限") : null;
+  const actions = el("div", { class: "limit-actions", hidden: draft ? false : true }, [
+    el("span", { class: "faint", text: "自动：内存为整机减去留给系统的 1 GB 或 15%，CPU 为全部核心" }),
+    el("span", { class: "grow" }),
+    button("取消", "btn", () => { endDraft(node); render(); }, "取消修改整机上限"),
+    button("保存", "btn primary", () => saveHostLimits(node, { memory_mb: state.limitDraft.memory, cpu_milli: state.limitDraft.cpu }), "保存整机上限"),
+  ]);
+  if (draft) node.dataset.editing = "1";
+  node.append(actions);
+  if (autoBtn && !draft) node.append(el("div", { class: "row" }, [el("span", { class: "faint", text: "已手动设置上限。" }), autoBtn]));
+  return node;
+}
+
+async function saveHostLimits(node, body) {
+  if (state.busy.hostLimits) return;
+  state.busy.hostLimits = true;
+  try {
+    const updated = await api.send("PUT", "/v1/resources", body);
+    resourcesGen++; // 让保存前发出的读取作废
+    state.resources = updated;
+    endDraft(node);
+    toast(body.memory_mb === 0 && body.cpu_milli === 0 ? "已恢复自动上限" : "整机上限已保存");
+  } catch (e) {
+    handleError(e);
+  } finally {
+    delete state.busy.hostLimits;
+    render();
+  }
 }
 
 // addonsTab 是“数据库”标签。只渲染公开字段：连接地址、密码等凭据永远不进页面。
@@ -1247,6 +1808,7 @@ function onRoute() {
   const r = parseHash(location.hash);
   const prevApp = state.openApp;
   const prevTab = state.detailTab;
+  const prevPage = currentPage();
   state.route = r;
   if (r.page === "app") {
     if (r.app !== prevApp) {
@@ -1275,7 +1837,23 @@ function onRoute() {
     state.appMetrics = null;
     state.deployments = null;
   }
+  if (r.page !== "app" || r.app !== prevApp) state.limitDraft = null;
   render();
+  if (needsResources()) loadResources(true);
+  // 切换动效：同一应用内换标签，内容按标签先后从右或左滑入；换顶部导航页面时整页同样处理。
+  const tabIndex = (k) => APP_TABS.findIndex(([t]) => t === k);
+  const nextPage = currentPage();
+  if (r.page === "app" && r.app === prevApp && r.tab !== prevTab) {
+    playEnter($("page").querySelector('[role="tabpanel"]'), tabIndex(r.tab) > tabIndex(prevTab));
+  } else if (nextPage !== prevPage) {
+    const pageIndex = (id) => PAGES.findIndex(([p]) => p === id);
+    playEnter($("page"), pageIndex(nextPage) > pageIndex(prevPage));
+  }
+  if (state.focusLimits) {
+    state.focusLimits = false;
+    const limits = r.page === "app" && r.tab === "config" && $("page").querySelector('[data-region^="limits:"]');
+    if (limits) limits.scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" });
+  }
   const key = r.page + ":" + (r.app || "");
   if (key !== prevPageKey) window.scrollTo(0, 0);
   prevPageKey = key;
@@ -1283,17 +1861,74 @@ function onRoute() {
 
 let prevPageKey = "";
 
+function playEnter(node, forward) {
+  if (!node) return;
+  node.classList.remove("enter-r", "enter-l");
+  void node.offsetWidth; // 重新触发动画
+  node.classList.add(forward ? "enter-r" : "enter-l");
+  node.addEventListener("animationend", () => node.classList.remove("enter-r", "enter-l"), { once: true });
+}
+
+// 黑色滑块：顶部导航和应用详情标签共用。ctx 与上次相同时从旧位置滑到选中项；
+// 第一次出现、换了应用或窗口尺寸变化时直接就位。导航在手机宽度隐藏时不显示滑块。
+const sliders = new Map();
+
+function syncSliders() {
+  syncSlider("nav", $("nav"), "nav");
+  syncSlider("tabs", $("page").querySelector(".tabs"), state.openApp ? "app:" + state.openApp : null);
+}
+
+function syncSlider(key, container, ctx) {
+  let s = sliders.get(key);
+  if (!s) { s = { node: el("span", { class: "slider", "aria-hidden": "true" }), ctx: null }; sliders.set(key, s); }
+  const node = s.node;
+  const active = container && container.querySelector('[aria-selected="true"], [aria-current="page"]');
+  if (!active || !active.offsetWidth) { node.remove(); s.ctx = null; return; }
+  const animate = s.ctx === ctx;
+  if (node.parentNode !== container) {
+    // 换标签时整个标签栏会重建，横向滚动位置随滑块一起带到新的标签栏
+    container.prepend(node);
+    if (animate && s.scroll) container.scrollLeft = s.scroll;
+    container.addEventListener("scroll", () => { s.scroll = container.scrollLeft; }, { passive: true });
+  }
+  if (!animate) node.style.transition = "none";
+  void node.offsetWidth; // 以当前位置为过渡起点（节点可能刚移进新的容器）
+  const box = { left: active.offsetLeft, top: active.offsetTop, width: active.offsetWidth, height: active.offsetHeight };
+  const moved = node.style.left !== box.left + "px";
+  for (const [k, v] of Object.entries(box)) if (node.style[k] !== v + "px") node.style[k] = v + "px";
+  if (!animate) { void node.offsetWidth; node.style.transition = ""; }
+  // 手机宽度下标签栏可横向滚动：选中项变了或刚出现时，把它滚进可见范围（用户自己滑动时不打扰）
+  if ((moved || !animate) && container.scrollWidth > container.clientWidth) {
+    const left = box.left, right = box.left + box.width, viewL = container.scrollLeft, viewR = viewL + container.clientWidth;
+    if (left < viewL || right > viewR) {
+      s.scroll = Math.max(0, left - (container.clientWidth - box.width) / 2);
+      container.scrollTo({ left: s.scroll, behavior: animate && !reducedMotion() ? "smooth" : "auto" });
+    }
+  }
+  s.ctx = ctx;
+}
+
+function resetSliders() {
+  for (const s of sliders.values()) s.ctx = null;
+  syncSliders();
+}
+
 // ---------------------------------------------------------------------------
 // 交互
 // ---------------------------------------------------------------------------
 
+// detailGen 让后发的详情请求优先：保存设置后重新读取时，更早发出的轮询请求可能晚到，
+// 不能用它的旧数据覆盖。
+let detailGen = 0;
+
 async function loadDetail(name) {
+  const gen = ++detailGen;
   try {
     const [d, metrics] = await Promise.all([
       api.get(appPath(name)),
       api.get("/v1/metrics/apps/" + encodeURIComponent(name)).catch(() => ({ available: false, observed_state: "unavailable" })),
     ]);
-    if (state.openApp !== name) return;
+    if (state.openApp !== name || gen !== detailGen) return;
     state.detail = d;
     state.appMetrics = metrics;
     render();
@@ -1447,6 +2082,40 @@ async function logout() {
 let confirmAction = null;
 let lastFocus = null;
 
+// 弹窗开关动效：打开时先显示再加 is-open 触发过渡；关闭时换成 is-closing，
+// 等过渡结束再隐藏。时长与 app.css 一致；减少动态效果时立即隐藏。
+const LAYER_CLOSE_MS = 150;
+const layerTimers = new Map();
+
+function reducedMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function showLayer(...nodes) {
+  for (const n of nodes) {
+    clearTimeout(layerTimers.get(n));
+    n.classList.remove("is-closing");
+    n.hidden = false;
+  }
+  void nodes[0].offsetWidth; // 先让 hidden 的移除生效，过渡才有起点
+  for (const n of nodes) n.classList.add("is-open");
+}
+
+function hideLayer(...nodes) {
+  for (const n of nodes) {
+    if (!layerOpen(n)) continue;
+    n.classList.remove("is-open");
+    if (reducedMotion()) { n.hidden = true; continue; }
+    n.classList.add("is-closing");
+    layerTimers.set(n, setTimeout(() => { n.hidden = true; n.classList.remove("is-closing"); }, LAYER_CLOSE_MS));
+  }
+}
+
+// 正在关闭的弹窗算作已关闭，Esc 会落到下面一层。
+function layerOpen(n) {
+  return !n.hidden && !n.classList.contains("is-closing");
+}
+
 function showConfirm(o) {
   lastFocus = document.activeElement;
   $("confirm-title").textContent = o.title;
@@ -1457,15 +2126,13 @@ function showConfirm(o) {
   $("confirm-check").checked = false;
   if (o.check) { $("confirm-check-label").textContent = o.check; extra.hidden = false; } else extra.hidden = true;
   confirmAction = o.action;
-  $("confirm-overlay").hidden = false;
-  $("confirm-dialog").hidden = false;
+  showLayer($("confirm-overlay"), $("confirm-dialog"));
   // 默认焦点放在安全选项上：回车不会停止或删除任何东西。
   $("confirm-cancel").focus();
 }
 
 function hideConfirm() {
-  $("confirm-overlay").hidden = true;
-  $("confirm-dialog").hidden = true;
+  hideLayer($("confirm-overlay"), $("confirm-dialog"));
   confirmAction = null;
   if (lastFocus && lastFocus.isConnected) lastFocus.focus({ preventScroll: true });
 }
@@ -1484,14 +2151,12 @@ function openAskAI() {
     sheet.append(el("div", {}, button("复制全部问题给 AI", "btn primary", () => copyToClipboard(all, "已复制，粘贴给你的 AI 即可"), "复制全部问题给 AI")));
   }
   sheet.append(el("div", { class: "actions" }, button("关闭", "btn", closeSheet, "关闭")));
-  $("sheet-overlay").hidden = false;
-  sheet.hidden = false;
+  showLayer($("sheet-overlay"), sheet);
   sheet.querySelector("button").focus();
 }
 
 function closeSheet() {
-  $("sheet-overlay").hidden = true;
-  $("sheet").hidden = true;
+  hideLayer($("sheet-overlay"), $("sheet"));
   if (lastFocus && lastFocus.isConnected) lastFocus.focus({ preventScroll: true });
 }
 
@@ -1573,16 +2238,20 @@ async function poll() {
   if (pollInFlight) return;
   pollInFlight = true;
   try {
-    const [appsBody, hostBody] = await Promise.all([
+    const [appsBody, hostBody, statusBody] = await Promise.all([
       api.get("/v1/apps"),
       api.get("/v1/host").catch(() => ({ available: false })),
+      api.get("/v1/status").catch(() => ({})),
     ]);
     state.apps = appsBody.apps || [];
     state.host = hostBody;
+    state.edge = statusBody.edge || null;
+    if (needsResources()) await loadResources(false);
     state.loaded = true;
     state.connectionLost = false;
     if (state.fatal && state.fatal.code === "connection") state.fatal = null;
     render();
+    checkNewAlerts();
     // 记下应用名：等待详情返回期间用户可能已离开详情页，state.openApp 会变成 null。
     const name = state.openApp;
     if (name) {
@@ -1633,6 +2302,11 @@ async function boot() {
   applyTheme();
   $("theme").addEventListener("click", () => { toggleTheme(); render(); });
   $("ask-ai").addEventListener("click", openAskAI);
+  $("bell").addEventListener("click", (e) => { e.stopPropagation(); toggleNotify(); });
+  // 点面板外关闭；卡片悬停时不自动收起
+  document.addEventListener("click", (e) => { if (layerOpen($("notify")) && !$("notify").contains(e.target)) closeNotify(); });
+  $("notify-pop").addEventListener("mouseenter", () => clearTimeout(popTimer));
+  $("notify-pop").addEventListener("mouseleave", () => { popTimer = setTimeout(hidePop, 3000); });
   $("sheet-overlay").addEventListener("click", closeSheet);
   $("confirm-cancel").addEventListener("click", hideConfirm);
   $("confirm-overlay").addEventListener("click", hideConfirm);
@@ -1644,11 +2318,15 @@ async function boot() {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (!$("confirm-dialog").hidden) { hideConfirm(); return; }
-    if (!$("sheet").hidden) closeSheet();
+    if (layerOpen($("confirm-dialog"))) { hideConfirm(); return; }
+    if (layerOpen($("notify"))) { closeNotify(); return; }
+    if (layerOpen($("notify-pop"))) { hidePop(); return; }
+    if (layerOpen($("sheet"))) closeSheet();
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
   window.addEventListener("hashchange", onRoute);
+  window.addEventListener("resize", resetSliders);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(resetSliders);
   if (window.matchMedia) {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     if (mq.addEventListener) mq.addEventListener("change", () => render());

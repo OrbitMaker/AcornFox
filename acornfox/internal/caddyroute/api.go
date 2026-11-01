@@ -11,12 +11,20 @@ import "context"
 //
 // A route with PublicPort 0 is domain-only: it gets no per-app server and is
 // served solely through the shared "af-domains" server (used for the public
-// console, ADR-0016).
+// console).
 type Route struct {
-	App        string   `json:"app"`
-	PublicPort int      `json:"public_port"`
-	Upstream   string   `json:"upstream"`
-	Domains    []string `json:"domains,omitempty"` // N3: served on the shared "af-domains" HTTPS server
+	App        string `json:"app"`
+	PublicPort int    `json:"public_port"`
+	// Listen is the address Caddy binds PublicPort to: "" for every interface
+	// (exposure "lan"/"public"), "127.0.0.1" for exposure "local" on Linux.
+	// In bridge mode (macOS, Windows) it stays "": the edge container's port
+	// publishing decides who can connect.
+	Listen string `json:"listen,omitempty"`
+	// LANPort is a second port the app's server listens on (bridge mode:
+	// the edge publishes <LAN address>:PublicPort to it); 0 = none.
+	LANPort  int      `json:"lan_port,omitempty"`
+	Upstream string   `json:"upstream"`
+	Domains  []string `json:"domains,omitempty"` // N3: served on the shared "af-domains" HTTPS server
 }
 
 // HTTPSConfig configures the shared "af-domains" server (N3). Domains of all

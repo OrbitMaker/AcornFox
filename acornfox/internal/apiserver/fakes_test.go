@@ -36,6 +36,8 @@ type fakeStore struct {
 
 	addons        map[string]state.Addon // N4.2: app+"/"+kind -> add-on
 	removedAddons map[string]state.Addon
+
+	limits state.ResourceLimits
 }
 
 // fakeSession mirrors the stored session, keyed by session secret digest.
@@ -393,6 +395,11 @@ type fakeRunner struct {
 	removeContainerErr error
 	volumeListErr      error
 	volumes            map[string][]runner.VolumeInfo
+
+	// In-place resource updates and per-container memory usage.
+	updates   []runner.UpdateResourcesRequest
+	updateErr error
+	stats     map[string]runner.StatsResponse // keyed by container name
 }
 
 func newFakeRunner() *fakeRunner {
@@ -424,10 +431,15 @@ func (r *fakeRunner) Logs(_ context.Context, _, name string, _ int) ([]string, e
 	return r.logLines[name], nil
 }
 
-func (r *fakeRunner) ContainerStats(_ context.Context, _, _ string) (runner.StatsResponse, error) {
+func (r *fakeRunner) ContainerStats(_ context.Context, _, name string) (runner.StatsResponse, error) {
 	// N4.3: observability-agent added this method.
 	// fakeRunner returns empty for tests that don't exercise stats.
-	return runner.StatsResponse{}, nil
+	return r.stats[name], nil
+}
+
+func (r *fakeRunner) UpdateResources(_ context.Context, req runner.UpdateResourcesRequest) error {
+	r.updates = append(r.updates, req)
+	return r.updateErr
 }
 
 func (r *fakeRunner) StopContainer(_ context.Context, _, _ string) error {
@@ -597,6 +609,23 @@ func (f *fakeStore) ListDomains(_ context.Context, app string) ([]state.Domain, 
 
 // -------- N4.2 add-ons [addon-agent] --------
 
+func (f *fakeStore) GetResourceLimits(context.Context) (state.ResourceLimits, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.limits, nil
+}
+
+func (f *fakeStore) SetResourceLimits(_ context.Context, l state.ResourceLimits) error {
+	if l.MemoryMB < 0 || l.CPUMilli < 0 {
+		return state.ErrInvalid
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l.UpdatedAt = f.now()
+	f.limits = l
+	return nil
+}
+
 func (f *fakeStore) ListAddons(_ context.Context, app string) ([]state.Addon, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -681,6 +710,12 @@ type fakeHostProvider struct{ view apiserverHostView }
 type apiserverHostView = HostView
 
 func (p fakeHostProvider) Host(_ context.Context) HostView { return p.view }
+
+// fakeHostSized is a host of memMB memory and cores logical cores.
+func fakeHostSized(memMB, cores int) fakeHostProvider {
+	total := uint64(memMB) << 20
+	return fakeHostProvider{view: HostView{Available: true, MemoryTotal: &total, CPUCores: &cores}}
+}
 
 // fakeResolver returns fixed addresses (or an error) for LookupIPAddr.
 type fakeResolver struct {

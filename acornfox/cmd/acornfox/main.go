@@ -23,6 +23,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		switch args[0] {
 		case "server":
 			return runServer(args[1:], stdout, stderr)
+		case "serve":
+			return runServe(args[1:], stdout, stderr)
+		case "install":
+			return runInstall(args[1:], stdout, stderr)
+		case "uninstall":
+			return runUninstall(args[1:], stdin, stdout, stderr)
+		case "doctor":
+			return runDoctor(args[1:], stdout, stderr)
 		case "runner":
 			return runRunner(args[1:]...)
 		case "proxy":

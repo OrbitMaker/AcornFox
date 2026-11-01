@@ -372,6 +372,26 @@ WHERE source_kind = 'image' AND origin_kind IN ('', 'image')
       AND o.source_kind IN ('upload', 'git'));
 `
 
+// migration0008 stores the server-wide resource caps for app and add-on
+// containers. A single row; 0 means "automatic": memory = host total
+// minus a system reserve, CPU = all logical cores.
+const migration0008 = `
+CREATE TABLE resource_limits (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    memory_mb  INTEGER NOT NULL DEFAULT 0 CHECK (memory_mb >= 0),
+    cpu_milli  INTEGER NOT NULL DEFAULT 0 CHECK (cpu_milli >= 0),
+    updated_at TEXT NOT NULL,
+    CHECK (updated_at GLOB '` + timePattern + `')
+);
+`
+
+// migration0009 adds how an app is reachable (three-platform architecture,
+// 2026-11-01). "" means the platform default (Linux "public", macOS and
+// Windows "lan").
+const migration0009 = `
+ALTER TABLE apps ADD COLUMN exposure TEXT NOT NULL DEFAULT '' CHECK (exposure IN ('', 'local', 'lan', 'public', 'afx_cloud'));
+`
+
 // migrationList is the complete, ordered schema history. Never edit a shipped
 // entry; append a new one instead.
 func migrationList() []migration {
@@ -383,6 +403,8 @@ func migrationList() []migration {
 		{"0005_addon_soft_delete", migration0005},
 		{"0006_deployment_origin", migration0006},
 		{"0007_backfill_deployment_origin", migration0007},
+		{"0008_resource_limits", migration0008},
+		{"0009_app_exposure", migration0009},
 	}
 }
 

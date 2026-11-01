@@ -10,44 +10,30 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"os/user"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/moby/moby/client"
 
-	"github.com/acornfox/acornfox/internal/apiserver"
 	"github.com/acornfox/acornfox/internal/caddyroute"
 	"github.com/acornfox/acornfox/internal/peer"
-	"github.com/acornfox/acornfox/internal/publicconsole"
-	"github.com/acornfox/acornfox/internal/reconcile"
+	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/runner"
-	"github.com/acornfox/acornfox/internal/state"
 )
 
-// consoleFS holds the embedded console static assets. It is populated by
-// console_wiring.go (init) when the github.com/acornfox/acornfox/internal/console
-// package is present; otherwise it stays nil and the console listener serves a
-// small placeholder page. The wiring lives in a separate file so the server can
-// build before that package exists.
-var consoleFS fs.FS
-
-// runServer implements `acornfox server` (N1/N2/N3). It opens the state store,
-// builds a runner client, a Caddy router, the reconciler and the API, then
-// serves the trusted API on every -listen (unix sockets only) and the console
-// handler on -console-listen (loopback TCP) until SIGTERM/SIGINT.
-//
-// N3: -listen no longer accepts TCP addresses; the unauthenticated trusted API
-// is served only on unix sockets. The browser console is served separately on
+// runServer implements `acornfox server` (Linux): it parses flags and starts
+// the server with the runner reached over its peer socket. The trusted API is
+// served only on unix sockets (N3); the browser console separately on
 // -console-listen behind cookie sessions and CSRF.
+//
+// Caddy (three-platform architecture, 2026-11-01): by default the server runs
+// Caddy as a container on the host network (-edge host) and reaches its admin
+// API through a token-checked gateway on 127.0.0.1:-edge-admin-port.
+// -edge off -caddy-admin /run/acornfox/caddy-admin.sock keeps the v0.3 host
+// Caddy (used by upgrade rollback and tests).
 func runServer(args []string, stdout, stderr io.Writer) int {
 	fs_ := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs_.SetOutput(stderr)
@@ -59,7 +45,9 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		consoleListen = fs_.String("console-listen", "127.0.0.1:18800", "browser console listener (loopback TCP only; empty disables it)")
 		runnerSocket  = fs_.String("runner-socket", "/run/acornfox/runner.sock", "runner peer socket path")
 		runnerUID     = fs_.Int("runner-uid", os.Getuid(), "uid the runner process runs as")
-		caddyAdmin    = fs_.String("caddy-admin", "/run/acornfox/caddy-admin.sock", "Caddy admin API unix socket")
+		edgeMode      = fs_.String("edge", "host", "Caddy 运行方式：host（容器，宿主网络，默认）、off（用 -caddy-admin 指定的宿主机 Caddy）")
+		edgeAdminPort = fs_.Int("edge-admin-port", defaultEdgeAdminPort, "Caddy 容器管理网关的本机回环端口")
+		caddyAdmin    = fs_.String("caddy-admin", "/run/acornfox/caddy-admin.sock", "宿主机 Caddy 的 admin unix socket（仅 -edge off）")
 		publicHost    = fs_.String("public-host", "", "host used in app URLs (e.g. the LAN IP)")
 		publicPortMin = fs_.Int("public-port-min", 18810, "应用公开端口范围下限")
 		publicPortMax = fs_.Int("public-port-max", 18899, "应用公开端口范围上限")
@@ -69,6 +57,8 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		httpsCAFile   = fs_.String("https-ca-file", "", "path to the CA root used to verify domain certificates (internal issuer)")
 		acmeEmail     = fs_.String("acme-email", "", "optional ACME account email")
 		publicListen  = fs_.String("public-console-listen", "127.0.0.1:18801", "public console gateway behind Caddy (loopback TCP only; empty disables it)")
+		lanPort       = fs_.Int("lan-console-port", 0, "局域网控制台端口（开启后监听 0.0.0.0；默认 18802）")
+		exposure      = fs_.String("default-exposure", "public", "应用默认暴露方式：public、lan、local")
 	)
 	if err := fs_.Parse(args); err != nil {
 		return 2
@@ -94,6 +84,18 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "invalid -public-console-listen:", err)
 		return 2
 	}
+	switch *edgeMode {
+	case runner.EdgeModeHost, edgeModeOff:
+	default:
+		fmt.Fprintln(stderr, "invalid -edge: 只能是 host 或 off")
+		return 2
+	}
+	switch *exposure {
+	case "public", "lan", "local":
+	default:
+		fmt.Fprintln(stderr, "invalid -default-exposure: 只能是 public、lan、local")
+		return 2
+	}
 
 	gid := -1
 	if *listenGroup != "" {
@@ -105,301 +107,30 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		gid = g
 	}
 
-	uploadDir := filepath.Join(*dataDir, "uploads")
-	if err := os.MkdirAll(uploadDir, 0o700); err != nil {
-		fmt.Fprintln(stderr, "create upload dir:", err)
-		return 1
-	}
-
-	st, err := state.Open(state.Config{
-		Path:          filepath.Join(*dataDir, "acornfox.db"),
-		PublicPortMin: *publicPortMin,
-		PublicPortMax: *publicPortMax,
-	})
-	if err != nil {
-		fmt.Fprintln(stderr, "open state:", err)
-		return 1
-	}
-	defer st.Close()
-
-	httpsCfg := caddyroute.HTTPSConfig{
-		HTTPPort:  *httpPort,
-		HTTPSPort: *httpsPort,
-		Issuer:    *httpsIssuer,
-		Email:     *acmeEmail,
-	}
-
-	runnerClient := runner.NewClient(*runnerSocket, uint32(*runnerUID))
-	router := caddyroute.New(*caddyAdmin, httpsCfg)
-
-	// ADR-0016: the public console's domain route rides along every route
-	// sync; its configuration lives in the data directory.
-	pcStore := publicconsole.NewFileStore(filepath.Join(*dataDir, "public-console.json"))
-	if *publicListen != "" {
-		router = publicconsole.WrapRouter(router, pcStore, *publicListen)
-	}
-
-	rec := reconcile.New(reconcile.Config{
-		Store:       st,
-		Runner:      runnerClient,
-		Router:      router,
-		UploadDir:   uploadDir,
-		PublicHost:  *publicHost,
-		HTTPS:       httpsCfg,
-		HTTPSCAFile: *httpsCAFile,
-	})
-
-	apiCfg := apiserver.Config{
-		Store:      st,
-		Kicker:     rec,
-		Runner:     runnerClient,
-		UploadDir:  uploadDir,
-		PublicHost: *publicHost,
-		DataDir:    *dataDir,
-	}
-	var pcManager *publicconsole.Manager
-	if *publicListen != "" {
-		pcManager = publicconsole.NewManager(publicconsole.ManagerConfig{
-			Store:    pcStore,
-			Verifier: caddyroute.NewVerifier(*caddyAdmin, httpsCfg),
-			Sessions: st,
-			Routes:   rec,
-			Domains: func(ctx context.Context) ([]string, error) {
-				ds, err := st.ListDomains(ctx, "")
-				names := make([]string, 0, len(ds))
-				for _, d := range ds {
-					names = append(names, d.Name)
-				}
-				return names, err
-			},
-		})
-		apiCfg.PublicConsole = pcManager
-	}
-	trustedHandler := apiserver.New(apiCfg)
-
-	// The console handler shares the same dependencies plus the embedded assets.
-	consoleCfg := apiCfg
-	consoleCfg.ConsoleFS = consoleFS
-	consoleHandler := apiserver.NewConsole(consoleCfg)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-
-	if pcManager != nil {
-		pcManager.Cleanup(ctx)
-		// Caddy keeps no config across restarts (persist_config off); while the
-		// public console is on, put its route back even when no app has a round.
-		go func() {
-			t := time.NewTicker(30 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					if cfg, err := pcStore.Load(); err == nil && cfg != nil {
-						rec.RefreshRoutes(ctx)
-					}
-				}
-			}
-		}()
-	}
-
-	// Run the reconciler.
-	recDone := make(chan struct{})
-	go func() {
-		defer close(recDone)
-		if err := rec.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintln(stderr, "reconciler stopped:", err)
-		}
-	}()
-
-	// Open every trusted listener before serving.
-	var listeners []net.Listener
-	cleanup := func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}
-	for _, addr := range listens {
-		ln, err := listenAPI(addr, gid)
-		if err != nil {
-			fmt.Fprintln(stderr, "listen:", err)
-			cleanup()
-			stop()
-			<-recDone
-			return 1
-		}
-		listeners = append(listeners, ln)
-	}
-
-	trustedSrv := &http.Server{Handler: trustedHandler}
-	serveErr := make(chan error, len(listeners)+1)
-	for _, ln := range listeners {
-		go func(l net.Listener) { serveErr <- trustedSrv.Serve(l) }(ln)
-	}
-	for _, addr := range listens {
-		fmt.Fprintln(stdout, "acornfox server (trusted) listening on", addr)
-	}
-
-	// Open the console listener (loopback TCP) when enabled.
-	var consoleSrv *http.Server
-	if *consoleListen != "" {
-		cln, err := net.Listen("tcp", *consoleListen)
-		if err != nil {
-			fmt.Fprintln(stderr, "console listen:", err)
-			cleanup()
-			stop()
-			<-recDone
-			return 1
-		}
-		listeners = append(listeners, cln)
-		consoleSrv = &http.Server{Handler: consoleHandler}
-		go func() { serveErr <- consoleSrv.Serve(cln) }()
-		fmt.Fprintln(stdout, "acornfox server (console) listening on", *consoleListen)
-	}
-
-	// The public console gateway (loopback; Caddy terminates TLS in front).
-	var publicSrv *http.Server
-	if pcManager != nil {
-		pln, err := net.Listen("tcp", *publicListen)
-		if err != nil {
-			fmt.Fprintln(stderr, "public console listen:", err)
-			cleanup()
-			stop()
-			<-recDone
-			return 1
-		}
-		listeners = append(listeners, pln)
-		publicSrv = &http.Server{
-			Handler:           publicconsole.NewGateway(publicconsole.GatewayConfig{Store: pcStore, Sessions: st, Console: consoleHandler}),
-			ReadHeaderTimeout: 10 * time.Second,
-			MaxHeaderBytes:    64 << 10,
-		}
-		go func() { serveErr <- publicSrv.Serve(pln) }()
-		fmt.Fprintln(stdout, "acornfox server (public console gateway) listening on", *publicListen)
-	}
-
-	select {
-	case <-ctx.Done():
-	case err := <-serveErr:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintln(stderr, "serve:", err)
-		}
-	}
-
-	// Graceful shutdown.
-	shCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	_ = trustedSrv.Shutdown(shCtx)
-	if consoleSrv != nil {
-		_ = consoleSrv.Shutdown(shCtx)
-	}
-	if publicSrv != nil {
-		_ = publicSrv.Shutdown(shCtx)
-	}
-	stop()
-	<-recDone
-	return 0
-}
-
-// validateTrustedListen rejects anything that is not an absolute unix socket
-// path (optionally "unix:"-prefixed). TCP addresses are refused because the
-// trusted API is unauthenticated; the browser console uses -console-listen.
-func validateTrustedListen(addr string) error {
-	if _, ok := stripUnix(addr); ok {
-		if err := apiserver.ValidateListen(addr); err != nil {
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("-listen 只接受 unix socket（例如 unix:/run/acornfox/api.sock）；浏览器控制台请使用 -console-listen")
-}
-
-// validateConsoleListen accepts an empty value (console disabled) or a loopback
-// TCP address (127.0.0.1, ::1, localhost). Non-loopback is rejected so the
-// console is never bound to a public interface.
-func validateConsoleListen(addr string) error {
-	if addr == "" {
-		return nil
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("-console-listen 需要 host:port 形式的回环地址")
-	}
-	if port == "" {
-		return fmt.Errorf("-console-listen 缺少端口")
-	}
-	switch host {
-	case "127.0.0.1", "::1", "localhost":
-		return nil
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return nil
-	}
-	return fmt.Errorf("-console-listen 只允许回环地址（127.0.0.1、::1、localhost）")
-}
-
-// listenList is a repeatable string flag preserving order.
-type listenList []string
-
-func (l *listenList) String() string { return strings.Join(*l, ",") }
-func (l *listenList) Set(v string) error {
-	*l = append(*l, v)
-	return nil
-}
-
-// lookupGroupID resolves a group name (or numeric gid) to a gid.
-func lookupGroupID(name string) (int, error) {
-	if g, err := user.LookupGroup(name); err == nil {
-		return strconv.Atoi(g.Gid)
-	}
-	// Allow a numeric group id directly.
-	if id, err := strconv.Atoi(name); err == nil {
-		return id, nil
-	}
-	return 0, fmt.Errorf("unknown group %q", name)
-}
-
-// listenAPI opens the API listener for a validated address: an absolute path
-// (optionally "unix:"-prefixed) yields a unix socket, otherwise a TCP listener.
-// For unix sockets it removes any stale socket first, then sets mode 0660 and,
-// when gid >= 0, chowns the socket group so only that group may connect.
-func listenAPI(addr string, gid int) (net.Listener, error) {
-	if p, ok := stripUnix(addr); ok {
-		if _, err := os.Stat(p); err == nil {
-			_ = os.Remove(p)
-		}
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return nil, err
-		}
-		ln, err := net.Listen("unix", p)
-		if err != nil {
-			return nil, err
-		}
-		if gid >= 0 {
-			if err := os.Chown(p, -1, gid); err != nil {
-				_ = ln.Close()
-				return nil, fmt.Errorf("chown socket group: %w", err)
-			}
-		}
-		if err := os.Chmod(p, 0o660); err != nil {
-			_ = ln.Close()
-			return nil, fmt.Errorf("chmod socket: %w", err)
-		}
-		return ln, nil
-	}
-	return net.Listen("tcp", addr)
-}
-
-func stripUnix(addr string) (string, bool) {
-	if len(addr) > 5 && addr[:5] == "unix:" {
-		return addr[5:], true
-	}
-	if len(addr) > 0 && addr[0] == '/' {
-		return addr, true
-	}
-	return "", false
+	return startServer(ctx, serverOptions{
+		DataDir:       *dataDir,
+		Listens:       listens,
+		ListenGID:     gid,
+		ConsoleListen: *consoleListen,
+		PublicListen:  *publicListen,
+		PublicHost:    *publicHost,
+		PublicPortMin: *publicPortMin,
+		PublicPortMax: *publicPortMax,
+		HTTPS: caddyroute.HTTPSConfig{
+			HTTPPort:  *httpPort,
+			HTTPSPort: *httpsPort,
+			Issuer:    *httpsIssuer,
+			Email:     *acmeEmail,
+		},
+		HTTPSCAFile:     *httpsCAFile,
+		EdgeMode:        *edgeMode,
+		EdgeAdminPort:   *edgeAdminPort,
+		CaddyAdmin:      *caddyAdmin,
+		DefaultExposure: *exposure,
+		LANConsolePort:  *lanPort,
+	}, runner.NewClient(*runnerSocket, uint32(*runnerUID)), stdout, stderr)
 }
 
 // runRunner implements `acornfox runner` (N1): connect to Docker via client
@@ -426,6 +157,11 @@ func runRunner(args ...string) int {
 	defer cli.Close()
 
 	api := runner.NewDocker(cli)
+	// install.sh records whether this server is in mainland China; Docker Hub
+	// images are then pulled from the domestic mirror first.
+	if china, ok := platform.LinuxInstallChina("/etc/acornfox/install.env"); ok {
+		api.SetRegistry(runner.Registry{China: china})
+	}
 	// The runner does not stage uploads itself; the server writes them under
 	// data-dir/uploads which the runner reads by absolute path.
 	if !filepath.IsAbs(*uploadDir) {

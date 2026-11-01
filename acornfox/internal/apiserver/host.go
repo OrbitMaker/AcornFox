@@ -1,37 +1,19 @@
+//go:build !windows
+
 package apiserver
 
 import (
 	"bufio"
 	"bytes"
 	"context"
-	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
 )
-
-// HostView is the wire shape of GET /v1/host. On any error the provider returns
-// Available=false and the numeric fields are omitted.
-type HostView struct {
-	MemoryPercent *float64 `json:"memory_percent,omitempty"`
-	DiskPercent   *float64 `json:"disk_percent,omitempty"`
-	Available     bool     `json:"available"`
-	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
-	MemoryUsed    *uint64  `json:"memory_used,omitempty"`
-	MemoryTotal   *uint64  `json:"memory_total,omitempty"`
-	DiskUsed      *uint64  `json:"disk_used,omitempty"`
-	DiskTotal     *uint64  `json:"disk_total,omitempty"`
-	Load1         *float64 `json:"load1,omitempty"`
-	UptimeSeconds *float64 `json:"uptime_seconds,omitempty"`
-}
-
-// getHost implements GET /v1/host.
-func (s *server) getHost(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.hostMetrics.Host(r.Context()))
-}
 
 // procSource abstracts the OS-specific reads so tests can supply fakes.
 type procSource interface {
@@ -104,6 +86,8 @@ func (p *procHostProvider) Host(ctx context.Context) HostView {
 	if cpu, ok := p.readCPUPercent(); ok {
 		v.CPUPercent = &cpu
 	}
+	cores := runtime.NumCPU()
+	v.CPUCores = &cores
 	return v
 }
 

@@ -53,7 +53,14 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 		baseURL string
 		tunnel  *client.Tunnel
 	)
-	if t.URL != "" {
+	local := strings.HasPrefix(t.URL, "unix:")
+	if local {
+		// This computer's acornfox: the console listens on loopback.
+		baseURL = strings.TrimRight(t.Console, "/")
+		if baseURL == "" {
+			baseURL = client.DefaultLocalConsole
+		}
+	} else if t.URL != "" {
 		baseURL = strings.TrimRight(t.URL, "/")
 	} else {
 		localPort := *port
@@ -95,7 +102,9 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 		a.out.emitJSON(map[string]any{"url": baseURL})
 	} else if browserOpened {
 		a.out.human("已在浏览器打开控制台：%s", baseURL)
-		a.out.human("按 Ctrl+C 关闭。")
+		if !local {
+			a.out.human("按 Ctrl+C 关闭。")
+		}
 	} else {
 		if *noBrowser {
 			a.out.human("未打开浏览器。请在浏览器打开下面的登录链接（一次性，60 秒内有效）：")
@@ -103,10 +112,16 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 			a.out.human("无法自动打开浏览器。请手动打开下面的登录链接（一次性，60 秒内有效）：")
 		}
 		a.out.human("%s", loginURL)
-		a.out.human("按 Ctrl+C 关闭。")
+		if !local {
+			a.out.human("按 Ctrl+C 关闭。")
+		}
 	}
 
-	// 6. Block until Ctrl+C (ctx cancel) or the tunnel dies.
+	// 6. Block until Ctrl+C (ctx cancel) or the tunnel dies. A local target
+	// needs no tunnel: the console stays up without this command.
+	if local {
+		return exitOK
+	}
 	if tunnel == nil {
 		// url mode: no tunnel to watch; wait for ctx.
 		<-ctx.Done()

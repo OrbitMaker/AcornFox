@@ -51,6 +51,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathContainerStop, s.handleContainerStop)
 	s.mux.HandleFunc("POST "+PathContainerStart, s.handleContainerStart)
 	s.mux.HandleFunc("POST "+PathContainerRemove, s.handleContainerRemove)
+	s.mux.HandleFunc("POST "+PathContainerUpdate, s.handleContainerUpdate)
 	s.mux.HandleFunc("POST "+PathContainerLogs, s.handleContainerLogs)
 	s.mux.HandleFunc("POST "+PathContainerLogBatch, s.handleLogBatch)
 	s.mux.HandleFunc("POST "+PathContainerStats, s.handleContainerStats)
@@ -59,6 +60,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathVolumeList, s.handleVolumeList)
 	s.mux.HandleFunc("POST "+PathVolumeRemove, s.handleVolumeRemove)
 	s.mux.HandleFunc("POST "+PathNetworkRemove, s.handleNetworkRemove)
+	s.mux.HandleFunc("POST "+PathEdgeEnsure, s.handleEdgeEnsure)
+	s.mux.HandleFunc("POST "+PathEdgeConnect, s.handleEdgeConnect)
 }
 
 // ---- response helpers ----
@@ -370,6 +373,30 @@ func (s *Server) handleContainerStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.api.StopContainer(r.Context(), ref.App, ref.Name); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+func (s *Server) handleContainerUpdate(w http.ResponseWriter, r *http.Request) {
+	var req UpdateResourcesRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "malformed request body")
+		return
+	}
+	if !validContainerName(w, req.App, req.Name) {
+		return
+	}
+	if req.MemoryMB < 64 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "memory_mb must be >= 64")
+		return
+	}
+	if req.CPUMilli < 100 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "cpu_milli must be >= 100")
+		return
+	}
+	if err := s.api.UpdateResources(r.Context(), req); err != nil {
 		writeAPIError(w, err)
 		return
 	}

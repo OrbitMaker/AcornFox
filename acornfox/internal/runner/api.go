@@ -70,6 +70,7 @@ const (
 	PathContainerStop   = "/v1/containers/stop"   // POST ContainerRef -> OK (missing is success)
 	PathContainerStart  = "/v1/containers/start"  // POST ContainerRef -> ContainerInfo
 	PathContainerRemove = "/v1/containers/remove" // POST ContainerRef -> OK (missing is success)
+	PathContainerUpdate = "/v1/containers/update" // POST UpdateResourcesRequest -> OK (works on running and stopped containers)
 	PathContainerLogs   = "/v1/containers/logs"   // POST LogsRequest -> LogsResponse
 	PathContainerStats  = "/v1/containers/stats"  // POST StatsRequest -> StatsResponse
 	PathContainerDiff   = "/v1/containers/diff"   // POST ContainerRef -> DiffResponse
@@ -99,6 +100,15 @@ type AppRef struct {
 type ImageRef struct {
 	App string `json:"app"`
 	Ref string `json:"ref"` // must be an acornfox/<app>:<id> tag or an image ID of an image labeled for App
+}
+
+// UpdateResourcesRequest changes the memory and CPU limits of an existing
+// managed container in place, without restarting it.
+type UpdateResourcesRequest struct {
+	App      string `json:"app"`
+	Name     string `json:"name"`      // must start with "af-<app>-"
+	MemoryMB int    `json:"memory_mb"` // >= 64; swap stays equal to memory
+	CPUMilli int    `json:"cpu_milli"` // >= 100
 }
 
 type ContainerRef struct {
@@ -168,6 +178,10 @@ type PullResponse struct {
 	OK      bool       `json:"ok"`
 	Image   *ImageInfo `json:"image,omitempty"`
 	Failure *Failure   `json:"failure,omitempty"`
+	// Emulated is true when the image has no variant for the Docker host's
+	// CPU and the linux/amd64 one was pulled instead (Apple silicon): it
+	// runs under emulation and may be slow.
+	Emulated bool `json:"emulated,omitempty"`
 }
 
 type Mount struct {
@@ -214,6 +228,7 @@ type ContainerInfo struct {
 	ExitCode     int    `json:"exit_code"`
 	OOMKilled    bool   `json:"oom_killed"`
 	HostPort     int    `json:"host_port"`        // published port on 127.0.0.1, 0 if none
+	Port         int    `json:"port,omitempty"`   // the container port HostPort maps to (0 if none)
 	StartedAt    string `json:"started_at"`       // RFC3339 from Docker, may be empty
 	Health       string `json:"health,omitempty"` // Docker healthcheck: starting | healthy | unhealthy; "" when the container has none
 }
@@ -282,6 +297,7 @@ type API interface {
 	StopContainer(ctx context.Context, app, name string) error
 	StartContainer(ctx context.Context, app, name string) (ContainerInfo, error)
 	RemoveContainer(ctx context.Context, app, name string) error
+	UpdateResources(ctx context.Context, req UpdateResourcesRequest) error
 	Logs(ctx context.Context, app, name string, tail int) ([]string, error)
 	ContainerStats(ctx context.Context, app, name string) (StatsResponse, error)
 	Diff(ctx context.Context, app, name string) ([]string, error)

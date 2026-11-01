@@ -22,7 +22,9 @@ type fakeAPI struct {
 	deploymentFn func(ctx context.Context, id string, after int64) (client.Deployment, []client.Event, error)
 	appsFn       func(ctx context.Context) ([]client.App, error)
 	appFn        func(ctx context.Context, app string) (client.App, error)
-	updateAppFn  func(ctx context.Context, app string, s client.AppSettings) (client.App, error)
+	updateAppFn  func(ctx context.Context, app string, s client.AppSettings) (client.AppUpdate, error)
+	resourcesFn  func(ctx context.Context) (client.Resources, error)
+	setCapsFn    func(ctx context.Context, caps client.ResourceCaps) (client.Resources, error)
 	logsFn       func(ctx context.Context, app string, tail int) ([]string, error)
 	setEnvFn     func(ctx context.Context, app, key, value string, secret bool) error
 	unsetEnvFn   func(ctx context.Context, app, key string) error
@@ -47,7 +49,7 @@ type fakeAPI struct {
 	addAddonFn    func(ctx context.Context, app, kind string) (client.AddonResult, error)
 	removeAddonFn func(ctx context.Context, app, kind string, deleteVolume bool) (client.AddonRemoval, error)
 
-	// ADR-0016 public console
+	// Public console
 	pcStatusFn  func(ctx context.Context) (client.PublicConsoleStatus, error)
 	pcVerifyFn  func(ctx context.Context, domain string) (client.PublicConsoleVerify, error)
 	pcEnableFn  func(ctx context.Context, domain, verifyID string, reset bool) (client.PublicConsoleEnabled, error)
@@ -115,11 +117,25 @@ func (f *fakeAPI) App(ctx context.Context, app string) (client.App, error) {
 	return client.App{Name: app, URL: "http://192.168.1.10:12345"}, nil
 }
 
-func (f *fakeAPI) UpdateApp(ctx context.Context, app string, s client.AppSettings) (client.App, error) {
+func (f *fakeAPI) UpdateApp(ctx context.Context, app string, s client.AppSettings) (client.AppUpdate, error) {
 	if f.updateAppFn != nil {
 		return f.updateAppFn(ctx, app, s)
 	}
-	return client.App{Name: app}, nil
+	return client.AppUpdate{App: client.App{Name: app}}, nil
+}
+
+func (f *fakeAPI) Resources(ctx context.Context) (client.Resources, error) {
+	if f.resourcesFn != nil {
+		return f.resourcesFn(ctx)
+	}
+	return client.Resources{}, nil
+}
+
+func (f *fakeAPI) SetResourceCaps(ctx context.Context, caps client.ResourceCaps) (client.Resources, error) {
+	if f.setCapsFn != nil {
+		return f.setCapsFn(ctx, caps)
+	}
+	return client.Resources{}, nil
 }
 
 func (f *fakeAPI) Logs(ctx context.Context, app string, tail int) ([]string, error) {

@@ -186,7 +186,7 @@ func TestStoppedAddonIsRestarted(t *testing.T) {
 	}
 }
 
-// ADR-0006: an add-on that never accepts connections fails the deployment at
+// An add-on that never accepts connections fails the deployment at
 // stage "addon" before any app container is created, with redacted logs.
 func TestAddonNotReadyFailsDeploymentAtAddonStage(t *testing.T) {
 	h := newHarness(t)
@@ -265,7 +265,7 @@ func TestAddonPullFailureFailsDeployment(t *testing.T) {
 }
 
 // A runner outage is not an add-on failure: the deployment waits in starting
-// and goes live once the runner is back (ADR-0006).
+// and goes live once the runner is back .
 func TestRunnerOutageKeepsDeploymentStarting(t *testing.T) {
 	h := newHarness(t)
 	h.rec.addonPoll = time.Millisecond

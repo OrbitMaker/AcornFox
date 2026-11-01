@@ -125,6 +125,12 @@ func (s *server) addAddonLocked(w http.ResponseWriter, r *http.Request) {
 		s.mapStoreError(w, err)
 		return
 	}
+	// The add-on container's memory counts against the server-wide cap.
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	if !s.checkMemoryRoom(w, ctx, spec.MemoryMB, "给 "+app+" 添加 "+body.Kind+" ") {
+		return
+	}
 
 	// Pre-check for a clear message; AddAddon re-checks in its transaction.
 	envVar := state.AddonEnvVar(body.Kind)

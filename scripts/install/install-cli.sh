@@ -82,7 +82,7 @@ download_cli() {
 }
 
 # GitHub 仓库与下载代理（与 install.sh 一致）
-ACORNFOX_REPO="${ACORNFOX_REPO:-OrbitMaker/AcornFox-rebuild}"
+ACORNFOX_REPO="${ACORNFOX_REPO:-OrbitMaker/AcornFox}"
 GITHUB_PROXIES=()
 
 # detect_china：先查阿里云、腾讯云元数据，再问 ip-api（它偶尔要 2 秒以上才响应，放宽超时并试两次）
@@ -127,7 +127,7 @@ github_download() {
 
 # 国内镜像：Gitee 发行版与 GitHub Release 的文件相同（同一份 SHA256SUMS 校验）。
 # 中国大陆服务器先从 Gitee 下载，失败再走 GitHub 直连和代理；ACORNFOX_GITEE_REPO 设为空可关闭。
-ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox-rebuild}"
+ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
@@ -276,7 +276,7 @@ show_usage() {
 3. 安装 AI 工作台 Skill:
    acornfox skill install
 
-文档: https://github.com/OrbitMaker/AcornFox-rebuild/tree/main/docs
+文档: https://github.com/OrbitMaker/AcornFox/tree/main/docs
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

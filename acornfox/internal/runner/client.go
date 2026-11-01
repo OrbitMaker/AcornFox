@@ -206,6 +206,11 @@ func (c *Client) RemoveContainer(ctx context.Context, app, name string) error {
 	return c.call(ctx, c.standard, PathContainerRemove, ContainerRef{App: app, Name: name}, clientDefaultBound, nil)
 }
 
+// UpdateResources implements API.
+func (c *Client) UpdateResources(ctx context.Context, req UpdateResourcesRequest) error {
+	return c.call(ctx, c.standard, PathContainerUpdate, req, clientDefaultBound, nil)
+}
+
 // Logs implements API. It uses a large response bound for up to 1000 lines.
 func (c *Client) Logs(ctx context.Context, app, name string, tail int) ([]string, error) {
 	var out LogsResponse

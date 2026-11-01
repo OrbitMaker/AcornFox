@@ -6,7 +6,7 @@ import (
 )
 
 // verifyServer is the temporary plain-HTTP server that answers the domain
-// ownership challenge of the public console (ADR-0016). Its name deliberately
+// ownership challenge of the public console. Its name deliberately
 // lacks the "af-" prefix so Sync never deletes it mid-verification.
 const verifyServer = "acornfox-verify"
 
@@ -22,8 +22,8 @@ type Verifier interface {
 
 // NewVerifier returns a Verifier that reaches Caddy's admin API on the given
 // Unix socket. The challenge listens on https.HTTPPort (default 80).
-func NewVerifier(adminSocket string, https HTTPSConfig) Verifier {
-	return New(adminSocket, https).(*caddyRouter)
+func NewVerifier(admin string, https HTTPSConfig, opts ...Option) Verifier {
+	return New(admin, https, opts...).(*caddyRouter)
 }
 
 // SetChallenge implements Verifier. The server listens only on the HTTP port,

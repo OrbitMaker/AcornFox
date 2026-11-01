@@ -71,7 +71,7 @@ const (
 
 // Defaults for new apps.
 const (
-	DefaultMemoryMB   = 512
+	DefaultMemoryMB   = 256 // 512 MB did not fit on a 1 GB machine
 	DefaultCPUMilli   = 1000
 	DefaultHealthPath = "/"
 	KeepVersions      = 3 // successful versions whose images are kept for rollback
@@ -88,8 +88,28 @@ type App struct {
 	CurrentDeployment string    `json:"current_deployment"` // ID of the live deployment, "" if none
 	MemoryMB          int       `json:"memory_mb"`          // default DefaultMemoryMB
 	CPUMilli          int       `json:"cpu_milli"`          // default DefaultCPUMilli (1000 = 1 CPU)
+	Exposure          string    `json:"exposure"`           // "" (platform default) | Exposure* below
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// How an app is reachable. AFX Cloud ("afx_cloud": a public address under
+// the install ID through a tunnel container, HTTP only) is reserved and not
+// implemented yet.
+const (
+	ExposureLocal    = "local"     // only this machine (127.0.0.1)
+	ExposureLAN      = "lan"       // this machine and the local network, one port per app
+	ExposurePublic   = "public"    // every interface plus domains with automatic certificates
+	ExposureAFXCloud = "afx_cloud" // reserved
+)
+
+// ValidExposure reports whether e can be stored ("" is the platform default).
+func ValidExposure(e string) bool {
+	switch e {
+	case "", ExposureLocal, ExposureLAN, ExposurePublic, ExposureAFXCloud:
+		return true
+	}
+	return false
 }
 
 // Diagnosis is the stable, structured failure/warning contract shared by the
@@ -162,6 +182,14 @@ type Addon struct {
 	Credentials json.RawMessage `json:"-"`       // generated secrets, never exposed
 	EnvVar      string          `json:"env_var"` // e.g. DATABASE_URL
 	CreatedAt   time.Time       `json:"created_at"`
+}
+
+// ResourceLimits are the server-wide caps on what app and add-on containers
+// may be given. Zero means automatic (see apiserver).
+type ResourceLimits struct {
+	MemoryMB  int       `json:"memory_mb"` // cap on the sum of all container memory limits
+	CPUMilli  int       `json:"cpu_milli"` // cap on any single container's CPU limit
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Event is one line of deployment/operation history.
@@ -240,6 +268,10 @@ exactly these signatures):
 	ListRemovedAddons(ctx, app string) ([]Addon, error)
 	AddAddon(ctx context.Context, addon Addon) (bool, error) // bool=true when restoring retained credentials
 	RemoveAddon(ctx context.Context, app, kind string, deleteVolume bool) error
+
+	// Server-wide resource caps
+	GetResourceLimits(ctx) (ResourceLimits, error) // zero value when never set
+	SetResourceLimits(ctx, l ResourceLimits) error // negative values are ErrInvalid
 
 	// Events
 	AddEvent(ctx, e Event) error

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
@@ -30,11 +31,14 @@ const DefaultMaxUploadBytes int64 = 200 << 20
 // match client.APIVersion; the client uses it to detect version mismatches.
 const apiVersion = 1
 
-// App setting bounds for PATCH /v1/apps/{app} (contract section 4).
+// App setting bounds for PATCH /v1/apps/{app} (contract section 4). The
+// minimums are 256 MB / 0.5 core;
+// the maximums apply only when the host size is unknown, otherwise the
+// server-wide caps in resources.go do.
 const (
-	minMemoryMB = 64
+	minMemoryMB = 256
 	maxMemoryMB = 16384
-	minCPUMilli = 100
+	minCPUMilli = 500
 	maxCPUMilli = 16000
 )
 
@@ -75,6 +79,10 @@ type Store interface {
 	AddDomain(ctx context.Context, app, name string) (state.Domain, bool, error)
 	RemoveDomain(ctx context.Context, app, name string) error
 	ListDomains(ctx context.Context, app string) ([]state.Domain, error)
+
+	// Server-wide resource caps.
+	GetResourceLimits(ctx context.Context) (state.ResourceLimits, error)
+	SetResourceLimits(ctx context.Context, l state.ResourceLimits) error
 }
 
 // Kicker triggers one reconcile round for an app. It is non-blocking.
@@ -99,6 +107,8 @@ type Runner interface {
 	RemoveVolume(ctx context.Context, app, name string) error
 	RemoveNetwork(ctx context.Context, app string) error
 	ListVolumes(ctx context.Context, app string) ([]runner.VolumeInfo, error)
+	// Apply new app limits to the existing container without a restart.
+	UpdateResources(ctx context.Context, req runner.UpdateResourcesRequest) error
 }
 
 // Config configures New. Store, Kicker, Runner and UploadDir are required.
@@ -117,8 +127,20 @@ type Config struct {
 	Resolver    Resolver     // DNS lookups for domain warnings; nil => net.DefaultResolver
 	DataDir     string       // data directory whose filesystem is reported by GET /v1/host
 
-	// ADR-0016: public console management, trusted entry only; nil => 404.
+	// Public console management, trusted entry only; nil => 404.
 	PublicConsole PublicConsole
+
+	// Three-platform architecture (2026-11-01).
+	// DefaultExposure applies to apps whose exposure is "" ("public" on Linux,
+	// "lan" on macOS/Windows); empty means "public".
+	DefaultExposure string
+	// LANHost returns this machine's LAN address for lan_url; nil => no lan_url.
+	LANHost func() string
+	// LANConsole manages opening the console on the LAN; nil => 404.
+	LANConsole LANConsole
+	// EdgeStatus reports the Caddy container ("preparing" / "running" /
+	// "error" + message); nil or "" state => not reported.
+	EdgeStatus func() (state, message string)
 }
 
 // HostProvider returns a point-in-time host resource snapshot. It must return
@@ -148,6 +170,15 @@ type server struct {
 	dataDir     string
 
 	publicConsole PublicConsole
+
+	defaultExposure string
+	lanHost         func() string
+	lanConsole      LANConsole
+	edgeStatus      func() (string, string)
+
+	// resMu serializes the allocation check and the write that follows it
+	// (app limits, add-ons, new apps, server-wide caps), see resources.go.
+	resMu sync.Mutex
 }
 
 // newServer validates the shared dependencies and builds the server value used
@@ -194,7 +225,23 @@ func newServer(cfg Config) *server {
 		resolver:       resolver,
 		dataDir:        cfg.DataDir,
 		publicConsole:  cfg.PublicConsole,
+
+		defaultExposure: cfg.DefaultExposure,
+		lanHost:         cfg.LANHost,
+		lanConsole:      cfg.LANConsole,
+		edgeStatus:      cfg.EdgeStatus,
 	}
+}
+
+// effectiveExposure resolves "" to the platform default.
+func (s *server) effectiveExposure(a state.App) string {
+	if a.Exposure != "" {
+		return a.Exposure
+	}
+	if s.defaultExposure != "" {
+		return s.defaultExposure
+	}
+	return state.ExposurePublic
 }
 
 // registerV1 installs the shared /v1 API routes used by both handlers.
@@ -226,6 +273,8 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/metrics/apps/{app}", s.getAppMetrics)
 	mux.HandleFunc("GET /v1/host", s.getHost)
 	mux.HandleFunc("GET /v1/status", s.status)
+	mux.HandleFunc("GET /v1/resources", s.getResources)
+	mux.HandleFunc("PUT /v1/resources", s.putResources)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the
@@ -238,11 +287,15 @@ func New(cfg Config) http.Handler {
 	s.registerV1(mux)
 	// The trusted entry mints console login tokens; the console entry must not.
 	mux.HandleFunc("POST /v1/console/tokens", s.createConsoleToken)
-	// Opening the console to the internet is trusted-entry only (ADR-0016).
+	// Opening the console to the internet is trusted-entry only.
 	mux.HandleFunc("GET /v1/public-console", s.publicConsoleStatus)
 	mux.HandleFunc("POST /v1/public-console/verify", s.publicConsoleVerify)
 	mux.HandleFunc("POST /v1/public-console/enable", s.publicConsoleEnable)
 	mux.HandleFunc("DELETE /v1/public-console", s.publicConsoleDisable)
+	// Opening the console on the LAN is trusted-entry only too.
+	mux.HandleFunc("GET /v1/lan-console", s.getLANConsole)
+	mux.HandleFunc("POST /v1/lan-console", s.postLANConsole)
+	mux.HandleFunc("DELETE /v1/lan-console", s.deleteLANConsole)
 	return mux
 }
 

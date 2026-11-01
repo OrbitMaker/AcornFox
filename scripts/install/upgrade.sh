@@ -46,7 +46,7 @@ parse_args() {
 }
 
 # GitHub 仓库与下载代理（与 install.sh 一致）
-ACORNFOX_REPO="${ACORNFOX_REPO:-OrbitMaker/AcornFox-rebuild}"
+ACORNFOX_REPO="${ACORNFOX_REPO:-OrbitMaker/AcornFox}"
 GITHUB_PROXIES=()
 
 # detect_china：先查阿里云、腾讯云元数据，再问 ip-api（它偶尔要 2 秒以上才响应，放宽超时并试两次）
@@ -96,7 +96,7 @@ github_download() {
 
 # 国内镜像：Gitee 发行版与 GitHub Release 的文件相同（同一份 SHA256SUMS 校验）。
 # 中国大陆服务器先从 Gitee 下载，失败再走 GitHub 直连和代理；ACORNFOX_GITEE_REPO 设为空可关闭。
-ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox-rebuild}"
+ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
@@ -110,6 +110,31 @@ release_download() {
         log_warn "Gitee 镜像下载失败，改从 GitHub 下载"
     fi
     github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
+}
+
+# 公开仓库 main 上的脚本可能比最新发行版新（例如 main 已是 0.4.0 的脚本，最新发行版还是 v0.3.1）。
+# 要装的版本早于 SCRIPT_MIN_VERSION 时，改用那个版本发行版里附带的同名脚本，参数原样传过去，
+# 避免新脚本配旧程序（新脚本会把宿主机 Caddy 换成容器，旧程序不认识）。--binary 时不切换。
+SCRIPT_MIN_VERSION="v0.4.0"
+
+# version_lt A B：A 早于 B 时返回 0（vX.Y.Z，按 sort -V 比较；0.4.0-dev.N 视为不早于 0.4.0）
+version_lt() {
+    [ "$1" = "$2" ] && return 1
+    [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | head -1)" = "${1#v}" ]
+}
+
+# follow_release_script 脚本名 版本 参数...：版本早于 SCRIPT_MIN_VERSION 时下载该版本的同名脚本并交给它执行
+follow_release_script() {
+    local name="$1" v="$2" s
+    shift 2
+    [ -n "${ACORNFOX_SCRIPT_FOLLOWED:-}" ] && return 0
+    version_lt "$v" "$SCRIPT_MIN_VERSION" || return 0
+    log_warn "要装的 ${v} 早于本脚本支持的 ${SCRIPT_MIN_VERSION}，改用 ${v} 发行版自带的 ${name}"
+    s=$(mktemp)
+    release_download "$v" "$name" "$s" || error_exit "下载 ${v} 的 ${name} 失败；可以直接运行该版本发行版里的 ${name}"
+    # 老版本脚本里写死的是改名前的旧仓库名；把现在的仓库名传给它
+    export ACORNFOX_REPO ACORNFOX_GITEE_REPO
+    ACORNFOX_SCRIPT_FOLLOWED=1 exec bash "$s" "$@" --version "$v"
 }
 
 # latest_tag：最新版本号。中国大陆先查 Gitee 发行版 API（Gitee 的 releases/latest
@@ -374,6 +399,102 @@ verify_upgrade() {
     fi
 }
 
+# ---- Caddy 改容器（三端架构，2026-11-01；与 install.sh 中同名函数一致）----
+CADDY_VERSION="2.8.4"
+
+# build_caddy_image BIN：用 Caddy 二进制和本机 CA 证书做最小镜像 acornfox/caddy:2.8.4
+# （没有 shell；acornfox 创建容器时写入 Caddyfile 并指定启动命令）
+build_caddy_image() {
+    local bin="$1" root
+    root=$(mktemp -d)
+    mkdir -p "$root/usr/bin" "$root/etc/ssl/certs" "$root/tmp" "$root/data" "$root/config"
+    chmod 1777 "$root/tmp"
+    install -m 0755 "$bin" "$root/usr/bin/caddy"
+    cp /etc/ssl/certs/ca-certificates.crt "$root/etc/ssl/certs/ca-certificates.crt"
+    if tar -C "$root" -c . | docker import \
+        --change 'ENV XDG_CONFIG_HOME=/config' --change 'ENV XDG_DATA_HOME=/data' \
+        --change 'CMD ["/usr/bin/caddy","run","--config","/etc/acornfox/Caddyfile","--adapter","caddyfile"]' \
+        - "acornfox/caddy:${CADDY_VERSION}" >/dev/null; then
+        log_success "Caddy 镜像已就绪: acornfox/caddy:${CADDY_VERSION}"
+    else
+        log_warn "制作 Caddy 镜像失败；acornfox 启动时会改从镜像仓库拉取 caddy:${CADDY_VERSION}-alpine"
+    fi
+    rm -rf "$root"
+}
+
+# migrate_host_caddy：把 v0.3.x 装在宿主机上的 Caddy 换成容器。证书和 ACME 账号复制到
+# 数据卷 acornfox-caddy-data（宿主机上的原文件保留），停用并禁止 caddy.service 开机启动，
+# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated 供 upgrade.sh --rollback 恢复。
+migrate_host_caddy() {
+    [ -f /etc/systemd/system/caddy.service ] || [ -f /lib/systemd/system/caddy.service ] || return 0
+    systemctl is-enabled --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy 2>/dev/null || return 0
+    log_info "把宿主机上的 Caddy 迁移到容器..."
+    local src=/var/lib/caddy/.local/share/caddy vol
+    docker volume create acornfox-caddy-data >/dev/null
+    vol=$(docker volume inspect -f '{{.Mountpoint}}' acornfox-caddy-data)
+    if [ -d "$src" ]; then
+        mkdir -p "$vol/caddy"
+        cp -a "$src/." "$vol/caddy/"
+        log_info "已复制证书和 ACME 账号到数据卷 acornfox-caddy-data（原文件保留在 $src）"
+    fi
+    systemctl disable --now caddy >/dev/null 2>&1 || true
+    mkdir -p /var/lib/acornfox
+    date -u +%FT%TZ > /var/lib/acornfox/.caddy-host-migrated
+    log_success "宿主机 Caddy 已停用（回滚时会恢复），之后由容器 acornfox-caddy 接管 80、443 和应用端口"
+}
+
+# wait_caddy_container：等 acornfox 建好 Caddy 容器、管理网关应答（没有令牌时返回 403）
+wait_caddy_container() {
+    local i code=""
+    for i in $(seq 1 90); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:18808/ 2>/dev/null || true)
+        [ "$code" = "403" ] && break
+        sleep 2
+    done
+    if [ "$code" = "403" ]; then
+        log_success "Caddy 容器 acornfox-caddy 已运行"
+    else
+        log_warn "Caddy 容器还没就绪；查看: docker logs acornfox-caddy；journalctl -u acornfox-server -n 50"
+    fi
+}
+
+# prepare_caddy_container：升级前准备 Caddy 容器要用的镜像，并迁移宿主机 Caddy。
+# 迁移标记同时写进本次备份目录，--rollback 据此恢复宿主机 Caddy。
+prepare_caddy_container() {
+    if ! docker image inspect "acornfox/caddy:${CADDY_VERSION}" >/dev/null 2>&1; then
+        if [ -x /usr/bin/caddy ] && /usr/bin/caddy version 2>/dev/null | grep -q "^v${CADDY_VERSION}"; then
+            build_caddy_image /usr/bin/caddy
+        else
+            log_info "宿主机没有 Caddy ${CADDY_VERSION}，acornfox 启动时会从镜像仓库拉取 caddy:${CADDY_VERSION}-alpine"
+        fi
+    fi
+    if [ -f /var/lib/acornfox/.caddy-host-migrated ]; then
+        return 0
+    fi
+    migrate_host_caddy
+    if [ -f /var/lib/acornfox/.caddy-host-migrated ]; then
+        local backup
+        backup=$(cat /tmp/acornfox_last_backup 2>/dev/null || true)
+        [ -n "$backup" ] && [ -d "$backup" ] && cp /var/lib/acornfox/.caddy-host-migrated "$backup/caddy-host-migrated"
+    fi
+}
+
+# restore_host_caddy BACKUP：回滚到 v0.3.x 时删掉 Caddy 容器、恢复宿主机 Caddy
+restore_host_caddy() {
+    local backup="$1"
+    [ -f "$backup/caddy-host-migrated" ] || return 0
+    log_info "恢复宿主机 Caddy..."
+    docker rm -f acornfox-caddy >/dev/null 2>&1 || true
+    systemctl enable --now caddy >/dev/null 2>&1 || log_warn "宿主机 Caddy 没能启动：journalctl -u caddy -n 50"
+    rm -f /var/lib/acornfox/.caddy-host-migrated
+    local i
+    for i in $(seq 1 10); do
+        [ -S /run/acornfox/caddy-admin.sock ] && break
+        sleep 1
+    done
+    log_success "宿主机 Caddy 已恢复（数据卷 acornfox-caddy-data 保留，可手动删除）"
+}
+
 # 回滚
 rollback() {
     log_warn "开始回滚..."
@@ -407,6 +528,8 @@ rollback() {
         done
         log_success "数据库已恢复"
     fi
+
+    restore_host_caddy "$BACKUP_PATH"
 
     # 启动服务
     systemctl start acornfox-runner
@@ -466,6 +589,7 @@ ${BLUE}版本:${NC}
 ${BLUE}服务状态:${NC}
   • acornfox-server: $(systemctl is-active acornfox-server)
   • acornfox-runner: $(systemctl is-active acornfox-runner)
+  • Caddy 容器 acornfox-caddy: $(docker inspect -f '{{.State.Status}}' acornfox-caddy 2>/dev/null || echo 未创建)
 
 ${BLUE}备份位置:${NC}
   $(cat /tmp/acornfox_last_backup)
@@ -495,6 +619,15 @@ main() {
     check_root
     check_installed
 
+    if [ -z "$LOCAL_BINARY" ]; then
+        setup_github_proxies
+        if [ "$TARGET_VERSION" = "latest" ]; then
+            TARGET_VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 使用本地文件"
+            log_info "最新版本: $TARGET_VERSION"
+        fi
+        follow_release_script upgrade.sh "$TARGET_VERSION" "$@"
+    fi
+
     if ! confirm "确认升级 AcornFox?"; then
         log_info "取消升级"
         exit 0
@@ -514,6 +647,7 @@ main() {
     fi
 
     replace_binary
+    prepare_caddy_container
 
     # 尝试启动服务
     if ! start_services; then
@@ -521,6 +655,8 @@ main() {
         rollback
         error_exit "升级失败，已回滚到原版本"
     fi
+
+    wait_caddy_container
 
     # 验证升级
     if ! verify_upgrade; then

@@ -341,17 +341,18 @@ func TestUpdateAppPATCH(t *testing.T) {
 			t.Errorf("method = %s", r.Method)
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "notes", "memory_mb": 1024})
+		// The server wraps the app view: {"app": {...}, "applied_now": true}.
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"name": "notes", "memory_mb": 1024}, "applied_now": true})
 	}))
 	defer ts.Close()
 	c := newDirectClient(t, ts)
 	mem := 1024
-	a, err := c.UpdateApp(context.Background(), "notes", AppSettings{MemoryMB: &mem})
+	u, err := c.UpdateApp(context.Background(), "notes", AppSettings{MemoryMB: &mem})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.MemoryMB != 1024 {
-		t.Errorf("memory = %d", a.MemoryMB)
+	if u.App.Name != "notes" || u.App.MemoryMB != 1024 || !u.AppliedNow {
+		t.Errorf("update = %+v", u)
 	}
 	if body.MemoryMB == nil || *body.MemoryMB != 1024 {
 		t.Errorf("patched body memory = %+v", body.MemoryMB)

@@ -277,10 +277,10 @@ func (a *app) reportDeployment(ctx context.Context, api client.API, appName stri
 		})
 	}
 	// The URL lives on the App view; fetch it when live.
-	var url string
+	var url, lanURL string
 	if dep.Status == "live" {
 		if app, err := api.App(ctx, appName); err == nil {
-			url = app.URL
+			url, lanURL = app.URL, app.LANURL
 		}
 	}
 
@@ -290,6 +290,7 @@ func (a *app) reportDeployment(ctx context.Context, api client.API, appName stri
 			"deployment_id": dep.ID,
 			"version":       dep.Seq,
 			"url":           url,
+			"lan_url":       lanURL,
 			"warnings":      warnings,
 		}
 		if start != nil {
@@ -313,6 +314,9 @@ func (a *app) reportDeployment(ctx context.Context, api client.API, appName stri
 	}
 	if url != "" {
 		a.out.human("部署成功：%s", url)
+		if lanURL != "" {
+			a.out.human("局域网地址：%s", lanURL)
+		}
 	} else {
 		a.out.human("部署成功（版本 %d）。", dep.Seq)
 	}

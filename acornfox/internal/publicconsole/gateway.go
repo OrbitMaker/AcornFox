@@ -1,5 +1,3 @@
-//go:build !windows
-
 package publicconsole
 
 import (
@@ -25,6 +23,12 @@ type GatewayConfig struct {
 	Limiter  *Limiter         // nil => NewLimiter(nil)
 	Now      func() time.Time // nil => time.Now
 	Logger   *slog.Logger     // nil => slog.Default()
+
+	// LAN serves the console on the local network over plain HTTP instead of
+	// behind Caddy on a domain: any Host is accepted, the Origin must match
+	// the Host, the client address is the TCP peer (no proxy in front) and
+	// cookies are not marked Secure.
+	LAN bool
 }
 
 // NewGateway returns the handler Caddy reverse-proxies the public domain to.
@@ -66,13 +70,18 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "公网访问未开启", http.StatusNotFound)
 		return
 	}
-	if !strings.EqualFold(hostOnly(r.Host), cfg.Domain) {
-		http.Error(w, "域名不匹配", http.StatusMisdirectedRequest)
-		return
+	origin := "https://" + cfg.Domain
+	if g.cfg.LAN {
+		origin = "http://" + r.Host
+	} else {
+		if !strings.EqualFold(hostOnly(r.Host), cfg.Domain) {
+			http.Error(w, "域名不匹配", http.StatusMisdirectedRequest)
+			return
+		}
+		h.Set("Strict-Transport-Security", "max-age=31536000")
 	}
-	h.Set("Strict-Transport-Security", "max-age=31536000")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		if origins := r.Header.Values("Origin"); len(origins) != 1 || origins[0] != "https://"+cfg.Domain {
+		if origins := r.Header.Values("Origin"); len(origins) != 1 || origins[0] != origin {
 			http.Error(w, "来源不被允许", http.StatusForbidden)
 			return
 		}
@@ -111,7 +120,11 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, k := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
 		out.Header.Del(k)
 	}
-	g.cfg.Console.ServeHTTP(&secureCookieWriter{ResponseWriter: w}, out)
+	if g.cfg.LAN {
+		g.cfg.Console.ServeHTTP(w, out)
+	} else {
+		g.cfg.Console.ServeHTTP(&secureCookieWriter{ResponseWriter: w}, out)
+	}
 
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/console/logout" {
 		g.forget(Digest(c.Value))
@@ -120,6 +133,10 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (g *gateway) login(w http.ResponseWriter, r *http.Request, cfg *Config) {
 	ip := clientIP(r)
+	if g.cfg.LAN {
+		// Nothing proxies the LAN listener: X-Forwarded-For is client input.
+		ip = hostOnly(r.RemoteAddr)
+	}
 	if ok, wait := g.cfg.Limiter.Allow(ip); !ok {
 		mins := int(wait.Minutes() + 0.999)
 		g.loginPage(w, http.StatusTooManyRequests, fmt.Sprintf("尝试次数过多，请 %d 分钟后再试。", mins))
@@ -156,7 +173,7 @@ func (g *gateway) login(w http.ResponseWriter, r *http.Request, cfg *Config) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: secret, Path: "/",
-		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: !g.cfg.LAN, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -267,24 +284,28 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 <link rel="stylesheet" href="/login.css"></head>
 <body><main>
 <h1>AcornFox 控制台</h1>
-<p class="sub">输入开通公网访问时生成的密码。</p>
-{{if .}}<p class="err" role="alert">{{.}}</p>{{end}}
+<p class="sub">{{.Sub}}</p>
+{{if .Msg}}<p class="err" role="alert">{{.Msg}}</p>{{end}}
 <form method="post" action="/login">
 <label for="password">密码</label>
 <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
 <button type="submit">登录</button>
 </form>
-<p class="note">忘记密码：在电脑上运行 <code>acornfox public-console enable 域名 --reset-password</code> 重新生成。</p>
+<p class="note">忘记密码：运行 <code>{{.Reset}}</code> 重新生成。</p>
 </main></body></html>`))
 
 func (g *gateway) loginPage(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	w.WriteHeader(status)
-	_ = loginTmpl.Execute(w, msg)
+	page := struct{ Msg, Sub, Reset string }{msg, "输入开通公网访问时生成的密码。", "acornfox public-console enable 域名 --reset-password"}
+	if g.cfg.LAN {
+		page.Sub, page.Reset = "输入开启局域网访问时生成的密码。", "acornfox lan-console enable --reset-password"
+	}
+	_ = loginTmpl.Execute(w, page)
 }
 
-// loginCSS follows docs/brand.md (ink, paper, line, pill buttons).
+// loginCSS uses the console palette (ink, paper, line, pill buttons).
 const loginCSS = `:root{--paper:#f4f6f7;--surface:#fff;--line:#dde3e6;--ink:#13161c;--muted:#5a6470;--danger:#b42d20}
 @media (prefers-color-scheme:dark){:root{--paper:#13161c;--surface:#1c2028;--line:#2e343d;--ink:#f4f6f7;--muted:#a9b3bc;--danger:#f06a5c}}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--paper);color:var(--ink);font:16px/1.6 "IBM Plex Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif}

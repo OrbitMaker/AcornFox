@@ -24,8 +24,8 @@ if [ "$cc" = CN ] || { [ -z "$cc" ] && ! curl -s -m 6 -o /dev/null https://githu
 
 | 结果 | 安装脚本地址前缀 |
 | --- | --- |
-| `cn` | `https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/` |
-| `global` | `https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/` |
+| `cn` | `https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/` |
+| `global` | `https://github.com/OrbitMaker/AcornFox/releases/latest/download/` |
 
 ### 2. 安装 CLI（用户电脑）
 
@@ -42,6 +42,16 @@ if [ "$cc" = CN ] || { [ -z "$cc" ] && ! curl -s -m 6 -o /dev/null https://githu
    - 提醒用户在云厂商安全组放行 TCP 18810-18899（应用端口）；要绑定域名再放行 80、443。
    - USER 不是 root 时，执行一次 `ssh USER@HOST 'sudo usermod -aG acornfox-users USER'`，之后的连接才有权限。
 5. `acornfox target add NAME --ssh USER@HOST [--port N] [--identity 私钥路径] --json`。
+
+### 3b. 部署到这台电脑（Mac、Windows，不用服务器）
+
+用户说“装在我电脑上”“本机跑”时用这条路，替代第 3 步：
+
+1. 需要 Docker：Mac 推荐 Docker Desktop，已有 OrbStack、Colima 也行；Windows 需要 Docker Desktop（WSL 2）。没装时请用户自己安装并打开，不要替用户下载安装。
+2. `acornfox install`（不需要 sudo）：注册登录自启、添加名为 `local` 的服务器并设为默认。输出里的 ✗ 项按提示处理，`acornfox doctor` 可随时重查。
+3. 部署成功后有两个网址：`url`（localhost，本机）和 `lan_url`（局域网里的手机、电脑能打开）。只想本机打开：`acornfox app set --expose local`。
+4. 苹果芯片上只有 amd64 镜像的应用也能装，会提示“可能较慢”，这是正常的。
+5. 升级：用新版本再运行一次 `acornfox install`；回滚：`acornfox install --rollback`。卸载：`acornfox uninstall`（保留数据），`--purge` 会删除数据，必须用户明确要求。
 
 ### 4. 更新 Skill（可选）
 
@@ -87,7 +97,9 @@ acornfox logs --json [--tail 200]      # 容器日志
 | `pull_failed` / `pull_timeout` / `image_not_found` | 基础镜像拉不下来：核对镜像名和标签；服务器在中国大陆时请用户配置 Docker 镜像加速 |
 | `port_not_listening` | 程序要监听 `0.0.0.0`（不是 127.0.0.1），端口与 `--port` 一致 |
 | `container_exited` / `start_failed` | 看 `log_excerpt` 和 `acornfox logs`，修启动命令或缺失的环境变量 |
-| `out_of_memory` | `acornfox app set --memory 1024` 后重新部署 |
+| `out_of_memory` | `acornfox app set --memory 1024 --json`，立即生效不用重新部署；如果是部署时就内存不够，改完再重新部署 |
+| `memory_cap_exceeded` | 整机分配给应用的内存不够了：先 `acornfox limits --json` 看各应用占用，调小用不完的应用（`app set --memory`），或请用户确认后调大整机上限 `acornfox limits --memory 26G` |
+| `memory_below_usage` | 内存上限不能低于应用当前实际用量，换一个更大的值 |
 | `unpersisted_database`（警告） | 数据写在容器里会丢：`acornfox volume add /app/data` |
 | `clone_failed` / `clone_timeout` / `repo_not_found` / `ref_not_found` | 核对 Git 地址和分支，仓库必须公开 |
 
@@ -102,7 +114,19 @@ acornfox volume add /app/data --json           # 绝对路径，容器重建后�
 acornfox app set --port 3000 --memory 512 --health-path /healthz --json
 ```
 
-改环境变量、数据卷或设置后执行 `acornfox redeploy --json` 生效。
+改环境变量、数据卷、端口或健康检查路径后执行 `acornfox redeploy --json` 生效。
+
+## 内存与 CPU 上限
+
+```bash
+acornfox app set --memory 768 --cpu 1.5 --json   # 内存至少 256 MB，CPU 至少 0.5 核；立即生效，应用不重启
+acornfox limits --json                           # 整机最多分配给应用多少、各应用和数据库各占多少
+acornfox limits --memory 26G --cpu 8 --json      # 改整机上限；auto 恢复自动
+```
+
+- 所有应用和数据库的内存上限加起来不能超过整机上限；新建应用（默认 256 MB）、加数据库、调大内存时都会检查。整机不到 2 GB 时，上限是整机内存的 2 倍（允许超分）。
+- CPU 只要求单个应用的上限不超过整机上限，总和可以超过。
+- 整机上限是服务器级的设置，改之前先问用户。
 
 ## 数据库与缓存
 
@@ -163,6 +187,19 @@ acornfox public-console status --json                         # 是否开启、�
 acornfox public-console enable 域名 --reset-password --json    # 忘记密码时重新生成，旧密码和登录会话立即失效
 acornfox public-console disable --json                        # 关闭：移除路由，公网登录的会话全部失效
 ```
+
+## 局域网打开控制台（可选）
+
+控制台默认只在本机打开。用户想在同一局域网的手机、平板上打开控制台时，才提这个：
+
+```bash
+acornfox lan-console enable --json   # 返回 url 和 password（密码只显示这一次）
+acornfox lan-console status --json
+acornfox lan-console disable --json
+```
+
+- 把 `url` 告诉用户；密码请用户自己记下，不要在对话里复述。局域网里谁拿到密码都能管理这台机器上的应用，用完建议关闭。
+- 公网服务器上不要开局域网控制台，用上面的公网访问（带 HTTPS）。
 
 ## Dockerfile 要点
 

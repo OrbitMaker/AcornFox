@@ -1,6 +1,5 @@
 // Package client is the CLI's typed client of the acornfox server API, over
 // SSH (system ssh + "acornfox proxy") or a direct URL for development.
-// See docs/n2-contract.md sections 1 and 4.
 package client
 
 import (
@@ -21,7 +20,13 @@ type Target struct {
 	Identity      string `json:"identity,omitempty"`       // private key path, optional
 	RemoteCommand string `json:"remote_command,omitempty"` // default "acornfox proxy"
 	URL           string `json:"url,omitempty"`            // direct http://127.0.0.1:port or unix:///run/acornfox/api.sock, bypasses SSH
+	// Console is the browser console of a local (unix socket) target, e.g.
+	// http://127.0.0.1:18800 on macOS and Windows; empty means that default.
+	Console string `json:"console,omitempty"`
 }
+
+// DefaultLocalConsole is the console of this computer's acornfox.
+const DefaultLocalConsole = "http://127.0.0.1:18800"
 
 // Diagnosis mirrors state.Diagnosis on the wire.
 type Diagnosis struct {
@@ -88,6 +93,8 @@ type App struct {
 	MemoryMB          int         `json:"memory_mb"`
 	CPUMilli          int         `json:"cpu_milli"`
 	URL               string      `json:"url"`
+	LANURL            string      `json:"lan_url,omitempty"`
+	Exposure          string      `json:"exposure,omitempty"`
 	ObservedState     string      `json:"observed_state"`
 	Live              *Deployment `json:"live,omitempty"`
 	Env               []EnvKey    `json:"env,omitempty"`
@@ -121,6 +128,47 @@ type AppSettings struct {
 	CPUMilli   *int    `json:"cpu_milli,omitempty"`
 	Port       *int    `json:"port,omitempty"`
 	HealthPath *string `json:"health_path,omitempty"`
+	Exposure   *string `json:"exposure,omitempty"`
+}
+
+// AppUpdate mirrors PATCH /v1/apps/{app}. AppliedNow is true when new memory /
+// CPU limits were applied to the running container without a restart;
+// ApplyError explains why they will only take effect on the next deployment.
+type AppUpdate struct {
+	App        App    `json:"app"`
+	AppliedNow bool   `json:"applied_now,omitempty"`
+	ApplyError string `json:"apply_error,omitempty"`
+}
+
+// Resources mirrors GET/PUT /v1/resources: the server-wide caps and
+// what app and add-on containers have been given.
+type Resources struct {
+	Memory struct {
+		HostMB      int  `json:"host_mb"`
+		CapMB       int  `json:"cap_mb"`
+		Auto        bool `json:"auto"`
+		AllocatedMB int  `json:"allocated_mb"`
+	} `json:"memory"`
+	CPU struct {
+		HostMilli   int  `json:"host_milli"`
+		CapMilli    int  `json:"cap_milli"`
+		Auto        bool `json:"auto"`
+		MaxAppMilli int  `json:"max_app_milli"`
+	} `json:"cpu"`
+	Items []struct {
+		App      string `json:"app"`
+		Kind     string `json:"kind"`
+		MemoryMB int    `json:"memory_mb"`
+		CPUMilli int    `json:"cpu_milli"`
+	} `json:"items"`
+	MinAppMemoryMB int `json:"min_app_memory_mb"`
+	MinAppCPUMilli int `json:"min_app_cpu_milli"`
+}
+
+// ResourceCaps for PUT /v1/resources; nil fields are unchanged, 0 = automatic.
+type ResourceCaps struct {
+	MemoryMB *int `json:"memory_mb,omitempty"`
+	CPUMilli *int `json:"cpu_milli,omitempty"`
 }
 
 // API is what internal/cli depends on. Connect returns a *Client implementing it.
@@ -132,7 +180,7 @@ type API interface {
 	Deployment(ctx context.Context, id string, afterEvent int64) (Deployment, []Event, error)
 	Apps(ctx context.Context) ([]App, error)
 	App(ctx context.Context, app string) (App, error)
-	UpdateApp(ctx context.Context, app string, s AppSettings) (App, error)
+	UpdateApp(ctx context.Context, app string, s AppSettings) (AppUpdate, error)
 	Logs(ctx context.Context, app string, tail int) ([]string, error)
 	HostMetrics(ctx context.Context) (HostMetrics, error)           // N4.3: GET /v1/metrics/host
 	AppMetrics(ctx context.Context, app string) (AppMetrics, error) // N4.3: GET /v1/metrics/apps/{app}
@@ -156,11 +204,15 @@ type API interface {
 	AddAddon(ctx context.Context, app, kind string) (AddonResult, error)                        // POST   /v1/apps/{app}/addons {"kind"}
 	RemoveAddon(ctx context.Context, app, kind string, deleteVolume bool) (AddonRemoval, error) // DELETE /v1/apps/{app}/addons/{kind}[?volumes=true]
 
-	// ADR-0016 public console (trusted socket only)
-	PublicConsoleStatus(ctx context.Context) (PublicConsoleStatus, error)                                           // GET    /v1/public-console
-	PublicConsoleVerify(ctx context.Context, domain string) (PublicConsoleVerify, error)                            // POST   /v1/public-console/verify
-	PublicConsoleEnable(ctx context.Context, domain, verifyID string, reset bool) (PublicConsoleEnabled, error)     // POST   /v1/public-console/enable
-	PublicConsoleDisable(ctx context.Context) (bool, error)                                                         // DELETE /v1/public-console
+	// Server-wide resource caps
+	Resources(ctx context.Context) (Resources, error)                          // GET /v1/resources
+	SetResourceCaps(ctx context.Context, caps ResourceCaps) (Resources, error) // PUT /v1/resources
+
+	// Public console (trusted socket only)
+	PublicConsoleStatus(ctx context.Context) (PublicConsoleStatus, error)                                       // GET    /v1/public-console
+	PublicConsoleVerify(ctx context.Context, domain string) (PublicConsoleVerify, error)                        // POST   /v1/public-console/verify
+	PublicConsoleEnable(ctx context.Context, domain, verifyID string, reset bool) (PublicConsoleEnabled, error) // POST   /v1/public-console/enable
+	PublicConsoleDisable(ctx context.Context) (bool, error)                                                     // DELETE /v1/public-console
 }
 
 // PublicConsoleStatus mirrors GET /v1/public-console.

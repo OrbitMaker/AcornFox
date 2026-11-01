@@ -22,11 +22,12 @@ func newTestServer(t *testing.T) (http.Handler, *fakeStore, *fakeKicker, *fakeRu
 	k := &fakeKicker{}
 	rn := newFakeRunner()
 	h := New(Config{
-		Store:      st,
-		Kicker:     k,
-		Runner:     rn,
-		UploadDir:  dir,
-		PublicHost: "192.168.1.10",
+		Store:       st,
+		Kicker:      k,
+		Runner:      rn,
+		UploadDir:   dir,
+		PublicHost:  "192.168.1.10",
+		HostMetrics: fakeHostSized(8192, 4), // automatic caps: 6964 MB (8192 - 15%), 4 cores
 	})
 	return h, st, k, rn, dir
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -63,6 +64,17 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 		MemoryMB:          a.MemoryMB,
 		CPUMilli:          a.CPUMilli,
 		URL:               appURL(s.publicHost, a.PublicPort),
+		Exposure:          s.effectiveExposure(a),
+	}
+	if v.Exposure == state.ExposureLocal && s.lanHost != nil {
+		// Desktop: localhost is the address that works; Linux keeps the
+		// configured public host for the other exposures.
+		v.URL = appURL("localhost", a.PublicPort)
+	}
+	if s.lanHost != nil && (v.Exposure == state.ExposureLAN || v.Exposure == state.ExposurePublic) {
+		if h := s.lanHost(); h != "" {
+			v.LANURL = appURL(h, a.PublicPort)
+		}
 	}
 
 	// Observed container state (best-effort).
@@ -430,10 +442,14 @@ type patchAppRequest struct {
 	CPUMilli   *int    `json:"cpu_milli,omitempty"`
 	Port       *int    `json:"port,omitempty"`
 	HealthPath *string `json:"health_path,omitempty"`
+	Exposure   *string `json:"exposure,omitempty"` // local | lan | public; "" resets to the platform default
 }
 
 // patchApp implements PATCH /v1/apps/{app}: update app settings within bounds.
-// Changes take effect on the next deployment.
+// Port and health path take effect on the next deployment. Memory and CPU
+// limits must fit under the server-wide caps (resources.go) and are applied to
+// the existing container in place, without a restart; when that is
+// not possible they take effect on the next deployment like the rest.
 func (s *server) patchApp(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	app := r.PathValue("app")
@@ -447,21 +463,85 @@ func (s *server) patchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate bounds before touching the store so a bad value has no effect.
-	if body.MemoryMB != nil && (*body.MemoryMB < minMemoryMB || *body.MemoryMB > maxMemoryMB) {
-		writeError(w, http.StatusBadRequest, "invalid_memory", "内存需在 64..16384 MB 之间")
+	if body.MemoryMB != nil && *body.MemoryMB < minMemoryMB {
+		writeError(w, http.StatusBadRequest, "invalid_memory", fmt.Sprintf("内存上限至少 %d MB", minMemoryMB))
 		return
 	}
-	if body.CPUMilli != nil && (*body.CPUMilli < minCPUMilli || *body.CPUMilli > maxCPUMilli) {
-		writeError(w, http.StatusBadRequest, "invalid_cpu", "CPU 需在 100..16000 (毫核) 之间")
+	if body.CPUMilli != nil && *body.CPUMilli < minCPUMilli {
+		writeError(w, http.StatusBadRequest, "invalid_cpu", fmt.Sprintf("CPU 上限至少 %.1f 核", float64(minCPUMilli)/1000))
 		return
 	}
 	if body.Port != nil && (*body.Port < 1 || *body.Port > 65535) {
 		writeError(w, http.StatusBadRequest, "invalid_port", "port 必须在 1..65535 之间")
 		return
 	}
-	if _, err := s.store.GetApp(ctx, app); err != nil {
+	if e := body.Exposure; e != nil {
+		switch *e {
+		case "", state.ExposureLocal, state.ExposureLAN, state.ExposurePublic:
+		case state.ExposureAFXCloud:
+			writeError(w, http.StatusNotImplemented, "not_implemented", "经 AFX 云的公网地址还没开放，目前可选 local、lan、public")
+			return
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_exposure", "exposure 只能是 local（只本机）、lan（本机和局域网）或 public（所有网卡 + 域名）")
+			return
+		}
+	}
+	limitsChange := body.MemoryMB != nil || body.CPUMilli != nil
+	if limitsChange {
+		s.resMu.Lock()
+		defer s.resMu.Unlock()
+	}
+	cur, err := s.store.GetApp(ctx, app)
+	if err != nil {
 		s.mapStoreError(w, err)
 		return
+	}
+	live := ""
+	if cur.CurrentDeployment != "" {
+		live = runner.ContainerName(app, cur.CurrentDeployment)
+	}
+	if limitsChange {
+		v, err := s.resources(ctx)
+		if err != nil {
+			s.mapStoreError(w, err)
+			return
+		}
+		if m := body.MemoryMB; m != nil {
+			hardMax := maxMemoryMB
+			if v.Memory.CapMB > 0 {
+				hardMax = v.Memory.CapMB
+			}
+			if *m > hardMax {
+				writeError(w, http.StatusBadRequest, "invalid_memory", fmt.Sprintf("内存上限不能超过 %d MB", hardMax))
+				return
+			}
+			if extra := *m - appMemoryMB(cur); extra > 0 && v.Memory.CapMB > 0 && v.Memory.AllocatedMB+extra > v.Memory.CapMB {
+				memoryRoomError(w, v, extra, app+" 调大内存")
+				return
+			}
+			// Lowering below what the app uses now would get it killed when
+			// applied in place; ask for a value above current usage instead.
+			if live != "" && *m < appMemoryMB(cur) {
+				if st, err := s.runner.ContainerStats(ctx, app, live); err == nil && st.MemoryUsageMB > 0 {
+					if floor := int(st.MemoryUsageMB) + memoryUsageMarginMB; *m < floor {
+						writeError(w, http.StatusConflict, "memory_below_usage", fmt.Sprintf(
+							"%s 现在实际用了 %d MB 内存，上限不能低于 %d MB", app, int(st.MemoryUsageMB), floor))
+						return
+					}
+				}
+			}
+		}
+		if c := body.CPUMilli; c != nil {
+			hardMax := maxCPUMilli
+			if v.CPU.CapMilli > 0 {
+				hardMax = v.CPU.CapMilli
+			}
+			if *c > hardMax {
+				writeError(w, http.StatusBadRequest, "invalid_cpu", fmt.Sprintf(
+					"CPU 上限不能超过 %.1f 核（整机上限，可用 acornfox limits --cpu 调整）", float64(hardMax)/1000))
+				return
+			}
+		}
 	}
 	updated, err := s.store.UpdateApp(ctx, app, func(a *state.App) error {
 		if body.MemoryMB != nil {
@@ -476,14 +556,35 @@ func (s *server) patchApp(w http.ResponseWriter, r *http.Request) {
 		if body.HealthPath != nil {
 			a.HealthPath = *body.HealthPath
 		}
+		if body.Exposure != nil {
+			a.Exposure = *body.Exposure
+		}
 		return nil
 	})
 	if err != nil {
 		s.mapStoreError(w, err)
 		return
 	}
-	view := s.buildAppView(ctx, updated, true)
-	resp := map[string]any{"app": view}
+	if body.Exposure != nil && *body.Exposure != cur.Exposure {
+		// Routes (and on macOS/Windows the edge's published ports) follow on
+		// the app's next round.
+		s.kicker.Kick(app)
+	}
+	resp := map[string]any{}
+	if limitsChange && live != "" {
+		err := s.runner.UpdateResources(ctx, runner.UpdateResourcesRequest{
+			App: app, Name: live, MemoryMB: appMemoryMB(updated), CPUMilli: appCPUMilli(updated),
+		})
+		switch {
+		case err == nil:
+			resp["applied_now"] = true
+		case errors.Is(err, runner.ErrNotFound):
+		default:
+			s.log.Warn("apply limits in place", "app", app, "err", err)
+			resp["apply_error"] = "已保存，但没能立即应用到运行中的容器，下次部署时生效：" + err.Error()
+		}
+	}
+	resp["app"] = s.buildAppView(ctx, updated, true)
 	if updated.CurrentDeployment != "" {
 		resp["redeploy_available"] = true
 	}
@@ -583,12 +684,18 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		appCount = len(apps)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"api_version":    apiVersion,
 		"runner":         runnerState,
 		"docker_version": dockerVersion,
 		"apps":           appCount,
-	})
+	}
+	if s.edgeStatus != nil {
+		if st, msg := s.edgeStatus(); st != "" {
+			body["edge"] = map[string]string{"state": st, "message": msg}
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // decodeJSON decodes an optional JSON body. An empty body is treated as an

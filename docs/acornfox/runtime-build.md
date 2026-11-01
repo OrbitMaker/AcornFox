@@ -1,6 +1,6 @@
 # 服务器端运行依赖：Docker 与 Caddy
 
-[cc] 2026-10-11 重写。AcornFox 自己不构建、不修改任何运行时组件。服务器上只依赖两样现成的东西，都由 `scripts/install/install.sh` 安装：
+AcornFox 自己不构建、不修改任何运行时组件。服务器上只依赖两样现成的东西，都由 `scripts/install/install.sh` 安装：
 
 | 组件 | 用途 | 来源 |
 | --- | --- | --- |

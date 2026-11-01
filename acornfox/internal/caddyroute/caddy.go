@@ -38,31 +38,55 @@ const (
 // Caddy configuration is left untouched.
 type caddyRouter struct {
 	socket string
+	base   string // "http://caddy" for the unix socket, or the admin gateway URL
+	token  string // X-AcornFox-Token for the edge container's admin gateway
 	client *http.Client
 	https  HTTPSConfig
 }
 
+// Option configures New.
+type Option func(*caddyRouter)
+
+// WithToken sets the token the edge container's admin gateway requires
+// (sent as X-AcornFox-Token).
+func WithToken(token string) Option { return func(c *caddyRouter) { c.token = token } }
+
+// TokenHeader is the header the edge admin gateway checks.
+const TokenHeader = "X-AcornFox-Token"
+
 // New returns a Router that reaches Caddy's admin API on the given Unix socket.
 // https configures the shared "af-domains" HTTPS server; zero HTTPPort/HTTPSPort
 // fall back to 80/443.
-func New(adminSocket string, https HTTPSConfig) Router {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", adminSocket)
-		},
-	}
+//
+// admin is either a Unix socket path (optionally "unix:"-prefixed; the v0.3
+// host Caddy) or an "http://127.0.0.1:<port>" URL (the edge container's
+// token-checked admin gateway, used together with WithToken).
+func New(admin string, https HTTPSConfig, opts ...Option) Router {
 	if https.HTTPPort == 0 {
 		https.HTTPPort = defaultHTTPPort
 	}
 	if https.HTTPSPort == 0 {
 		https.HTTPSPort = defaultHTTPSPort
 	}
-	return &caddyRouter{
-		socket: adminSocket,
-		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
-		https:  https,
+	c := &caddyRouter{https: https}
+	if strings.HasPrefix(admin, "http://") || strings.HasPrefix(admin, "https://") {
+		c.base = strings.TrimRight(admin, "/")
+		c.client = &http.Client{Timeout: 10 * time.Second}
+	} else {
+		socket := strings.TrimPrefix(admin, "unix:")
+		c.socket = socket
+		c.base = "http://caddy"
+		c.client = &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socket)
+			},
+		}, Timeout: 10 * time.Second}
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // caddyServer is the subset of a Caddy HTTP server we read and write.
@@ -133,6 +157,10 @@ func (c *caddyRouter) Current(ctx context.Context) (map[string]Route, error) {
 		app := strings.TrimPrefix(name, serverPrefix)
 		route := Route{App: app}
 		route.PublicPort = parseListenPort(srv.Listen)
+		route.Listen = parseListenHost(srv.Listen)
+		if len(srv.Listen) > 1 {
+			route.LANPort = parseListenPort(srv.Listen[1:])
+		}
 		route.Upstream = firstUpstream(srv.Routes)
 		out[app] = route
 	}
@@ -297,8 +325,12 @@ func (c *caddyRouter) ensureHTTPPort(ctx context.Context, field string, port, de
 
 // desiredServer builds the Caddy server config for one route.
 func desiredServer(r Route) caddyServer {
+	listen := []string{fmt.Sprintf("%s:%d", r.Listen, r.PublicPort)}
+	if r.LANPort > 0 {
+		listen = append(listen, fmt.Sprintf(":%d", r.LANPort))
+	}
 	return caddyServer{
-		Listen: []string{fmt.Sprintf(":%d", r.PublicPort)},
+		Listen: listen,
 		Routes: []caddyRoute{{
 			Handle: []caddyHandler{{
 				Handler:   "reverse_proxy",
@@ -377,6 +409,9 @@ func serverEqual(a, b caddyServer) bool {
 
 // samePorts reports whether two listen lists carry the same set of ports.
 func samePorts(a, b []string) bool {
+	if parseListenHost(a) != parseListenHost(b) {
+		return false
+	}
 	pa := listenPorts(a)
 	pb := listenPorts(b)
 	if len(pa) != len(pb) {
@@ -789,9 +824,12 @@ func (c *caddyRouter) do(ctx context.Context, method, path string, payload []byt
 	if payload != nil {
 		reader = bytes.NewReader(payload)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://caddy"+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
 		return nil, 0, fmt.Errorf("caddy new request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set(TokenHeader, c.token)
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -829,6 +867,17 @@ func parseListenPort(listen []string) int {
 		}
 	}
 	return 0
+}
+
+// parseListenHost returns the host part of the first listen address ("" for
+// ":<port>", i.e. every interface).
+func parseListenHost(listen []string) string {
+	for _, l := range listen {
+		if idx := strings.LastIndex(l, ":"); idx >= 0 {
+			return strings.TrimPrefix(l[:idx], "tcp/")
+		}
+	}
+	return ""
 }
 
 // firstUpstream returns the dial address of the first reverse_proxy upstream.

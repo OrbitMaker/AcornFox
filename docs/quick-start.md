@@ -37,9 +37,9 @@ ssh user@your-server-ip
 执行安装命令：
 
 ```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash
 # 中国大陆服务器改用 Gitee 镜像：
-curl -fsSL https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/install.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash
 ```
 
 **国内服务器**会自动使用镜像加速，无需额外配置。
@@ -67,9 +67,9 @@ acf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 在你的本地电脑（Windows/macOS/Linux）执行：
 
 ```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
 # 中国大陆改用 Gitee 镜像：
-curl -fsSL https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
 ```
 
 **Windows 用户**：在 Git Bash 中执行，或从 GitHub Releases 下载 `acornfox_windows_amd64.exe`，改名为 `acornfox.exe` 后放到 PATH 中的目录。
@@ -310,4 +310,4 @@ sudo cat /etc/docker/daemon.json
 
 - 查看命令帮助: `acornfox --help`
 - 故障排查: [troubleshooting.md](troubleshooting.md)
-- GitHub Issues: https://github.com/OrbitMaker/AcornFox-rebuild/issues
+- GitHub Issues: https://github.com/OrbitMaker/AcornFox/issues

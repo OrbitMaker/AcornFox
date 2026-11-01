@@ -1,5 +1,5 @@
 // Package publicconsole lets users open the web console to the internet on a
-// domain of their own (ADR-0016): verify that the domain reaches this server,
+// domain of their own: verify that the domain reaches this server,
 // route it through Caddy with automatic HTTPS, and guard it with a generated
 // password, login rate limiting and the native console sessions.
 //

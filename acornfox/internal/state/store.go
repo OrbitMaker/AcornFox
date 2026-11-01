@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"time"
 
-	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -86,9 +85,9 @@ func Open(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)
 	}
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := lockExclusive(lockFile); err != nil {
 		lockFile.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
+		if errors.Is(err, errWouldBlock) {
 			return nil, ErrLocked
 		}
 		return nil, fmt.Errorf("flock lock file: %w", err)
@@ -134,7 +133,7 @@ func Open(cfg Config) (*Store, error) {
 
 // releaseLock unlocks and closes the flock file.
 func releaseLock(f *os.File) {
-	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	unlock(f)
 	_ = f.Close()
 }
 
@@ -245,12 +244,15 @@ func (s *Store) UpdateApp(ctx context.Context, name string, fn func(*App) error)
 		if draft.HealthPath == "" {
 			draft.HealthPath = DefaultHealthPath
 		}
+		if !ValidExposure(draft.Exposure) {
+			return fmt.Errorf("%w: exposure %q", ErrInvalid, draft.Exposure)
+		}
 		draft.UpdatedAt = time.Now().UTC()
 		_, err = tx.ExecContext(ctx, `UPDATE apps SET
-			desired=?, port=?, health_path=?, current_deployment=?, memory_mb=?, cpu_milli=?, updated_at=?
+			desired=?, port=?, health_path=?, current_deployment=?, memory_mb=?, cpu_milli=?, exposure=?, updated_at=?
 			WHERE name=?`,
 			draft.Desired, draft.Port, draft.HealthPath, draft.CurrentDeployment,
-			draft.MemoryMB, draft.CPUMilli, formatTime(draft.UpdatedAt), name)
+			draft.MemoryMB, draft.CPUMilli, draft.Exposure, formatTime(draft.UpdatedAt), name)
 		if err != nil {
 			return fmt.Errorf("update app: %w", err)
 		}
@@ -942,7 +944,7 @@ func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
-const appSelect = `SELECT name, desired, port, health_path, public_port, current_deployment, memory_mb, cpu_milli, created_at, updated_at`
+const appSelect = `SELECT name, desired, port, health_path, public_port, current_deployment, memory_mb, cpu_milli, exposure, created_at, updated_at`
 
 // rowScanner abstracts *sql.Row and *sql.Rows for shared scanning.
 type rowScanner interface {
@@ -953,7 +955,7 @@ func scanAppFrom(sc rowScanner) (App, error) {
 	var a App
 	var createdText, updatedText string
 	if err := sc.Scan(&a.Name, &a.Desired, &a.Port, &a.HealthPath, &a.PublicPort,
-		&a.CurrentDeployment, &a.MemoryMB, &a.CPUMilli, &createdText, &updatedText); err != nil {
+		&a.CurrentDeployment, &a.MemoryMB, &a.CPUMilli, &a.Exposure, &createdText, &updatedText); err != nil {
 		return App{}, err
 	}
 	var err error

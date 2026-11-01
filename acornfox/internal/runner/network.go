@@ -44,6 +44,14 @@ func (d *Docker) RemoveNetwork(ctx context.Context, app string) error {
 	if err := checkNetworkOwner(app, res.Network); err != nil {
 		return err
 	}
+	// The edge container (Caddy, bridge mode) joins every app network; detach
+	// it so an app's network can be removed with the app.
+	if onlyEdgeAttached(res.Network) {
+		d.disconnectEdge(ctx, res.Network.ID)
+		if again, ierr := d.cli.NetworkInspect(ctx, NetworkName(app), client.NetworkInspectOptions{}); ierr == nil {
+			res = again
+		}
+	}
 	if len(res.Network.Containers) != 0 || res.Network.ID == "" {
 		return &RemoteError{Status: http.StatusConflict, ErrorResponse: ErrorResponse{
 			Code: "network_in_use", Message: "应用网络仍有容器连接或缺少资源 ID，未删除",
@@ -54,6 +62,17 @@ func (d *Docker) RemoveNetwork(ctx context.Context, app string) error {
 		return nil
 	}
 	return err
+}
+
+// onlyEdgeAttached reports whether the edge container is the only endpoint.
+func onlyEdgeAttached(n network.Inspect) bool {
+	if len(n.Containers) != 1 {
+		return false
+	}
+	for _, ep := range n.Containers {
+		return ep.Name == EdgeContainerName
+	}
+	return false
 }
 
 func (c *Client) RemoveNetwork(ctx context.Context, app string) error {

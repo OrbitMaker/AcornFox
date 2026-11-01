@@ -81,6 +81,12 @@ type Config struct {
 	// DomainPendingBudget overrides state.DomainPendingBudget (tests set it
 	// small). Zero uses the default.
 	DomainPendingBudget time.Duration
+
+	// Edge runs Caddy as a container managed through the runner (see
+	// edge.go); nil keeps the v0.3 host Caddy.
+	Edge *EdgeConfig
+	// DefaultExposure applies to apps whose exposure is "" ("public" when empty).
+	DefaultExposure string
 }
 
 // Default configuration values.
@@ -103,6 +109,15 @@ type Reconciler struct {
 	mu       sync.Mutex
 	workers  map[string]*worker
 	firstRun bool // true until the first global round completes (forces a route Sync)
+
+	// edge container: the spec key last applied (edge.go); edgeOpMu
+	// serializes EnsureEdge calls
+	edgeMu       sync.Mutex
+	edgeKey      string
+	edgeState    string
+	edgeMsg      string
+	edgeFailures int
+	edgeOpMu     sync.Mutex
 
 	// runner/unavailable event throttle: app -> last time an event was written
 	pingMu      sync.Mutex
@@ -605,6 +620,9 @@ func (r *Reconciler) build(ctx context.Context, app state.App, d *state.Deployme
 			r.fail(ctx, app, d, env, diag)
 			return
 		}
+		if resp.Emulated {
+			r.event(ctx, app.Name, d.ID, "image", "这个镜像只有 amd64（x86）版本，苹果芯片上靠转译运行，可能较慢")
+		}
 		if resp.Image != nil {
 			imageID = resp.Image.ID
 			imageVolumes = resp.Image.Volumes
@@ -642,7 +660,7 @@ func (r *Reconciler) build(ctx context.Context, app state.App, d *state.Deployme
 
 // doStart creates and starts the container, then moves to checking.
 func (r *Reconciler) doStart(ctx context.Context, app state.App, d *state.Deployment, env []state.EnvVar, volumes []state.Volume) {
-	// N4.2 / ADR-0006: the new container starts only once every add-on
+	// The new container starts only once every add-on
 	// accepts connections; otherwise the deployment fails at stage "addon".
 	if addons, err := r.cfg.Store.ListAddons(ctx, app.Name); err != nil {
 		r.log.Error("list addons", "app", app.Name, "err", err)
@@ -847,7 +865,7 @@ func (r *Reconciler) doRoute(ctx context.Context, app state.App, d *state.Deploy
 		r.log.Error("compute routes", "app", app.Name, "err", err)
 		return
 	}
-	if err := r.cfg.Router.Sync(ctx, routes); err != nil {
+	if err := r.syncRoutes(ctx, routes); err != nil {
 		r.log.Error("route sync", "app", app.Name, "deployment", d.ID, "err", err)
 		r.event(ctx, app.Name, d.ID, "route", "路由同步失败，稍后重试："+err.Error())
 		r.routeFailMu.Lock()
@@ -1142,23 +1160,23 @@ func (r *Reconciler) desiredRoutes(ctx context.Context, thisApp string, override
 		} else {
 			continue // no live deployment, no route
 		}
-		hostPort := r.observedHostPort(ctx, a.Name, containerName)
-		if hostPort == 0 {
+		ci, ok := r.findContainer(ctx, a.Name, containerName)
+		if !ok {
 			continue
 		}
-		routes = append(routes, caddyroute.Route{
-			App:        a.Name,
-			PublicPort: a.PublicPort,
-			Upstream:   fmt.Sprintf("127.0.0.1:%d", hostPort),
-			Domains:    r.appDomainNames(ctx, a.Name),
-		})
+		rt, ok := r.appRoute(a, ci)
+		if !ok {
+			continue
+		}
+		rt.Domains = r.appDomainNames(ctx, a.Name)
+		routes = append(routes, rt)
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].App < routes[j].App })
 	return routes, nil
 }
 
 // RefreshRoutes syncs Caddy routes when they differ from the observed live
-// containers. The public console (ADR-0016) uses it because its route has no
+// containers. The public console uses it because its route has no
 // app worker to trigger a round. Like a round it is skipped while the runner is
 // unreachable, so missing container observations never delete app routes.
 func (r *Reconciler) RefreshRoutes(ctx context.Context) {
@@ -1183,12 +1201,38 @@ func (r *Reconciler) syncRoutesIfChanged(ctx context.Context) {
 	if !first {
 		current, err := r.cfg.Router.Current(ctx)
 		if err == nil && routesEqual(current, routes) {
+			// Routes match; the edge may still need new published ports
+			// (an exposure change in bridge mode leaves routes unchanged).
+			if recreated, eerr := r.ensureEdge(ctx, routes, false); eerr != nil {
+				r.log.Error("edge", "err", eerr)
+			} else if recreated {
+				if serr := r.cfg.Router.Sync(ctx, routes); serr != nil {
+					r.log.Error("route sync", "err", serr)
+				}
+			}
 			return
 		}
 	}
-	if err := r.cfg.Router.Sync(ctx, routes); err != nil {
+	if err := r.syncRoutes(ctx, routes); err != nil {
 		r.log.Error("route sync", "err", err)
 	}
+}
+
+// syncRoutes makes sure the edge container (when configured) matches routes
+// and pushes routes to Caddy. A failed push with an edge configured re-checks
+// the container once (it may have been removed or stopped) and retries.
+func (r *Reconciler) syncRoutes(ctx context.Context, routes []caddyroute.Route) error {
+	if _, err := r.ensureEdge(ctx, routes, false); err != nil {
+		return err
+	}
+	err := r.cfg.Router.Sync(ctx, routes)
+	if err == nil || r.edgeManager() == nil {
+		return err
+	}
+	if _, eerr := r.ensureEdge(ctx, routes, true); eerr != nil {
+		return eerr
+	}
+	return r.cfg.Router.Sync(ctx, routes)
 }
 
 // observedRoutes builds routes from live containers of running apps.
@@ -1203,16 +1247,16 @@ func (r *Reconciler) observedRoutes(ctx context.Context) ([]caddyroute.Route, er
 			continue
 		}
 		name := runner.ContainerName(a.Name, a.CurrentDeployment)
-		hostPort := r.observedHostPort(ctx, a.Name, name)
-		if hostPort == 0 {
+		ci, ok := r.findContainer(ctx, a.Name, name)
+		if !ok {
 			continue
 		}
-		routes = append(routes, caddyroute.Route{
-			App:        a.Name,
-			PublicPort: a.PublicPort,
-			Upstream:   fmt.Sprintf("127.0.0.1:%d", hostPort),
-			Domains:    r.appDomainNames(ctx, a.Name),
-		})
+		rt, ok := r.appRoute(a, ci)
+		if !ok {
+			continue
+		}
+		rt.Domains = r.appDomainNames(ctx, a.Name)
+		routes = append(routes, rt)
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].App < routes[j].App })
 	return routes, nil
@@ -1320,7 +1364,7 @@ func routesEqual(current map[string]caddyroute.Route, want []caddyroute.Route) b
 // routeEqual compares two routes on the fields the reconciler controls,
 // treating Domains as an unordered set.
 func routeEqual(a, b caddyroute.Route) bool {
-	if a.App != b.App || a.PublicPort != b.PublicPort || a.Upstream != b.Upstream {
+	if a.App != b.App || a.PublicPort != b.PublicPort || a.Upstream != b.Upstream || a.Listen != b.Listen || a.LANPort != b.LANPort {
 		return false
 	}
 	if len(a.Domains) != len(b.Domains) {

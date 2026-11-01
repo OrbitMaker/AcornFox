@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Login rate limiting (ADR-0016). The generated password cannot be guessed,
+// Login rate limiting. The generated password cannot be guessed,
 // but failures still cost: they slow scanners down and keep logs quiet.
 const (
 	freeFailures   = 5                // consecutive failures allowed per client

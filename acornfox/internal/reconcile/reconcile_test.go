@@ -550,6 +550,10 @@ func (f *fakeRunner) ListContainers(_ context.Context, app string) ([]runner.Con
 	return out, nil
 }
 
+func (f *fakeRunner) UpdateResources(context.Context, runner.UpdateResourcesRequest) error {
+	return nil
+}
+
 func (f *fakeRunner) StopContainer(_ context.Context, app, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

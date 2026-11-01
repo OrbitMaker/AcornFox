@@ -1,10 +1,10 @@
 # AcornFox 单机版
 
-让 AI 工作台里的一句“帮我部署”变成一个可访问的网址。本目录是单机版代码基线；旧代码保存在分支 `archive/acornfox-thin-core-20260929`。
+让 AI 工作台里的一句“帮我部署”变成一个可访问的网址。本目录是单机版的全部代码。
 
 ## 当前状态
 
-按 [v2 设计与迁移清单](../docs/acornfox-rebuild-migration-plan.md) 重建中：N0～N3 已通过开发机验收，N3 同时完成 Mac 原生 CLI、控制台和剪贴板检查（见 [N3 验收记录](../docs/evidence/n3-acceptance-2026-09-30.md)）。阶段 0 仍需 N5 的干净安装与升级；N4 完整运维观测、N6 Skill 与独立首发验收尚未完成。
+Linux 服务器（Ubuntu 24.04/22.04/20.04、Debian 13/12/11）用 `scripts/install/install.sh` 安装，server 与 runner 分两个账号运行；macOS 和 Windows 用 `acornfox install` 安装，单进程 `acornfox serve` 在后台运行。安装和使用见 [快速开始](../docs/quick-start.md)，各项能力见 [能力清单](../docs/capabilities.md)。
 
 ## 运行时
 

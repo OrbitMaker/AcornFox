@@ -51,9 +51,9 @@ AI 会先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国�
 
 ```bash
 # 中国大陆服务器（Gitee 镜像）
-curl -fsSL https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/install.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash
 # 其他地区
-curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash
 ```
 
 安装完成后会显示管理员令牌，请妥善保存。
@@ -62,9 +62,9 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/downlo
 
 ```bash
 # 中国大陆
-curl -fsSL https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
 # 其他地区
-curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
 ```
 
 #### 3. 配置服务器连接
@@ -186,18 +186,18 @@ sudo bash install.sh --global
 - [快速开始](docs/quick-start.md)
 - [常见问题](docs/quick-start.md#常见问题)
 - [AI 工作台 Skill](skills/acornfox/SKILL.md)
-- [架构设计](docs/architecture.md)
+- [能力清单](docs/capabilities.md)
 
 ## 🛠️ 升级
 
 ```bash
 # 服务器端升级
-curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/upgrade.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash
 # 中国大陆：
-curl -fsSL https://gitee.com/VIP13390/AcornFox-rebuild/raw/main/scripts/install/upgrade.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash
 
 # 客户端升级
-curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
 ```
 
 升级过程自动：
@@ -233,8 +233,8 @@ AcornFox 站在巨人的肩膀上：
 
 ## 📮 联系方式
 
-- 问题反馈: [GitHub Issues](https://github.com/OrbitMaker/AcornFox-rebuild/issues)
-- 文档: https://github.com/OrbitMaker/AcornFox-rebuild/tree/main/docs
+- 问题反馈: [GitHub Issues](https://github.com/OrbitMaker/AcornFox/issues)
+- 文档: https://github.com/OrbitMaker/AcornFox/tree/main/docs
 
 ---
 

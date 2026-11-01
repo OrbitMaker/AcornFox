@@ -26,6 +26,7 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // buildMemoryBytes bounds the memory available to a build; large enough for
@@ -50,6 +51,10 @@ var (
 // or bind-mounted containers.
 type Docker struct {
 	cli *client.Client
+
+	// registry is how Docker Hub images are pulled (pull_fallback.go):
+	// mirror first for users in mainland China, Docker Hub first otherwise.
+	registry Registry
 
 	// mu guards inflight, the concurrent-build dedupe map.
 	mu       sync.Mutex
@@ -325,21 +330,22 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 	pctx, cancel := context.WithTimeout(ctx, pullImageTimeout)
 	defer cancel()
 
-	resp, err := d.cli.ImagePull(pctx, ref, client.ImagePullOptions{})
-	if err != nil {
-		if f := classifyPull(pctx, err); f != nil {
-			return PullResponse{OK: false, Failure: f}, nil
+	emulated := false
+	werr := d.pull(pctx, ref, nil)
+	if werr != nil && noMatchingPlatform(werr) && d.hostIsARM(ctx) {
+		// Apple silicon: the image has no arm64 variant. Docker can run the
+		// amd64 one under emulation; allow it and mark it as possibly slow.
+		amd64 := []ocispec.Platform{{OS: "linux", Architecture: "amd64"}}
+		if werr = d.pull(pctx, ref, amd64); werr == nil {
+			emulated = true
 		}
-		return PullResponse{}, err
 	}
-	if werr := resp.Wait(pctx); werr != nil {
-		_ = resp.Close()
+	if werr != nil {
 		if f := classifyPull(pctx, werr); f != nil {
 			return PullResponse{OK: false, Failure: f}, nil
 		}
 		return PullResponse{}, werr
 	}
-	_ = resp.Close()
 
 	// Tag the pulled image as acornfox/<app>:<id> so it is owned by this app.
 	if _, err := d.cli.ImageTag(ctx, client.ImageTagOptions{Source: ref, Target: tag}); err != nil {
@@ -357,7 +363,30 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 		}
 		return PullResponse{}, err
 	}
-	return PullResponse{OK: true, Image: &info}, nil
+	return PullResponse{OK: true, Image: &info, Emulated: emulated}, nil
+}
+
+// pull pulls ref (optionally for the given platforms) and waits for it,
+// falling back to registry mirrors when Docker Hub stalls (pull_fallback.go).
+func (d *Docker) pull(ctx context.Context, ref string, platforms []ocispec.Platform) error {
+	return d.pullFallback(ctx, ref, platforms)
+}
+
+// noMatchingPlatform reports a pull that failed only because the image has no
+// variant for the Docker host's platform.
+func noMatchingPlatform(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no matching manifest") || strings.Contains(s, "does not provide the specified platform")
+}
+
+// hostIsARM reports whether the Docker host runs on 64-bit ARM.
+func (d *Docker) hostIsARM(ctx context.Context) bool {
+	info, err := d.cli.Info(ctx, client.InfoOptions{})
+	if err != nil {
+		return false
+	}
+	a := strings.ToLower(info.Info.Architecture)
+	return a == "aarch64" || a == "arm64"
 }
 
 // pullImageTimeout bounds a single image pull (contract: 10 minutes).
@@ -764,14 +793,8 @@ func (d *Docker) ensureAddonImage(ctx context.Context, ref string) error {
 	}
 	pctx, cancel := context.WithTimeout(ctx, pullImageTimeout)
 	defer cancel()
-	resp, err := d.cli.ImagePull(pctx, ref, client.ImagePullOptions{})
-	if err != nil {
+	if err := d.pullFallback(pctx, ref, nil); err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrPullFailed, ref, err)
-	}
-	werr := resp.Wait(pctx)
-	_ = resp.Close()
-	if werr != nil {
-		return fmt.Errorf("%w: %s: %v", ErrPullFailed, ref, werr)
 	}
 	return nil
 }
@@ -918,29 +941,29 @@ func (d *Docker) containerInfoByID(ctx context.Context, id string) (ContainerInf
 			info.Health = string(c.State.Health.Status)
 		}
 	}
-	info.HostPort = firstHostPort(c.NetworkSettings)
+	info.HostPort, info.Port = firstHostPort(c.NetworkSettings)
 	return info, nil
 }
 
-// firstHostPort returns the loopback host port published for the container, or
-// 0 when none is published.
-func firstHostPort(ns *container.NetworkSettings) int {
+// firstHostPort returns the lowest host port published for the container and
+// the container port it maps to, or zeros when none is published.
+func firstHostPort(ns *container.NetworkSettings) (int, int) {
 	if ns == nil {
-		return 0
+		return 0, 0
 	}
-	best := 0
-	for _, bindings := range ns.Ports {
+	best, port := 0, 0
+	for cport, bindings := range ns.Ports {
 		for _, b := range bindings {
 			p, err := strconv.Atoi(b.HostPort)
 			if err != nil || p <= 0 {
 				continue
 			}
 			if best == 0 || p < best {
-				best = p
+				best, port = p, int(cport.Num())
 			}
 		}
 	}
-	return best
+	return best, port
 }
 
 // StopContainer stops a managed container. Missing is success.
@@ -955,6 +978,29 @@ func (d *Docker) StopContainer(ctx context.Context, app, name string) error {
 	_, err = d.cli.ContainerStop(ctx, c.ID, client.ContainerStopOptions{})
 	if cerrdefs.IsNotFound(err) {
 		return nil
+	}
+	return err
+}
+
+// UpdateResources changes the memory and CPU limits of a labeled container of
+// app in place. Swap stays equal to memory, as at creation, so the limit stays
+// real. Docker refuses a memory limit below current usage; that error is
+// returned as-is.
+func (d *Docker) UpdateResources(ctx context.Context, req UpdateResourcesRequest) error {
+	c, err := d.managedContainer(ctx, req.App, req.Name)
+	if err != nil {
+		return err
+	}
+	memory := int64(req.MemoryMB) * (1 << 20)
+	_, err = d.cli.ContainerUpdate(ctx, c.ID, client.ContainerUpdateOptions{
+		Resources: &container.Resources{
+			Memory:     memory,
+			MemorySwap: memory,
+			NanoCPUs:   int64(req.CPUMilli) * 1e6,
+		},
+	})
+	if cerrdefs.IsNotFound(err) {
+		return ErrNotFound
 	}
 	return err
 }

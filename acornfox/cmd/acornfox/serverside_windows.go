@@ -8,10 +8,10 @@ import (
 	"os"
 )
 
-// The server, runner and proxy subcommands run only on the Linux server.
-// Windows builds are CLI-only.
+// The Linux server + runner pair does not run on Windows; Windows runs the
+// single-process "acornfox serve" instead (installed by "acornfox install").
 
-const serverOnly = "acornfox: 该命令只在服务器（Linux）上运行；本机请使用 deploy、status 等命令"
+const serverOnly = "acornfox: 该命令只在 Linux 服务器上运行；Windows 上请用 acornfox install（后台运行 acornfox serve）"
 
 func runServer(_ []string, _ io.Writer, stderr io.Writer) int {
 	fmt.Fprintln(stderr, serverOnly)
@@ -20,25 +20,5 @@ func runServer(_ []string, _ io.Writer, stderr io.Writer) int {
 
 func runRunner(_ ...string) int {
 	fmt.Fprintln(os.Stderr, serverOnly)
-	return 2
-}
-
-func runProxy(_ []string, _ io.Reader, _ io.Writer, stderr io.Writer) int {
-	fmt.Fprintln(stderr, serverOnly)
-	return 2
-}
-
-func runInit(_ []string, _ io.Writer, stderr io.Writer) int {
-	fmt.Fprintln(stderr, serverOnly)
-	return 2
-}
-
-func runMigrate(_ []string, _ io.Writer, stderr io.Writer) int {
-	fmt.Fprintln(stderr, serverOnly)
-	return 2
-}
-
-func runAdminToken(_ []string, _ io.Writer, stderr io.Writer) int {
-	fmt.Fprintln(stderr, serverOnly)
 	return 2
 }

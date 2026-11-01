@@ -97,6 +97,8 @@ func (a *app) statusApp(ctx context.Context, api client.API, appName string) int
 		a.out.emitJSON(map[string]any{
 			"app":                app.Name,
 			"url":                app.URL,
+			"lan_url":            app.LANURL,
+			"exposure":           app.Exposure,
 			"desired":            app.Desired,
 			"observed_state":     app.ObservedState,
 			"current_deployment": app.CurrentDeployment,
@@ -113,6 +115,12 @@ func (a *app) statusApp(ctx context.Context, api client.API, appName string) int
 	a.out.human("应用 %s", app.Name)
 	if app.URL != "" {
 		a.out.human("网址：%s", app.URL)
+	}
+	if app.LANURL != "" {
+		a.out.human("局域网地址：%s", app.LANURL)
+	}
+	if app.Exposure != "" {
+		a.out.human("暴露方式：%s", app.Exposure)
 	}
 	a.out.human("期望状态：%s；观察状态：%s", app.Desired, app.ObservedState)
 	a.out.human("当前版本：%s", app.CurrentDeployment)
@@ -358,18 +366,19 @@ func (a *app) cmdVolume(ctx context.Context, args []string) int {
 }
 
 // cmdApp implements `app set [--memory MB] [--cpu CORES] [--port N]
-// [--health-path P]`.
+// [--health-path P] [--expose local|lan|public|default]`.
 func (a *app) cmdApp(ctx context.Context, args []string) int {
 	if len(args) == 0 || args[0] != "set" {
-		return a.out.usageError("用法：app set [--memory MB] [--cpu CORES] [--port N] [--health-path P]")
+		return a.out.usageError("用法：app set [--memory MB] [--cpu CORES] [--port N] [--health-path P] [--expose local|lan|public|default]")
 	}
 	fs := flag.NewFlagSet("app set", flag.ContinueOnError)
 	fs.SetOutput(a.out.stderr)
 	var (
-		memory     = fs.Int("memory", -1, "内存上限 MB（64..16384）")
-		cpu        = fs.Float64("cpu", -1, "CPU 核数（小数，如 0.5）")
+		memory     = fs.Int("memory", -1, "内存上限 MB（至少 256，不超过整机上限）")
+		cpu        = fs.Float64("cpu", -1, "CPU 核数（小数，至少 0.5）")
 		port       = fs.Int("port", -1, "容器端口")
 		healthPath = fs.String("health-path", "\x00", "健康检查路径")
+		expose     = fs.String("expose", "", "暴露方式：local（只本机）、lan（本机和局域网）、public（所有网卡 + 域名）、default（恢复本平台默认）")
 	)
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitUsage
@@ -378,8 +387,9 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 	var s client.AppSettings
 	set := false
 	if *memory >= 0 {
-		if *memory < 64 || *memory > 16384 {
-			return a.out.usageError("内存必须在 64..16384 MB 之间")
+		// The upper bound is the server-wide cap, checked by the server.
+		if *memory < 256 {
+			return a.out.usageError("内存至少 256 MB")
 		}
 		m := *memory
 		s.MemoryMB = &m
@@ -387,8 +397,8 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 	}
 	if *cpu >= 0 {
 		milli := int(*cpu*1000 + 0.5)
-		if milli < 100 || milli > 16000 {
-			return a.out.usageError("CPU 必须在 0.1..16 核之间")
+		if milli < 500 {
+			return a.out.usageError("CPU 至少 0.5 核")
 		}
 		s.CPUMilli = &milli
 		set = true
@@ -403,8 +413,20 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 		s.HealthPath = &hp
 		set = true
 	}
+	if *expose != "" {
+		e := *expose
+		switch e {
+		case "default":
+			e = ""
+		case "local", "lan", "public", "afx_cloud":
+		default:
+			return a.out.usageError("--expose 只能是 local、lan、public 或 default")
+		}
+		s.Exposure = &e
+		set = true
+	}
 	if !set {
-		return a.out.usageError("至少提供一个设置：--memory / --cpu / --port / --health-path")
+		return a.out.usageError("至少提供一个设置：--memory / --cpu / --port / --health-path / --expose")
 	}
 
 	res, err := a.resolveTargetAndApp()
@@ -417,18 +439,37 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 	}
 	defer api.Close()
 
-	updated, serr := api.UpdateApp(ctx, res.app, s)
+	u, serr := api.UpdateApp(ctx, res.app, s)
 	if serr != nil {
 		return a.out.fail(serr)
+	}
+	updated := u.App
+	// Memory / CPU limits are applied to the running container in place;
+	// port and health path still need a redeploy.
+	limits := s.MemoryMB != nil || s.CPUMilli != nil
+	others := s.Port != nil || s.HealthPath != nil
+	note := "下次部署生效；应用已上线时可运行 acornfox redeploy 立即生效"
+	switch {
+	case s.Exposure != nil && !limits && !others:
+		note = "暴露方式已改为 " + updated.Exposure + "，几秒内生效，不用重新部署"
+		if updated.LANURL != "" {
+			note += "；局域网地址 " + updated.LANURL
+		}
+	case limits && u.AppliedNow && !others:
+		note = "内存和 CPU 上限已立即生效，应用没有重启"
+	case limits && u.AppliedNow:
+		note = "内存和 CPU 上限已立即生效；端口和健康检查路径下次部署生效，可运行 acornfox redeploy"
+	case u.ApplyError != "":
+		note = u.ApplyError
 	}
 	if a.out.json {
 		a.out.emitJSON(map[string]any{
 			"app": updated.Name, "memory_mb": updated.MemoryMB, "cpu_milli": updated.CPUMilli,
-			"port": updated.Port, "health_path": updated.HealthPath, "note": "下次部署生效；应用已上线时可运行 acornfox redeploy 立即生效",
+			"port": updated.Port, "health_path": updated.HealthPath, "applied_now": u.AppliedNow, "note": note,
 		})
 		return exitOK
 	}
-	a.out.human("已更新应用设置，下次部署生效；应用已上线时可运行 acornfox redeploy 立即生效。")
+	a.out.human("已更新 %s：内存上限 %d MB，CPU 上限 %.1f 核。%s。", updated.Name, updated.MemoryMB, float64(updated.CPUMilli)/1000, note)
 	return exitOK
 }
 

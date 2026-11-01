@@ -2,7 +2,7 @@ package client
 
 import "strings"
 
-// connect stage codes (docs/n2-contract.md section 1 table).
+// connect stage codes: which step of reaching the server failed.
 const (
 	codeSSHMissing       = "ssh_missing"
 	codeHostUnreachable  = "host_unreachable"
@@ -12,6 +12,7 @@ const (
 	codeAcornfoxMissing  = "acornfox_missing"
 	codePermissionDenied = "permission_denied"
 	codeServerDown       = "server_down"
+	codeLocalDown        = "local_server_down" // unix socket target: nothing listening
 	codeVersionMismatch  = "version_mismatch"
 	codeForwardingOff    = "forwarding_disabled"
 	codeConnectFailed    = "connect_failed"
@@ -63,6 +64,8 @@ func connectMessage(code string) (message, hint string) {
 		return "无权访问 acornfox 服务", "把该用户加入 `acornfox-users` 组后重新登录"
 	case codeServerDown:
 		return "acornfox 服务未运行", "在服务器上执行 `systemctl status acornfox-server`"
+	case codeLocalDown:
+		return "连不上本机的 acornfox 服务", "运行 `acornfox doctor` 检查；Mac、Windows 上运行 `acornfox install` 会重新启动它，Linux 服务器上执行 `systemctl status acornfox-server`"
 	case codeVersionMismatch:
 		return "CLI 与服务器 API 版本不兼容", "升级 CLI 或服务器"
 	case codeForwardingOff:

@@ -2,7 +2,7 @@
 // and per-command flags, resolves the selected target and app from the command
 // line, .acornfox and targets.json, connects to the server through an injected
 // Connector, and renders human (Chinese) or --json output. It depends only on
-// the internal/client and internal/pack contracts. See docs/n2-contract.md.
+// the internal/client and internal/pack contracts.
 package cli
 
 import (
@@ -79,7 +79,7 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.out.usageError("%s", err.Error())
 	}
 	if len(rest) == 0 {
-		return a.out.usageError("需要一个子命令；可用：target deploy status diagnose apps logs stats env volume app set rollback redeploy stop start restart delete open domain add remove addons public-console skill version")
+		return a.out.usageError("需要一个子命令；可用：target deploy status diagnose apps logs stats env volume app set rollback redeploy stop start restart delete open domain add remove addons lan-console public-console limits skill version install uninstall doctor serve")
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
@@ -133,8 +133,12 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdRemove(ctx, cmdArgs)
 	case "addons": // N4.2
 		return a.cmdAddons(ctx, cmdArgs)
-	case "public-console": // ADR-0016
+	case "lan-console": // three-platform architecture
+		return a.cmdLANConsole(ctx, cmdArgs)
+	case "public-console":
 		return a.cmdPublicConsole(ctx, cmdArgs)
+	case "limits":
+		return a.cmdLimits(ctx, cmdArgs)
 	default:
 		return a.out.usageError("未知命令：%s", cmd)
 	}
@@ -144,9 +148,15 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 // own flags.
 const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json] 命令 [参数]
 
+本机（macOS、Windows）
+  install                          在本机安装并后台运行（再次运行即升级；--rollback 回到上一版）
+  uninstall [--purge]              卸载（默认保留数据；--purge 全部删除）
+  doctor                           检查 Docker、后台服务和局域网访问
+
 服务器
   target add 名称 --ssh 用户@主机   添加服务器（list、use、remove 管理已有的）
   open                             打开网页控制台
+  lan-console enable               在局域网打开控制台，要密码登录（disable、status）
   public-console enable 域名        开放控制台公网访问（disable、status）
 
 部署
@@ -161,11 +171,12 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   delete [--volumes]               删除应用（默认保留数据）
   logs [-f]                        查看日志
   stats [应用]                     资源使用（不带应用名则是整台服务器）
+  limits [--memory 26G] [--cpu 8]  整机最多分配给应用的内存和 CPU，及各应用已分配
 
 配置
   env set|unset|list               环境变量
   volume add 路径                  数据目录
-  app set                          端口、内存、健康检查路径
+  app set                          内存、CPU（立即生效）、端口、健康检查路径、--expose 暴露方式
   domain add|remove|list           域名与 HTTPS
   add|remove postgres|mysql|redis  数据库与缓存；addons 查看已添加的
 

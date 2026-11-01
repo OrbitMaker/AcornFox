@@ -1,5 +1,3 @@
-//go:build !windows
-
 // This file implements installation and upgrade subcommands for N5
 // (version lives in version.go so Windows builds have it too):
 // - init: initialize database (migrations run automatically via state.Open)

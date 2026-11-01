@@ -9,8 +9,8 @@ import (
 	"github.com/acornfox/acornfox/internal/publicconsole"
 )
 
-// PublicConsole is what the trusted API needs from the public console
-// (ADR-0016); *publicconsole.Manager implements it.
+// PublicConsole is what the trusted API needs from the public console;
+// *publicconsole.Manager implements it.
 type PublicConsole interface {
 	Status(ctx context.Context) (publicconsole.Status, error)
 	StartVerify(ctx context.Context, domain string) (publicconsole.VerifyInfo, error)

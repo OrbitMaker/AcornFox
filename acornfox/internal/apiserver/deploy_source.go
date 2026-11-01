@@ -70,8 +70,16 @@ func (s *server) createDeploymentJSON(w http.ResponseWriter, r *http.Request, ap
 		digest = hexDigest(body.Git + "#" + body.Ref)
 	}
 
-	if _, _, err := s.store.EnsureApp(ctx, app); err != nil {
-		s.mapStoreError(w, err)
+	// A new app takes the default limits, which must fit under the memory cap.
+	s.resMu.Lock()
+	if !s.checkNewAppRoom(w, ctx, app) {
+		s.resMu.Unlock()
+		return
+	}
+	_, _, ensureErr := s.store.EnsureApp(ctx, app)
+	s.resMu.Unlock()
+	if ensureErr != nil {
+		s.mapStoreError(w, ensureErr)
 		return
 	}
 

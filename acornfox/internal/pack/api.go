@@ -1,5 +1,5 @@
 // Package pack turns a project directory into the tar.gz upload that
-// acornfox server builds from (docs/n2-contract.md section 3, deploy).
+// acornfox server builds from (POST /v1/apps/{app}/deployments).
 package pack
 
 import "errors"

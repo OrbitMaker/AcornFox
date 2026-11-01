@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # AcornFox 安装脚本
 # 用途: 在干净的 Linux 系统上一键安装 AcornFox
-# 支持: Ubuntu 24.04/22.04/20.04, Debian 12/11
+# 支持: Ubuntu 24.04/22.04/20.04, Debian 13/12/11
 # 许可: AGPL-3.0
 
 set -euo pipefail
@@ -9,8 +9,24 @@ set -euo pipefail
 # curl | sudo bash 时 stdin 是脚本本身，不能让 apt/debconf 交互读取它
 export DEBIAN_FRONTEND=noninteractive
 
-# 新开的云主机开机后 unattended-upgrades 会占用 dpkg 锁几分钟，等锁释放而不是直接失败
+# 新开的云主机开机后 unattended-upgrades 会占用 dpkg 锁几分钟，等锁释放而不是直接失败。
+# DPkg::Lock::Timeout 不管 apt-get update 用的软件包列表锁（/var/lib/apt/lists/lock），
+# 这把锁被占时 update 会立刻失败，所以 update 另外每 10 秒重试，最多 10 分钟。
 apt_get() {
+    if [ "${1:-}" = update ]; then
+        local i
+        for i in $(seq 1 60); do
+            if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=3 "$@" 2>/tmp/acornfox-apt-update.err; then
+                rm -f /tmp/acornfox-apt-update.err
+                return 0
+            fi
+            grep -q "Could not get lock" /tmp/acornfox-apt-update.err || { cat /tmp/acornfox-apt-update.err >&2; return 1; }
+            [ "$i" = 1 ] && echo "[INFO] 软件包列表被其他进程（通常是系统自动更新）占用，等待释放..."
+            sleep 10
+        done
+        cat /tmp/acornfox-apt-update.err >&2
+        return 1
+    fi
     apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=3 "$@"
 }
 
@@ -53,7 +69,7 @@ error_exit() {
 # GitHub 仓库与下载代理
 # ACORNFOX_REPO 可覆盖发布仓库；ACORNFOX_GITHUB_PROXY 指定自己的 GitHub 加速前缀
 # （形如 https://example.com/，拼接为 前缀+原始地址）。中国大陆先直连，失败再依次试代理。
-ACORNFOX_REPO="${ACORNFOX_REPO:-OrbitMaker/AcornFox-rebuild}"
+ACORNFOX_REPO="${ACORNFOX_REPO:-OrbitMaker/AcornFox}"
 GITHUB_PROXIES=()
 
 setup_github_proxies() {
@@ -85,7 +101,7 @@ github_download() {
 
 # 国内镜像：Gitee 发行版与 GitHub Release 的文件相同（同一份 SHA256SUMS 校验）。
 # 中国大陆服务器先从 Gitee 下载，失败再走 GitHub 直连和代理；ACORNFOX_GITEE_REPO 设为空可关闭。
-ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox-rebuild}"
+ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
@@ -99,6 +115,31 @@ release_download() {
         log_warn "Gitee 镜像下载失败，改从 GitHub 下载"
     fi
     github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
+}
+
+# 公开仓库 main 上的脚本可能比最新发行版新（例如 main 已是 0.4.0 的脚本，最新发行版还是 v0.3.1）。
+# 要装的版本早于 SCRIPT_MIN_VERSION 时，改用那个版本发行版里附带的同名脚本，参数原样传过去，
+# 避免新脚本配旧程序（新脚本会把宿主机 Caddy 换成容器，旧程序不认识）。--binary 时不切换。
+SCRIPT_MIN_VERSION="v0.4.0"
+
+# version_lt A B：A 早于 B 时返回 0（vX.Y.Z，按 sort -V 比较；0.4.0-dev.N 视为不早于 0.4.0）
+version_lt() {
+    [ "$1" = "$2" ] && return 1
+    [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | head -1)" = "${1#v}" ]
+}
+
+# follow_release_script 脚本名 版本 参数...：版本早于 SCRIPT_MIN_VERSION 时下载该版本的同名脚本并交给它执行
+follow_release_script() {
+    local name="$1" v="$2" s
+    shift 2
+    [ -n "${ACORNFOX_SCRIPT_FOLLOWED:-}" ] && return 0
+    version_lt "$v" "$SCRIPT_MIN_VERSION" || return 0
+    log_warn "要装的 ${v} 早于本脚本支持的 ${SCRIPT_MIN_VERSION}，改用 ${v} 发行版自带的 ${name}"
+    s=$(mktemp)
+    release_download "$v" "$name" "$s" || error_exit "下载 ${v} 的 ${name} 失败；可以直接运行该版本发行版里的 ${name}"
+    # 老版本脚本里写死的是改名前的旧仓库名；把现在的仓库名传给它
+    export ACORNFOX_REPO ACORNFOX_GITEE_REPO
+    ACORNFOX_SCRIPT_FOLLOWED=1 exec bash "$s" "$@" --version "$v"
 }
 
 # latest_tag：最新版本号。中国大陆先查 Gitee 发行版 API（Gitee 的 releases/latest
@@ -186,7 +227,7 @@ detect_os() {
             fi
             ;;
         debian)
-            if [[ ! "$OS_VERSION" =~ ^(11|12)$ ]]; then
+            if [[ ! "$OS_VERSION" =~ ^(11|12|13)$ ]]; then
                 log_warn "未测试的 Debian 版本: ${OS_VERSION}，继续安装可能遇到问题"
             fi
             ;;
@@ -334,7 +375,7 @@ AcornFox 安装脚本
     --china                强制使用中国镜像源
     --global               强制使用国际源
     --skip-docker          跳过 Docker 安装（如已安装）
-    --skip-caddy           跳过 Caddy 安装（如已安装）
+    --skip-caddy           不制作本地 Caddy 镜像（acornfox 启动时从镜像仓库拉 caddy:2.8.4-alpine）
     --public-console 域名   开通公网访问控制台（默认不开通）：先在域名后台把该域名
                            解析到本服务器，并在安全组放行 80、443；安装最后自动验证
                            域名、申请 HTTPS 证书并生成登录密码。也可以以后再用
@@ -343,8 +384,8 @@ AcornFox 安装脚本
 
 环境变量:
     ACORNFOX_GITHUB_PROXY  GitHub 下载加速前缀，如 https://ghfast.top/（直连失败时使用）
-    ACORNFOX_REPO          发布仓库，默认 OrbitMaker/AcornFox-rebuild
-    ACORNFOX_GITEE_REPO    中国大陆优先使用的 Gitee 镜像，默认 VIP13390/AcornFox-rebuild；设为空则不用
+    ACORNFOX_REPO          发布仓库，默认 OrbitMaker/AcornFox
+    ACORNFOX_GITEE_REPO    中国大陆优先使用的 Gitee 镜像，默认 VIP13390/AcornFox；设为空则不用
 
 示例:
     # 自动检测并安装
@@ -422,7 +463,6 @@ install_dependencies() {
         gnupg \
         lsb-release \
         apt-transport-https \
-        software-properties-common \
         || error_exit "安装基础依赖失败"
 }
 
@@ -553,24 +593,28 @@ EOF
 # 安装 Caddy
 install_caddy() {
     if $SKIP_CADDY; then
-        log_info "跳过 Caddy 安装"
+        log_info "跳过 Caddy 镜像准备（acornfox 会在首次启动时从镜像仓库拉取 caddy:2.8.4-alpine）"
+        return
+    fi
+    CADDY_VERSION="2.8.4"
+
+    # 三端架构（2026-11-01）：Caddy 改为容器，由 acornfox 管理（容器名 acornfox-caddy，宿主网络）。
+    # 这里只把 Caddy 官方二进制做成本地镜像 acornfox/caddy:2.8.4（docker import，不依赖镜像仓库）。
+    if docker image inspect "acornfox/caddy:${CADDY_VERSION}" >/dev/null 2>&1; then
+        log_info "Caddy 镜像已存在: acornfox/caddy:${CADDY_VERSION}"
+        return
+    fi
+    # v0.3.x 装在宿主机上的 Caddy 2.8.x 可以直接拿来做镜像，免去下载
+    if [ -x /usr/bin/caddy ] && /usr/bin/caddy version 2>/dev/null | grep -q "^v${CADDY_VERSION}"; then
+        build_caddy_image /usr/bin/caddy
         return
     fi
 
-    if command -v caddy >/dev/null 2>&1; then
-        CADDY_VERSION=$(caddy version | awk '{print $1}')
-        log_info "Caddy 已安装: $CADDY_VERSION"
-        return
-    fi
-
-    log_info "安装 Caddy..."
-
+    log_info "下载 Caddy ${CADDY_VERSION}..."
     # 所有地区都下载 Caddy 官方二进制：官方 apt 仓库 dl.cloudsmith.io 2026-10 实测对匿名请求
-    # 返回 402 Payment Required，大陆也不稳定且国内镜像站没有同步；Ubuntu/Debian 仓库的
-    # caddy 2.6.2 不支持 persist_config。中国大陆先从 Gitee 发行版取同一份安装包（随 AcornFox
+    # 返回 402 Payment Required，大陆也不稳定且国内镜像站没有同步；中国大陆先从 Gitee 发行版取同一份安装包（随 AcornFox
     # 发行版附带），失败再走 GitHub 直连和代理。
     ARCH=$(dpkg --print-architecture)
-    CADDY_VERSION="2.8.4"
     local caddy_tag="" name
     if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
         caddy_tag="$ACORNFOX_VERSION"
@@ -608,94 +652,63 @@ install_caddy() {
     fi
 
     tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
-    install -m 0755 /tmp/caddy /usr/bin/caddy
+    build_caddy_image /tmp/caddy
     rm -f /tmp/caddy.tar.gz /tmp/caddy
+}
 
-    # 二进制安装没有 deb 包自带的账号和 systemd 服务，这里补齐
-    if ! getent group caddy >/dev/null; then
-        groupadd --system caddy
-    fi
-    if ! id caddy >/dev/null 2>&1; then
-        useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
-            --shell /usr/sbin/nologin --comment "Caddy web server" caddy
-    fi
-    cat > /etc/systemd/system/caddy.service << 'EOF'
-[Unit]
-Description=Caddy
-Documentation=https://caddyserver.com/docs/
-After=network.target network-online.target
-Requires=network-online.target
-
-[Service]
-Type=notify
-User=caddy
-Group=caddy
-ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
-ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
-TimeoutStopSec=5s
-LimitNOFILE=1048576
-PrivateTmp=true
-ProtectSystem=full
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable caddy
-
-    # 验证安装
-    if caddy version >/dev/null 2>&1; then
-        log_success "Caddy 安装成功: $(caddy version)"
+# build_caddy_image BIN：用 Caddy 二进制和本机 CA 证书做最小镜像 acornfox/caddy:2.8.4
+# （没有 shell；acornfox 创建容器时写入 Caddyfile 并指定启动命令）
+build_caddy_image() {
+    local bin="$1" root
+    root=$(mktemp -d)
+    mkdir -p "$root/usr/bin" "$root/etc/ssl/certs" "$root/tmp" "$root/data" "$root/config"
+    chmod 1777 "$root/tmp"
+    install -m 0755 "$bin" "$root/usr/bin/caddy"
+    cp /etc/ssl/certs/ca-certificates.crt "$root/etc/ssl/certs/ca-certificates.crt"
+    if tar -C "$root" -c . | docker import \
+        --change 'ENV XDG_CONFIG_HOME=/config' --change 'ENV XDG_DATA_HOME=/data' \
+        --change 'CMD ["/usr/bin/caddy","run","--config","/etc/acornfox/Caddyfile","--adapter","caddyfile"]' \
+        - "acornfox/caddy:${CADDY_VERSION}" >/dev/null; then
+        log_success "Caddy 镜像已就绪: acornfox/caddy:${CADDY_VERSION}"
     else
-        error_exit "Caddy 安装验证失败"
+        log_warn "制作 Caddy 镜像失败；acornfox 启动时会改从镜像仓库拉取 caddy:${CADDY_VERSION}-alpine"
     fi
+    rm -rf "$root"
 }
 
-# 配置 Caddy admin API socket
-configure_caddy() {
-    if $SKIP_CADDY; then
-        log_info "跳过 Caddy 配置"
-        return
+# migrate_host_caddy：把 v0.3.x 装在宿主机上的 Caddy 换成容器。证书和 ACME 账号复制到
+# 数据卷 acornfox-caddy-data（宿主机上的原文件保留），停用并禁止 caddy.service 开机启动，
+# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated 供 upgrade.sh --rollback 恢复。
+migrate_host_caddy() {
+    [ -f /etc/systemd/system/caddy.service ] || [ -f /lib/systemd/system/caddy.service ] || return 0
+    systemctl is-enabled --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy 2>/dev/null || return 0
+    log_info "把宿主机上的 Caddy 迁移到容器..."
+    local src=/var/lib/caddy/.local/share/caddy vol
+    docker volume create acornfox-caddy-data >/dev/null
+    vol=$(docker volume inspect -f '{{.Mountpoint}}' acornfox-caddy-data)
+    if [ -d "$src" ]; then
+        mkdir -p "$vol/caddy"
+        cp -a "$src/." "$vol/caddy/"
+        log_info "已复制证书和 ACME 账号到数据卷 acornfox-caddy-data（原文件保留在 $src）"
     fi
-
-    log_info "配置 Caddy admin API socket..."
-
-    # 创建 Caddy 配置目录
-    mkdir -p /etc/caddy
-
-    # 创建 Caddyfile，启用 Unix socket admin API
-    # socket 由 Caddy 以 0660 创建；/run/acornfox 是 setgid 目录，
-    # socket 自动归属 acornfox-ipc 组，server 可直接访问，重启后无需再手动 chmod
-    cat > /etc/caddy/Caddyfile << 'EOF'
-{
-    # AcornFox 以 http://caddy 访问管理接口，Caddy 校验 Host 头；
-    # origins 不支持通配符，写 * 会拒绝所有请求（403 host not allowed: caddy）
-    admin unix//run/acornfox/caddy-admin.sock|0660 {
-        origins caddy
-    }
-    persist_config off
+    systemctl disable --now caddy >/dev/null 2>&1 || true
+    mkdir -p /var/lib/acornfox
+    date -u +%FT%TZ > /var/lib/acornfox/.caddy-host-migrated
+    log_success "宿主机 Caddy 已停用（回滚时会恢复），之后由容器 acornfox-caddy 接管 80、443 和应用端口"
 }
 
-# AcornFox 应用路由将通过 API 动态添加
-EOF
-
-    chown root:root /etc/caddy/Caddyfile
-    chmod 644 /etc/caddy/Caddyfile
-
-    # 组成员变化（caddy 加入 acornfox-ipc）需要重启才生效
-    systemctl enable caddy
-    systemctl restart caddy
-
-    local i
-    for i in $(seq 1 10); do
-        [ -S /run/acornfox/caddy-admin.sock ] && break
-        sleep 1
+# wait_caddy_container：等 acornfox 建好 Caddy 容器、管理网关应答（没有令牌时返回 403）
+wait_caddy_container() {
+    local i code=""
+    for i in $(seq 1 90); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:18808/ 2>/dev/null || true)
+        [ "$code" = "403" ] && break
+        sleep 2
     done
-    if [ -S /run/acornfox/caddy-admin.sock ]; then
-        log_success "Caddy admin socket 配置完成"
+    if [ "$code" = "403" ]; then
+        log_success "Caddy 容器 acornfox-caddy 已运行"
     else
-        error_exit "Caddy admin socket 未创建，请检查: journalctl -u caddy -n 50"
+        log_warn "Caddy 容器还没就绪；查看: docker logs acornfox-caddy；journalctl -u acornfox-server -n 50"
     fi
 }
 
@@ -734,11 +747,6 @@ create_accounts() {
     usermod -aG acornfox-ipc acornfox
     usermod -aG acornfox-ipc acornfox-exec
 
-    # caddy 需要在 /run/acornfox 中创建 admin socket
-    if id caddy >/dev/null 2>&1; then
-        usermod -aG acornfox-ipc caddy
-        log_info "已将 caddy 用户添加到 acornfox-ipc 组"
-    fi
 }
 
 # 下载 AcornFox 二进制文件
@@ -812,9 +820,10 @@ create_directories() {
     chmod 2750 /var/lib/acornfox/uploads
 
     # /run 是 tmpfs，重启后会清空；用 tmpfiles.d 让 systemd 每次开机重建。
-    # setgid 让 server、runner、caddy 各自创建的 socket 都归属 acornfox-ipc 组。
+    # setgid 让 server、runner 各自创建的 socket 都归属 acornfox-ipc 组。
     # 其他用户只有穿过权限（o+x），能否连接由各 socket 自身决定：
-    # api.sock 归 acornfox-users 组（CLI 用户），caddy-admin.sock 只给 acornfox-ipc。
+    # api.sock 归 acornfox-users 组（CLI 用户）。Caddy 已改为容器，管理接口走
+    # 127.0.0.1:18808 上带令牌的网关（令牌在 /var/lib/acornfox/caddy-admin.token）。
     cat > /etc/tmpfiles.d/acornfox.conf << 'EOF'
 d /run/acornfox 2771 root acornfox-ipc -
 EOF
@@ -900,7 +909,7 @@ create_systemd_services() {
     cat > /etc/systemd/system/acornfox-server.service << EOF
 [Unit]
 Description=AcornFox Server
-Documentation=https://github.com/OrbitMaker/AcornFox-rebuild
+Documentation=https://github.com/OrbitMaker/AcornFox
 After=network.target docker.service
 Requires=docker.service
 
@@ -931,7 +940,7 @@ EOF
     cat > /etc/systemd/system/acornfox-runner.service << EOF
 [Unit]
 Description=AcornFox Runner
-Documentation=https://github.com/OrbitMaker/AcornFox-rebuild
+Documentation=https://github.com/OrbitMaker/AcornFox
 After=network.target docker.service
 Requires=docker.service
 
@@ -985,7 +994,7 @@ start_services() {
     fi
 }
 
-# 开通公网访问控制台（--public-console，ADR-0016）。失败不影响安装结果。
+# 开通公网访问控制台（--public-console）。失败不影响安装结果。
 enable_public_console() {
     [ -n "$PUBLIC_CONSOLE_DOMAIN" ] || return 0
     log_info "开通公网访问控制台: ${PUBLIC_CONSOLE_DOMAIN}"
@@ -1015,6 +1024,7 @@ ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━
 ${BLUE}服务状态:${NC}
   • acornfox-server: $(systemctl is-active acornfox-server)
   • acornfox-runner: $(systemctl is-active acornfox-runner)
+  • Caddy 容器 acornfox-caddy: $(docker inspect -f '{{.State.Status}}' acornfox-caddy 2>/dev/null || echo 未创建)
 
 ${BLUE}管理员令牌:${NC}
 $(cat /root/.acornfox-token)
@@ -1026,7 +1036,7 @@ ${BLUE}云服务器安全组（重要）:${NC}
 
 ${BLUE}下一步:${NC}
   1. 在本地电脑安装 CLI:
-     ${YELLOW}curl -fsSL https://github.com/OrbitMaker/AcornFox-rebuild/releases/latest/download/install-cli.sh | bash${NC}
+     ${YELLOW}curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash${NC}
 
   2. 配置服务器连接（SSH 用户需为 root 或在 acornfox-users 组中）:
      ${YELLOW}sudo usermod -aG acornfox-users <你的 SSH 用户>${NC}   # 非 root 时执行一次
@@ -1040,7 +1050,7 @@ ${BLUE}公网访问控制台:${NC}
   关闭: ${YELLOW}acornfox public-console disable${NC}
 }
 ${BLUE}文档:${NC}
-  https://github.com/OrbitMaker/AcornFox-rebuild/tree/main/docs
+  https://github.com/OrbitMaker/AcornFox/tree/main/docs
 
 ${BLUE}故障排查:${NC}
   查看日志: ${YELLOW}journalctl -u acornfox-server -f${NC}
@@ -1075,6 +1085,13 @@ main() {
     # 解析参数
     parse_args "$@"
     setup_github_proxies
+    if [ -z "$LOCAL_BINARY" ]; then
+        if [ "$ACORNFOX_VERSION" = "latest" ]; then
+            ACORNFOX_VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 安装本地文件"
+            log_info "最新版本: $ACORNFOX_VERSION"
+        fi
+        follow_release_script install.sh "$ACORNFOX_VERSION" "$@"
+    fi
     # 记下网络环境判断，upgrade.sh 直接沿用，不必再依赖外部 IP 查询
     mkdir -p /etc/acornfox
     echo "ACORNFOX_IN_CHINA=${IN_CHINA}" > /etc/acornfox/install.env
@@ -1085,15 +1102,16 @@ main() {
     install_docker
     configure_docker_mirror
     install_caddy
+    migrate_host_caddy
     create_accounts
     create_directories
-    configure_caddy
     download_acornfox
     initialize_database
     generate_admin_token
     detect_public_host
     create_systemd_services
     start_services
+    wait_caddy_container
     enable_public_console
 
     # 显示摘要

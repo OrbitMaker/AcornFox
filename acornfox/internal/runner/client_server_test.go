@@ -41,7 +41,10 @@ type fakeAPI struct {
 
 	ensureResp ContainerInfo
 	ensureErr  error
-	ensureReq  EnsureContainerRequest
+
+	updateReq UpdateResourcesRequest
+	updateErr error
+	ensureReq EnsureContainerRequest
 
 	containers    []ContainerInfo
 	containersErr error
@@ -118,6 +121,13 @@ func (f *fakeAPI) ListContainers(_ context.Context, app string) ([]ContainerInfo
 func (f *fakeAPI) StopContainer(_ context.Context, _, name string) error {
 	f.stopName = name
 	return f.stopErr
+}
+
+func (f *fakeAPI) UpdateResources(_ context.Context, req UpdateResourcesRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updateReq = req
+	return f.updateErr
 }
 
 func (f *fakeAPI) StartContainer(context.Context, string, string) (ContainerInfo, error) {
@@ -452,5 +462,31 @@ func assertInvalidRequest(t *testing.T, err error) {
 	}
 	if re.Status != http.StatusBadRequest || re.Code != "invalid_request" {
 		t.Fatalf("unexpected error: %+v", re)
+	}
+}
+
+func TestClientUpdateResourcesRoundTrip(t *testing.T) {
+	f := &fakeAPI{}
+	_, cli := newTestServer(t, f)
+	req := UpdateResourcesRequest{App: "demo", Name: "af-demo-0123456789ab", MemoryMB: 768, CPUMilli: 1500}
+	if err := cli.UpdateResources(context.Background(), req); err != nil {
+		t.Fatalf("UpdateResources: %v", err)
+	}
+	f.mu.Lock()
+	got := f.updateReq
+	f.mu.Unlock()
+	if got != req {
+		t.Fatalf("server got %+v, want %+v", got, req)
+	}
+}
+
+func TestServerValidatesUpdateResources(t *testing.T) {
+	_, cli := newTestServer(t, &fakeAPI{})
+	for _, req := range []UpdateResourcesRequest{
+		{App: "demo", Name: "wrong-prefix-0123456789ab", MemoryMB: 512, CPUMilli: 1000},
+		{App: "demo", Name: "af-demo-0123456789ab", MemoryMB: 32, CPUMilli: 1000},
+		{App: "demo", Name: "af-demo-0123456789ab", MemoryMB: 512, CPUMilli: 50},
+	} {
+		assertInvalidRequest(t, cli.UpdateResources(context.Background(), req))
 	}
 }

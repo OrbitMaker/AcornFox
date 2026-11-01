@@ -1,7 +1,8 @@
 package reconcile
 
 // N4.2 add-ons [addon-agent]: add-on containers, env injection and the
-// deployment readiness gate of ADR-0006.
+// deployment readiness gate (an add-on must accept connections before the
+// app starts).
 
 import (
 	"context"
@@ -157,7 +158,7 @@ func addonContainerEnv(kind string, c state.AddonCredentials) map[string]string 
 }
 
 // addonReadyTimeout bounds how long a deployment waits for its add-ons to
-// accept connections before it fails with stage "addon" (ADR-0006).
+// accept connections before it fails with stage "addon" .
 const addonReadyTimeout = 120 * time.Second
 
 // addonProblem is a terminal add-on failure found by the readiness gate.
@@ -269,7 +270,7 @@ func addonSecrets(env []state.EnvVar, addons []state.Addon) []state.EnvVar {
 	return out
 }
 
-// addonDiagnosis builds the stage "addon" diagnosis of ADR-0006: which
+// addonDiagnosis builds the stage "addon" diagnosis: which
 // add-on, what happened, the effect on the app, add-on logs, and a next step
 // that states the data volume was not touched.
 func (r *Reconciler) addonDiagnosis(ctx context.Context, app state.App, p *addonProblem, secrets []state.EnvVar) *state.Diagnosis {

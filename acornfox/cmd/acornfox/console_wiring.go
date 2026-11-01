@@ -1,5 +1,3 @@
-//go:build !windows
-
 package main
 
 import "github.com/acornfox/acornfox/internal/console"
