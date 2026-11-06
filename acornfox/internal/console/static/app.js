@@ -48,16 +48,10 @@ const SKILL_PROMPT = "请安装 AcornFox Skill：下载 https://acornfox.com/ski
 const UPGRADE_CN = "curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash";
 const UPGRADE_GLOBAL = "curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash";
 
-// 应用中心首批预告（目录服务上线前只展示，不提供安装）。
+// 应用中心首批预告（v0.5 开放前只展示，不提供安装）。[名称, 一句话, 分类]
 const STORE_PREVIEW = [
-  ["OpenClaw", "个人 AI 智能体，能替你执行任务。"],
-  ["CowAgent", "接入微信、飞书、钉钉的 AI 助手。"],
-  ["AstrBot", "多平台聊天机器人，插件丰富。"],
-  ["LobeHub", "界面精致的 AI 对话助手。"],
-  ["MaxKB", "企业知识库问答。"],
-  ["New API", "把多家大模型合成一个接口。"],
-  ["NextChat", "轻量的 AI 对话网页。"],
-  ["Open WebUI", "功能全面的 AI 对话界面。"],
+  ["Hermes 智能体", "常驻的 AI 智能体，可以接飞书、钉钉、企业微信做机器人。", "AI 智能体 · 开源"],
+  ["New API", "把多家大模型合成一个接口，统一管理 Key 和额度。", "模型网关 · 开源"],
 ];
 
 // el 创建元素：文字一律作为文本节点，绝不经过 innerHTML。
@@ -1018,7 +1012,7 @@ function buildStart(page, empty) {
     el("section", { class: "way" }, [
       el("span", { class: "k", text: "即将开放" }),
       el("h2", { text: "从应用中心安装" }),
-      el("p", { text: "现成的应用选一个、点安装就能用，需要的数据库自动配好。首批是 8 个热门 AI 应用。" }),
+      el("p", { text: "现成的应用选一个、点安装就能用，需要的数据库自动配好。首批是 Hermes 智能体和 New API，v0.5 开放。" }),
       linkButton("看看有哪些", "btn", "#/store"),
     ]),
   ]));
@@ -1035,20 +1029,20 @@ function buildStore(page) {
   ]));
   page.append(el("div", { class: "notice", role: "note", dataset: { region: "notice" } }, [
     el("b", { text: "即将开放" }),
-    el("span", { text: "应用中心正在准备首批应用，开放后在这里一键安装。现在可以先让 AI 部署你自己的项目。" }),
+    el("span", { text: "应用中心在 v0.5 开放，首批是 Hermes 智能体和 New API，到时在这里一键安装。现在可以先让 AI 部署你自己的项目。" }),
   ]));
   const grid = el("div", { class: "store-grid", dataset: { region: "preview" } });
-  for (const [name, desc] of STORE_PREVIEW) {
+  for (const [name, desc, sub] of STORE_PREVIEW) {
     grid.append(el("article", { class: "store-card" }, [
       el("div", { class: "app-top" }, [
         appIcon(name),
-        el("div", { class: "app-title" }, [el("span", { class: "app-name", text: name }), el("span", { class: "app-sub", text: "AI 助手 · 热门开源" })]),
+        el("div", { class: "app-title" }, [el("span", { class: "app-name", text: name }), el("span", { class: "app-sub", text: sub })]),
       ]),
       el("p", { class: "desc", text: desc }),
-      el("div", { class: "row" }, [el("span", { class: "tag", text: "即将上架" }), el("span", { class: "faint", text: "安装时填写大模型接口地址与密钥" })]),
+      el("div", { class: "row" }, [el("span", { class: "tag", text: "v0.5 开放" }), el("span", { class: "faint", text: "安装时选择要用的大模型" })]),
     ]));
   }
-  page.append(el("section", { class: "stack", dataset: { region: "first" } }, [el("h2", { class: "section-title", text: "首批上架：热门 AI 应用" }), grid]));
+  page.append(el("section", { class: "stack", dataset: { region: "first" } }, [el("h2", { class: "section-title", text: "首批上架" }), grid]));
   page.append(el("a", { class: "more-link", href: "#/new", dataset: { region: "more" } }, [
     el("span", { class: "stack" }, [el("b", { text: "没有你要的？" }), el("span", { class: "faint", text: "任何带 Dockerfile 的项目都能部署，交给 AI 工作台一句话完成。" })]),
     el("span", { text: "让 AI 部署我的项目 →" }),
