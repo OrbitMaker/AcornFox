@@ -3,7 +3,6 @@ package runner
 import (
 	"archive/tar"
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -18,9 +17,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/build"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -50,7 +51,9 @@ var (
 // objects carrying LabelManaged=1 and never creates privileged, host-network
 // or bind-mounted containers.
 type Docker struct {
-	cli *client.Client
+	// cli is swapped by SetClient when the desktop runtime changes (setup
+	// installed the built-in runtime, or Docker moved to another address).
+	cli atomic.Pointer[client.Client]
 
 	// registry is how Docker Hub images are pulled (pull_fallback.go):
 	// mirror first for users in mainland China, Docker Hub first otherwise.
@@ -70,17 +73,29 @@ type buildCall struct {
 
 // NewDocker returns a Docker-backed API. The caller owns cli.
 func NewDocker(cli *client.Client) *Docker {
-	return &Docker{cli: cli, inflight: map[string]*buildCall{}}
+	d := &Docker{inflight: map[string]*buildCall{}}
+	d.cli.Store(cli)
+	return d
 }
+
+func (d *Docker) c() *client.Client { return d.cli.Load() }
+
+// Client returns the Docker client in use now.
+func (d *Docker) Client() *client.Client { return d.cli.Load() }
+
+// SetClient points the runner at another Docker daemon and returns the
+// previous client (the caller closes it). Calls already in flight finish on
+// the old client.
+func (d *Docker) SetClient(cli *client.Client) *client.Client { return d.cli.Swap(cli) }
 
 // Ping reports the Docker API and server versions.
 func (d *Docker) Ping(ctx context.Context) (PingResponse, error) {
-	ping, err := d.cli.Ping(ctx, client.PingOptions{})
+	ping, err := d.c().Ping(ctx, client.PingOptions{})
 	if err != nil {
 		return PingResponse{}, err
 	}
 	resp := PingResponse{DockerAPIVersion: ping.APIVersion}
-	if ver, err := d.cli.ServerVersion(ctx, client.ServerVersionOptions{}); err == nil {
+	if ver, err := d.c().ServerVersion(ctx, client.ServerVersionOptions{}); err == nil {
 		resp.ServerVersion = ver.Version
 		if resp.DockerAPIVersion == "" {
 			resp.DockerAPIVersion = ver.APIVersion
@@ -127,12 +142,13 @@ func (d *Docker) Build(ctx context.Context, req BuildRequest) (BuildResponse, er
 	return call.resp, call.err
 }
 
-// runBuild performs a single build: it reads the upload, validates the presence
-// of a Dockerfile at the context root, streams the build and classifies the
-// result. User-caused failures come back as BuildResponse{OK:false}; daemon or
-// transport failures come back as an error.
+// runBuild performs a single build: it scans the upload once as a stream to
+// validate it (tar or tar.gz, bounded uncompressed size, a Dockerfile at the
+// context root), then streams the same file to Docker, which decompresses gzip
+// itself. The upload is never held in memory. User-caused failures come back
+// as BuildResponse{OK:false}; daemon or transport failures as an error.
 func (d *Docker) runBuild(ctx context.Context, req BuildRequest, tag string) (BuildResponse, error) {
-	raw, err := os.ReadFile(req.ContextPath)
+	f, err := os.Open(req.ContextPath)
 	if err != nil {
 		return BuildResponse{OK: false, Failure: &Failure{
 			Stage: "upload", Code: "upload_invalid",
@@ -140,21 +156,14 @@ func (d *Docker) runBuild(ctx context.Context, req BuildRequest, tag string) (Bu
 			Hint:    "使用 acornfox deploy 重新上传项目目录",
 		}}, nil
 	}
+	defer f.Close()
 
-	tarBytes, hasDockerfile, err := normalizeContext(raw)
-	if err != nil {
-		return BuildResponse{OK: false, Failure: &Failure{
-			Stage: "upload", Code: "upload_invalid",
-			Message: "上传的内容不是有效的 tar 或 tar.gz 目录包",
-			Hint:    "使用 acornfox deploy 上传项目目录",
-		}}, nil
+	if failure := scanContext(f); failure != nil {
+		return BuildResponse{OK: false, Failure: failure}, nil
 	}
-	if !hasDockerfile {
-		return BuildResponse{OK: false, Failure: &Failure{
-			Stage: "upload", Code: "dockerfile_missing",
-			Message: "项目根目录没有 Dockerfile",
-			Hint:    "在项目根目录添加 Dockerfile（写明 EXPOSE 端口）后重新部署",
-		}}, nil
+	// Second pass: the same open file, so what Docker builds is what was scanned.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return BuildResponse{}, err
 	}
 
 	labels := map[string]string{
@@ -162,7 +171,7 @@ func (d *Docker) runBuild(ctx context.Context, req BuildRequest, tag string) (Bu
 		LabelApp:        req.App,
 		LabelDeployment: req.DeploymentID,
 	}
-	result, err := d.cli.ImageBuild(ctx, bytes.NewReader(tarBytes), client.ImageBuildOptions{
+	result, err := d.c().ImageBuild(ctx, f, client.ImageBuildOptions{
 		Tags:        []string{tag},
 		Remove:      true,
 		ForceRemove: true,
@@ -175,15 +184,19 @@ func (d *Docker) runBuild(ctx context.Context, req BuildRequest, tag string) (Bu
 	}
 	defer result.Body.Close()
 
-	lines, buildErr := drainBuild(result.Body)
+	out, buildErr := drainBuild(result.Body)
+	log := tailText(out)
 	if buildErr != nil {
-		return BuildResponse{OK: false, Failure: classifyBuild(buildErr, lines)}, nil
+		failure := classifyBuild(buildErr, logLines(log))
+		// The log ends with the error, as docker build prints it; the
+		// excerpt (computed above) keeps its existing rules.
+		return BuildResponse{OK: false, Failure: failure, Log: appendLogLine(log, buildErr.Error())}, nil
 	}
 
 	info, err := d.inspectImage(ctx, tag, req.App)
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
-			return BuildResponse{OK: false, Failure: &Failure{
+			return BuildResponse{OK: false, Log: log, Failure: &Failure{
 				Stage: "build", Code: "build_failed",
 				Message: "构建结束但没有生成镜像",
 				Hint:    "检查 Dockerfile 是否成功产出镜像后重新部署",
@@ -191,7 +204,7 @@ func (d *Docker) runBuild(ctx context.Context, req BuildRequest, tag string) (Bu
 		}
 		return BuildResponse{}, err
 	}
-	return BuildResponse{OK: true, Image: &info}, nil
+	return BuildResponse{OK: true, Image: &info, Log: log}, nil
 }
 
 // buildMessage is one line of the BuilderV1 JSON stream.
@@ -203,32 +216,59 @@ type buildMessage struct {
 	} `json:"errorDetail"`
 }
 
-// drainBuild consumes the build stream, collecting output lines and returning
-// the first error the daemon reports.
-func drainBuild(r io.Reader) ([]string, error) {
-	var lines []string
+// drainBuild consumes the build stream into a BuildLogMaxBytes ring (ANSI
+// codes removed) and returns the first error the daemon reports.
+func drainBuild(r io.Reader) (*tailBuffer, error) {
+	out := newTailBuffer(BuildLogMaxBytes)
 	dec := json.NewDecoder(r)
 	for {
 		var m buildMessage
 		if err := dec.Decode(&m); err == io.EOF {
 			break
 		} else if err != nil {
-			return lines, err
+			return out, err
 		}
-		for _, l := range strings.Split(strings.TrimRight(m.Stream, "\n"), "\n") {
-			if strings.TrimSpace(l) != "" {
-				lines = append(lines, l)
-			}
+		if m.Stream != "" {
+			_, _ = out.Write([]byte(ansiPattern.ReplaceAllString(m.Stream, "")))
 		}
 		if m.Error != "" {
-			return lines, errors.New(m.Error)
+			return out, errors.New(m.Error)
 		}
 	}
-	return lines, nil
+	return out, nil
 }
 
+// appendLogLine adds line (ANSI removed, capped like an excerpt line) to a
+// build log, keeping the log body within BuildLogMaxBytes.
+func appendLogLine(log, line string) string {
+	if log != "" && !strings.HasSuffix(log, "\n") {
+		log += "\n"
+	}
+	log += truncateLine(ansiPattern.ReplaceAllString(line, ""), maxExcerptLineBytes) + "\n"
+	return shrinkLog(log, BuildLogMaxBytes)
+}
+
+// logLines splits a build log into its non-blank lines, without the omitted
+// header line.
+func logLines(log string) []string {
+	if m := omittedPattern.FindString(log); m != "" {
+		log = log[len(m):]
+	}
+	var lines []string
+	for _, l := range strings.Split(log, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, strings.TrimRight(l, "\r"))
+		}
+	}
+	return lines
+}
+
+// maxExcerptLineBytes caps each line of a failure excerpt.
+const maxExcerptLineBytes = 2 << 10
+
 // buildExcerpt keeps the output of the failing step, stripped of Docker's step
-// bookkeeping and terminal color codes, capped at MaxLogExcerptLine lines.
+// bookkeeping and terminal color codes, capped at MaxLogExcerptLine lines of
+// at most maxExcerptLineBytes each.
 func buildExcerpt(lines []string) string {
 	start := 0
 	for i, l := range lines {
@@ -244,24 +284,31 @@ func buildExcerpt(lines []string) string {
 		}
 		out = append(out, l)
 	}
-	return tailLines(out, MaxLogExcerptLine)
+	if len(out) > MaxLogExcerptLine {
+		out = out[len(out)-MaxLogExcerptLine:]
+	}
+	for i, l := range out {
+		out[i] = truncateLine(l, maxExcerptLineBytes)
+	}
+	return strings.Join(out, "\n")
 }
 
 // classifyBuild turns a build error and its logs into a structured Failure.
 func classifyBuild(err error, lines []string) *Failure {
 	excerpt := buildExcerpt(lines)
-	all := err.Error() + "\n" + excerpt
+	msg := truncateLine(ansiPattern.ReplaceAllString(err.Error(), ""), maxExcerptLineBytes)
+	all := msg + "\n" + excerpt
 	f := &Failure{
 		Stage:      "build",
 		Code:       "build_failed",
-		Message:    "镜像构建失败: " + ansiPattern.ReplaceAllString(err.Error(), ""),
+		Message:    "镜像构建失败: " + msg,
 		LogExcerpt: excerpt,
 		Hint:       "根据日志修改 Dockerfile 或依赖后重新部署",
 	}
 	switch {
 	case registryTimeoutPattern.MatchString(all):
 		f.Code = "registry_timeout"
-		f.Hint = "构建时访问软件包源超时。服务器在中国大陆时，在 Dockerfile 中改用国内镜像源后重新部署：npm 加 --registry=https://registry.npmmirror.com；pip 加 -i https://mirrors.aliyun.com/pypi/simple；Go 设 ENV GOPROXY=https://goproxy.cn,direct；Alpine 用 sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories"
+		f.Hint = "构建时访问软件包源超时。服务器在中国大陆时，在 Dockerfile 中改用国内镜像源后重新部署：npm 加 --registry=https://registry.npmmirror.com；pip 加 -i https://mirrors.huaweicloud.com/repository/pypi/simple；Go 设 ENV GOPROXY=https://goproxy.cn,direct；Alpine 用 sed -i 's/dl-cdn.alpinelinux.org/mirrors.huaweicloud.com/g' /etc/apk/repositories"
 	case pullFailurePattern.MatchString(all):
 		f.Code = "base_image_not_found"
 		f.Hint = "基础镜像拉取失败：先检查 FROM 里的镜像名；日志里是网络错误或 502、503 时，多半是镜像加速地址暂时不可用，稍后直接重新部署即可，反复失败就在 /etc/docker/daemon.json 换用可用的加速地址（阿里云服务器用控制台“容器镜像服务 → 镜像加速器”里的专属地址）"
@@ -272,26 +319,86 @@ func classifyBuild(err error, lines []string) *Failure {
 	return f
 }
 
-// normalizeContext returns a plain tar (decompressing gzip if detected) and
-// whether it contains a Dockerfile at the context root.
-func normalizeContext(raw []byte) ([]byte, bool, error) {
-	if isGzip(raw) {
-		zr, err := gzip.NewReader(bytes.NewReader(raw))
+// maxContextBytes bounds the uncompressed size of a build context (tar bytes
+// after gunzip). A variable so tests can lower it.
+var maxContextBytes int64 = 1 << 30
+
+// errContextTooLarge is returned by limitCounter past maxContextBytes.
+var errContextTooLarge = errors.New("build context too large")
+
+// limitCounter fails reads once more than limit bytes have passed through.
+type limitCounter struct {
+	r     io.Reader
+	n     int64
+	limit int64
+}
+
+func (l *limitCounter) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	l.n += int64(n)
+	if l.n > l.limit {
+		return n, errContextTooLarge
+	}
+	return n, err
+}
+
+// scanContext reads the upload once as a stream (gunzipping when it starts
+// with the gzip magic bytes) and returns a Failure when it is not a valid tar,
+// exceeds maxContextBytes uncompressed, or has no Dockerfile at the context
+// root. It never holds more than a read buffer in memory.
+func scanContext(r io.Reader) *Failure {
+	invalid := &Failure{
+		Stage: "upload", Code: "upload_invalid",
+		Message: "上传的内容不是有效的 tar 或 tar.gz 目录包",
+		Hint:    "使用 acornfox deploy 上传项目目录",
+	}
+	br := bufio.NewReader(r)
+	var src io.Reader = br
+	if magic, _ := br.Peek(2); isGzip(magic) {
+		zr, err := gzip.NewReader(br)
 		if err != nil {
-			return nil, false, err
+			return invalid
 		}
 		defer zr.Close()
-		decoded, err := io.ReadAll(zr)
-		if err != nil {
-			return nil, false, err
+		src = zr
+	}
+	lc := &limitCounter{r: src, limit: maxContextBytes}
+	has, err := scanTarForRootDockerfile(lc)
+	if err == nil {
+		// Read past the tar end so a truncated or corrupt gzip stream is
+		// caught here, not as a confusing build failure.
+		_, err = io.Copy(io.Discard, lc)
+	}
+	if errors.Is(err, errContextTooLarge) {
+		return &Failure{
+			Stage: "upload", Code: "context_too_large",
+			Message: "项目包解压后超过 " + humanBytes(maxContextBytes),
+			Hint:    "在 .dockerignore 里排除依赖目录（如 node_modules）、构建产物、数据和大文件后重新部署",
 		}
-		raw = decoded
 	}
-	has, err := scanTarForRootDockerfile(raw)
 	if err != nil {
-		return nil, false, err
+		return invalid
 	}
-	return raw, has, nil
+	if !has {
+		return &Failure{
+			Stage: "upload", Code: "dockerfile_missing",
+			Message: "项目根目录没有 Dockerfile",
+			Hint:    "在项目根目录添加 Dockerfile（写明 EXPOSE 端口）后重新部署",
+		}
+	}
+	return nil
+}
+
+// humanBytes formats a size limit as GB, MB or KB.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30 && n%(1<<30) == 0:
+		return strconv.FormatInt(n>>30, 10) + " GB"
+	case n >= 1<<20:
+		return strconv.FormatInt(n>>20, 10) + " MB"
+	default:
+		return strconv.FormatInt((n+1023)>>10, 10) + " KB"
+	}
 }
 
 // isGzip reports whether b starts with the gzip magic bytes.
@@ -331,12 +438,12 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 	defer cancel()
 
 	emulated := false
-	werr := d.pull(pctx, ref, nil)
+	local, werr := d.pull(pctx, ref, nil)
 	if werr != nil && noMatchingPlatform(werr) && d.hostIsARM(ctx) {
 		// Apple silicon: the image has no arm64 variant. Docker can run the
 		// amd64 one under emulation; allow it and mark it as possibly slow.
 		amd64 := []ocispec.Platform{{OS: "linux", Architecture: "amd64"}}
-		if werr = d.pull(pctx, ref, amd64); werr == nil {
+		if local, werr = d.pull(pctx, ref, amd64); werr == nil {
 			emulated = true
 		}
 	}
@@ -348,7 +455,7 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 	}
 
 	// Tag the pulled image as acornfox/<app>:<id> so it is owned by this app.
-	if _, err := d.cli.ImageTag(ctx, client.ImageTagOptions{Source: ref, Target: tag}); err != nil {
+	if _, err := d.c().ImageTag(ctx, client.ImageTagOptions{Source: local, Target: tag}); err != nil {
 		return PullResponse{}, err
 	}
 
@@ -368,7 +475,9 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 
 // pull pulls ref (optionally for the given platforms) and waits for it,
 // falling back to registry mirrors when Docker Hub stalls (pull_fallback.go).
-func (d *Docker) pull(ctx context.Context, ref string, platforms []ocispec.Platform) error {
+// It returns the local reference that holds the image: ref itself, or the
+// mirror's name for an image pinned by digest.
+func (d *Docker) pull(ctx context.Context, ref string, platforms []ocispec.Platform) (string, error) {
 	return d.pullFallback(ctx, ref, platforms)
 }
 
@@ -381,7 +490,7 @@ func noMatchingPlatform(err error) bool {
 
 // hostIsARM reports whether the Docker host runs on 64-bit ARM.
 func (d *Docker) hostIsARM(ctx context.Context) bool {
-	info, err := d.cli.Info(ctx, client.InfoOptions{})
+	info, err := d.c().Info(ctx, client.InfoOptions{})
 	if err != nil {
 		return false
 	}
@@ -439,7 +548,7 @@ func classifyPull(ctx context.Context, err error) *Failure {
 // acornfox/<app>:<id> tag itself. It returns cerrdefs.ErrNotFound when the tag
 // is absent or the image does not carry it.
 func (d *Docker) inspectByTag(ctx context.Context, app, tag string) (ImageInfo, error) {
-	res, err := d.cli.ImageInspect(ctx, tag)
+	res, err := d.c().ImageInspect(ctx, tag)
 	if err != nil {
 		return ImageInfo{}, err
 	}
@@ -492,7 +601,7 @@ func ownsByTag(tags []string, app string) (deploymentID string, ok bool) {
 // Ownership holds when the image carries our labels (built images) or an
 // acornfox/<app>: RepoTag (pulled images have no labels, only the tag).
 func (d *Docker) inspectImage(ctx context.Context, ref, app string) (ImageInfo, error) {
-	res, err := d.cli.ImageInspect(ctx, ref)
+	res, err := d.c().ImageInspect(ctx, ref)
 	if err != nil {
 		return ImageInfo{}, err
 	}
@@ -570,7 +679,7 @@ func (d *Docker) ListImages(ctx context.Context, app string) ([]ImageInfo, error
 	if app != "" {
 		labelFilters = labelFilters.Add("label", LabelApp+"="+app)
 	}
-	res, err := d.cli.ImageList(ctx, client.ImageListOptions{Filters: labelFilters})
+	res, err := d.c().ImageList(ctx, client.ImageListOptions{Filters: labelFilters})
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +700,7 @@ func (d *Docker) ListImages(ctx context.Context, app string) ([]ImageInfo, error
 		ref = "acornfox/" + app
 	}
 	refFilters := client.Filters{}.Add("reference", ref+"*")
-	tagged, err := d.cli.ImageList(ctx, client.ImageListOptions{Filters: refFilters})
+	tagged, err := d.c().ImageList(ctx, client.ImageListOptions{Filters: refFilters})
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +751,7 @@ func (d *Docker) RemoveImage(ctx context.Context, app, ref string) error {
 		}
 		return err
 	}
-	_, err := d.cli.ImageRemove(ctx, ref, client.ImageRemoveOptions{PruneChildren: true})
+	_, err := d.c().ImageRemove(ctx, ref, client.ImageRemoveOptions{PruneChildren: true})
 	if err != nil && cerrdefs.IsNotFound(err) {
 		return nil
 	}
@@ -674,7 +783,7 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 	}
 
 	// If it already exists, reuse it as-is (name is the idempotency key).
-	inspect, err := d.cli.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
+	inspect, err := d.c().ContainerInspect(ctx, name, client.ContainerInspectOptions{})
 	if err == nil {
 		if err := d.startIfNeeded(ctx, name, inspect); err != nil {
 			return ContainerInfo{}, err
@@ -742,7 +851,7 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 		}
 	}
 
-	created, err := d.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := d.c().ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name:   name,
 		Config: cfg,
 		HostConfig: &container.HostConfig{
@@ -767,7 +876,7 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 	if err != nil {
 		// A concurrent create may have won the race; reuse the existing one.
 		if cerrdefs.IsConflict(err) {
-			if _, ierr := d.cli.ContainerInspect(ctx, name, client.ContainerInspectOptions{}); ierr == nil {
+			if _, ierr := d.c().ContainerInspect(ctx, name, client.ContainerInspectOptions{}); ierr == nil {
 				if serr := d.startByName(ctx, name); serr != nil {
 					return ContainerInfo{}, serr
 				}
@@ -777,7 +886,7 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 		return ContainerInfo{}, err
 	}
 
-	if _, err := d.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := d.c().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return ContainerInfo{}, err
 	}
 	return d.containerInfo(ctx, name)
@@ -786,14 +895,14 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 // ensureAddonImage pulls a pinned add-on image if it is not present locally.
 // The image is left untagged by AcornFox, so per-app image GC never removes it.
 func (d *Docker) ensureAddonImage(ctx context.Context, ref string) error {
-	if _, err := d.cli.ImageInspect(ctx, ref); err == nil {
+	if _, err := d.c().ImageInspect(ctx, ref); err == nil {
 		return nil
 	} else if !cerrdefs.IsNotFound(err) {
 		return err
 	}
 	pctx, cancel := context.WithTimeout(ctx, pullImageTimeout)
 	defer cancel()
-	if err := d.pullFallback(pctx, ref, nil); err != nil {
+	if _, err := d.pullFallback(pctx, ref, nil); err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrPullFailed, ref, err)
 	}
 	return nil
@@ -810,7 +919,7 @@ func (d *Docker) startIfNeeded(ctx context.Context, name string, inspect client.
 // startByName starts a container by name, treating an already-started container
 // as success.
 func (d *Docker) startByName(ctx context.Context, name string) error {
-	_, err := d.cli.ContainerStart(ctx, name, client.ContainerStartOptions{})
+	_, err := d.c().ContainerStart(ctx, name, client.ContainerStartOptions{})
 	if err != nil && cerrdefs.IsConflict(err) {
 		return nil
 	}
@@ -821,18 +930,18 @@ func (d *Docker) startByName(ctx context.Context, name string) error {
 // not already exist.
 func (d *Docker) ensureNetwork(ctx context.Context, app string) error {
 	name := NetworkName(app)
-	if res, err := d.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{}); err == nil {
+	if res, err := d.c().NetworkInspect(ctx, name, client.NetworkInspectOptions{}); err == nil {
 		return checkNetworkOwner(app, res.Network)
 	} else if !cerrdefs.IsNotFound(err) {
 		return err
 	}
-	_, err := d.cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
+	_, err := d.c().NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{LabelManaged: "1", LabelApp: app},
 	})
 	// A concurrent creator may have claimed the name; re-check ownership.
 	if err != nil && cerrdefs.IsConflict(err) {
-		res, inspectErr := d.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+		res, inspectErr := d.c().NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 		if inspectErr != nil {
 			return inspectErr
 		}
@@ -885,7 +994,7 @@ func (d *Docker) ListContainers(ctx context.Context, app string) ([]ContainerInf
 	if app != "" {
 		filters = filters.Add("label", LabelApp+"="+app)
 	}
-	res, err := d.cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	res, err := d.c().ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
 	if err != nil {
 		return nil, err
 	}
@@ -914,7 +1023,7 @@ func (d *Docker) containerInfo(ctx context.Context, name string) (ContainerInfo,
 
 // containerInfoByID inspects a container and maps its observed state.
 func (d *Docker) containerInfoByID(ctx context.Context, id string) (ContainerInfo, error) {
-	res, err := d.cli.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	res, err := d.c().ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
 		return ContainerInfo{}, err
 	}
@@ -975,7 +1084,7 @@ func (d *Docker) StopContainer(ctx context.Context, app, name string) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.cli.ContainerStop(ctx, c.ID, client.ContainerStopOptions{})
+	_, err = d.c().ContainerStop(ctx, c.ID, client.ContainerStopOptions{})
 	if cerrdefs.IsNotFound(err) {
 		return nil
 	}
@@ -992,7 +1101,7 @@ func (d *Docker) UpdateResources(ctx context.Context, req UpdateResourcesRequest
 		return err
 	}
 	memory := int64(req.MemoryMB) * (1 << 20)
-	_, err = d.cli.ContainerUpdate(ctx, c.ID, client.ContainerUpdateOptions{
+	_, err = d.c().ContainerUpdate(ctx, c.ID, client.ContainerUpdateOptions{
 		Resources: &container.Resources{
 			Memory:     memory,
 			MemorySwap: memory,
@@ -1029,24 +1138,88 @@ func (d *Docker) RemoveContainer(ctx context.Context, app, name string) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.cli.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true})
+	_, err = d.c().ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true})
 	if cerrdefs.IsNotFound(err) {
 		return nil
 	}
 	return err
 }
 
-// Logs preserves the existing line-only API, using the timestamped reader.
+// logsMaxBytes bounds the raw output Logs keeps (the tail is what matters),
+// so that the reply stays within the client's response bound.
+const logsMaxBytes = 2 << 20
+
+// Logs returns the last tail lines (default 100, at most 1000) of a managed
+// container, stdout and stderr interleaved by timestamp, ANSI removed. Docker
+// sends only those lines, and they pass through a bounded ring, so a container
+// with a large log costs no more memory than a small one.
 func (d *Docker) Logs(ctx context.Context, app, name string, tail int) ([]string, error) {
-	batch, err := d.LogBatch(ctx, app, name, tail, "")
+	c, err := d.managedContainer(ctx, app, name)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(batch.Records))
-	for _, record := range batch.Records {
-		out = append(out, record.Text)
+	if tail <= 0 {
+		tail = 100
 	}
-	return out, nil
+	if tail > MaxLogLines {
+		tail = MaxLogLines
+	}
+	rc, err := d.c().ContainerLogs(ctx, c.ID, client.ContainerLogsOptions{
+		ShowStdout: true, ShowStderr: true, Timestamps: true, Tail: strconv.Itoa(tail),
+	})
+	if err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	defer rc.Close()
+	out := newTailBuffer(logsMaxBytes)
+	if c.Config.Tty {
+		_, err = io.Copy(out, rc)
+	} else {
+		_, err = stdcopy.StdCopy(out, out, rc)
+	}
+	if err != nil {
+		return nil, err
+	}
+	data, _ := alignTail(out.Bytes(), out.Dropped())
+	return timestampedLines(data, tail), nil
+}
+
+// timestampedLines turns "<RFC3339Nano> <text>" lines into their texts,
+// ordered by timestamp (stable, so equal stamps keep their order), ANSI and
+// trailing CR removed, keeping the last tail. A line without a valid stamp
+// takes the stamp of the line before it.
+func timestampedLines(data []byte, tail int) []string {
+	type rec struct {
+		at   time.Time
+		text string
+	}
+	raw := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(data) == 0 {
+		raw = nil
+	}
+	recs := make([]rec, 0, len(raw))
+	var last time.Time
+	for _, l := range raw {
+		text := l
+		if ts, rest, ok := strings.Cut(l, " "); ok {
+			if at, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				last, text = at, rest
+			}
+		}
+		recs = append(recs, rec{at: last, text: ansiPattern.ReplaceAllString(strings.TrimSuffix(text, "\r"), "")})
+	}
+	sort.SliceStable(recs, func(i, j int) bool { return recs[i].at.Before(recs[j].at) })
+	if len(recs) > tail {
+		recs = recs[len(recs)-tail:]
+	}
+	out := make([]string, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, r.text)
+	}
+	return out
 }
 
 // ContainerStats never queries unowned or stopped containers.
@@ -1058,7 +1231,7 @@ func (d *Docker) ContainerStats(ctx context.Context, app, name string) (StatsRes
 	if c.State == nil || !c.State.Running {
 		return StatsResponse{}, ErrStopped
 	}
-	stats, err := d.cli.ContainerStats(ctx, c.ID, client.ContainerStatsOptions{Stream: false, IncludePreviousSample: true})
+	stats, err := d.c().ContainerStats(ctx, c.ID, client.ContainerStatsOptions{Stream: false, IncludePreviousSample: true})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return StatsResponse{}, ErrNotFound
@@ -1071,19 +1244,6 @@ func (d *Docker) ContainerStats(ctx context.Context, app, name string) (StatsRes
 		return StatsResponse{}, err
 	}
 	return containerStatsView(v), nil
-}
-
-// splitLogLines splits raw log bytes into ANSI-stripped, non-empty lines.
-func splitLogLines(b []byte) []string {
-	var out []string
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := ansiPattern.ReplaceAllString(sc.Text(), "")
-		line = strings.TrimRight(line, "\r")
-		out = append(out, line)
-	}
-	return out
 }
 
 // dbFilePattern matches database-like filenames in the container diff.
@@ -1103,7 +1263,7 @@ func (d *Docker) Diff(ctx context.Context, app, name string) ([]string, error) {
 		}
 	}
 
-	res, err := d.cli.ContainerDiff(ctx, owned.ID, client.ContainerDiffOptions{})
+	res, err := d.c().ContainerDiff(ctx, owned.ID, client.ContainerDiffOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil, ErrNotFound
@@ -1142,7 +1302,7 @@ func (d *Docker) EnsureVolume(ctx context.Context, app, name string) error {
 	if !strings.HasPrefix(name, VolumePrefix(app)) {
 		return fmt.Errorf("volume %q must start with %q", name, VolumePrefix(app))
 	}
-	_, err := d.cli.VolumeCreate(ctx, client.VolumeCreateOptions{
+	_, err := d.c().VolumeCreate(ctx, client.VolumeCreateOptions{
 		Name:   name,
 		Driver: "local",
 		Labels: map[string]string{LabelManaged: "1", LabelApp: app},
@@ -1158,7 +1318,7 @@ func (d *Docker) RemoveVolume(ctx context.Context, app, name string) error {
 	if !strings.HasPrefix(name, VolumePrefix(app)) {
 		return fmt.Errorf("volume %q must start with %q", name, VolumePrefix(app))
 	}
-	res, err := d.cli.VolumeInspect(ctx, name, client.VolumeInspectOptions{})
+	res, err := d.c().VolumeInspect(ctx, name, client.VolumeInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
@@ -1168,7 +1328,7 @@ func (d *Docker) RemoveVolume(ctx context.Context, app, name string) error {
 	if res.Volume.Labels[LabelManaged] != "1" || res.Volume.Labels[LabelApp] != app {
 		return fmt.Errorf("volume %q is not managed for app %q", name, app)
 	}
-	if _, err := d.cli.VolumeRemove(ctx, name, client.VolumeRemoveOptions{}); err != nil {
+	if _, err := d.c().VolumeRemove(ctx, name, client.VolumeRemoveOptions{}); err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
 		}
@@ -1183,7 +1343,7 @@ func (d *Docker) ListVolumes(ctx context.Context, app string) ([]VolumeInfo, err
 	if app != "" {
 		filters = filters.Add("label", LabelApp+"="+app)
 	}
-	res, err := d.cli.VolumeList(ctx, client.VolumeListOptions{Filters: filters})
+	res, err := d.c().VolumeList(ctx, client.VolumeListOptions{Filters: filters})
 	if err != nil {
 		return nil, err
 	}
@@ -1202,29 +1362,22 @@ func (d *Docker) ListVolumes(ctx context.Context, app string) ([]VolumeInfo, err
 	return out, nil
 }
 
-// scanTarForRootDockerfile reports whether the tar stream contains a
+// scanTarForRootDockerfile reads the whole tar stream (so that its size is
+// counted and its framing validated) and reports whether it contains a
 // Dockerfile at the context root (./Dockerfile or Dockerfile).
-func scanTarForRootDockerfile(raw []byte) (bool, error) {
-	tr := tar.NewReader(bytes.NewReader(raw))
+func scanTarForRootDockerfile(r io.Reader) (bool, error) {
+	tr := tar.NewReader(r)
+	found := false
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return false, nil
+			return found, nil
 		}
 		if err != nil {
 			return false, err
 		}
-		name := strings.TrimPrefix(h.Name, "./")
-		if name == "Dockerfile" {
-			return true, nil
+		if strings.TrimPrefix(h.Name, "./") == "Dockerfile" {
+			found = true
 		}
 	}
-}
-
-// tailLines joins the last n lines with newlines.
-func tailLines(lines []string, n int) string {
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return strings.Join(lines, "\n")
 }

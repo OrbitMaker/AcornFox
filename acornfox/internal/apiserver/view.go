@@ -7,10 +7,12 @@ import (
 	"github.com/acornfox/acornfox/internal/state"
 )
 
-// deploymentView is the deployment as returned by the API. It is a distinct
-// type from state.Deployment so the wire shape is explicit and stable; the
-// fields mirror the store row directly (no secrets live on a deployment).
-func deploymentView(d state.Deployment) state.Deployment { return d }
+// deploymentView is the deployment as returned right after it was submitted.
+// A new deployment is still pending, so it needs no rollback plan, event
+// times or logs; see deploymentViewer for the full view.
+func deploymentView(d state.Deployment) deploymentOut {
+	return (&deploymentViewer{}).view(d)
+}
 
 // envKeyView describes one environment variable without ever exposing a secret
 // value. Non-secret values are returned; secret values are omitted entirely.
@@ -72,8 +74,9 @@ type appView struct {
 	Exposure          string             `json:"exposure"`          // effective: local | lan | public | afx_cloud
 	ObservedState     string             `json:"observed_state"`    // running | stopped | missing | unavailable
 	Observed          *observedContainer `json:"observed,omitempty"`
-	Live              *state.Deployment  `json:"live,omitempty"`
-	Latest            *state.Deployment  `json:"latest,omitempty"` // newest deployment (may be pending or failed while Live keeps serving)
+	Live              *deploymentOut     `json:"live,omitempty"`
+	Latest            *deploymentOut     `json:"latest,omitempty"`    // newest deployment (may be pending or failed while Live keeps serving)
+	RollbackTargetSeq int                `json:"rollback_target_seq"` // version a rollback without --to goes to; 0 = none
 	Env               []envKeyView       `json:"env,omitempty"`
 	Volumes           []state.Volume     `json:"volumes,omitempty"`
 	Domains           []state.Domain     `json:"domains,omitempty"`

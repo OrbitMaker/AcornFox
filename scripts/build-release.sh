@@ -1,20 +1,47 @@
 #!/usr/bin/env bash
-# 构建发布产物：dist/acornfox_<os>_<arch>[.exe] 和 SHA256SUMS
+# 构建发布产物：dist/acornfox_<os>_<arch>[.exe] 和 SHA256SUMS，并附带安装脚本和 Caddy 安装包
 # 文件名与 scripts/install/*.sh 下载的地址一致。
-# 用法: scripts/build-release.sh v0.2.0
+#
+# 用法: scripts/build-release.sh vX.Y.Z
+#   例: scripts/build-release.sh v0.4.0-rc.1
+#
+# 编哪些平台：默认 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64。
+#   Linux 是服务端加命令行；Mac 只当命令行客户端用（经 SSH 管理服务器）。
+#   本版本不编 Windows：Windows 用户经 SSH 在服务器上运行 acornfox。
+#   要改就设 ACORNFOX_RELEASE_TARGETS（空格分隔的 os/arch），例如
+#     ACORNFOX_RELEASE_TARGETS="linux/amd64" scripts/build-release.sh v0.4.0-rc.1
+#     ACORNFOX_RELEASE_TARGETS="linux/amd64 windows/amd64" scripts/build-release.sh v0.4.0-test
+#   windows 目标的文件名带 .exe。只认 linux、darwin、windows 和 amd64、arm64。
+#
+# 输出目录：默认仓库根目录下的 dist/（每次先清空）；设 ACORNFOX_RELEASE_DIST 可改到别处，
+#   例如试跑时 ACORNFOX_RELEASE_DIST=$(mktemp -d)/dist。目录会被整个删掉重建，不要指向有别的文件的目录。
+# 前提：go（版本见 acornfox/go.mod）、curl、sha256sum 或 shasum；要能连 GitHub 下载 Caddy。
+# 验证：最后列出目录内容；SHA256SUMS 里每个 acornfox_* 一行，可用 sha256sum -c SHA256SUMS 核对。
+# 出错：某个平台编不过会立刻停下；Caddy 下载或 SHA-512 校验失败会停下并说明是哪个文件。
 
 set -euo pipefail
 
 VERSION="${1:?用法: $0 vX.Y.Z}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIST="$ROOT/dist"
+DIST="${ACORNFOX_RELEASE_DIST:-$ROOT/dist}"
+TARGETS="${ACORNFOX_RELEASE_TARGETS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64}"
+for target in $TARGETS; do
+    case "$target" in
+        linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|windows/arm64) ;;
+        *) echo "ACORNFOX_RELEASE_TARGETS 里有不认识的平台：$target（写成 os/arch，例如 linux/amd64）" >&2; exit 1 ;;
+    esac
+done
+[ -n "${TARGETS// /}" ] || { echo "ACORNFOX_RELEASE_TARGETS 是空的" >&2; exit 1; }
+case "$DIST" in
+    ""|/|"$HOME"|"$ROOT") echo "ACORNFOX_RELEASE_DIST 不能是 ${DIST:-空}（会被整个删掉）" >&2; exit 1 ;;
+esac
 LDFLAGS="-s -w -X github.com/acornfox/acornfox/internal/cli.Version=${VERSION#v}"
 
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
 cd "$ROOT/acornfox"
-for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+for target in $TARGETS; do
     os="${target%/*}"
     arch="${target#*/}"
     out="$DIST/acornfox_${os}_${arch}"

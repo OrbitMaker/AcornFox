@@ -109,6 +109,7 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	rc := runner.NewClient(*runnerSocket, uint32(*runnerUID))
 	return startServer(ctx, serverOptions{
 		DataDir:       *dataDir,
 		Listens:       listens,
@@ -130,7 +131,14 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		CaddyAdmin:      *caddyAdmin,
 		DefaultExposure: *exposure,
 		LANConsolePort:  *lanPort,
-	}, runner.NewClient(*runnerSocket, uint32(*runnerUID)), stdout, stderr)
+		Setup: &setupDeps{
+			DataDir: *dataDir,
+			Console: "http://" + *consoleListen,
+			Runner:  rc,
+			Runtime: runnerRuntime{r: rc},
+			Log:     stdout,
+		},
+	}, rc, stdout, stderr)
 }
 
 // runRunner implements `acornfox runner` (N1): connect to Docker via client
@@ -160,7 +168,13 @@ func runRunner(args ...string) int {
 	// install.sh records whether this server is in mainland China; Docker Hub
 	// images are then pulled from the domestic mirror first.
 	if china, ok := platform.LinuxInstallChina("/etc/acornfox/install.env"); ok {
-		api.SetRegistry(runner.Registry{China: china})
+		reg := runner.Registry{China: china}
+		if china {
+			// A cloud vendor's internal accelerator (Tencent Cloud today) only
+			// answers inside its network and is by far the fastest there.
+			reg.Mirrors = runner.CloudRegistryMirrors(platform.LinuxInstallCloud("/etc/acornfox/install.env"))
+		}
+		api.SetRegistry(reg)
 	}
 	// The runner does not stage uploads itself; the server writes them under
 	// data-dir/uploads which the runner reads by absolute path.

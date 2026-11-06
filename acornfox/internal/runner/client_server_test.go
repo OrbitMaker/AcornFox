@@ -79,6 +79,10 @@ type fakeAPI struct {
 	// N4.2 [addon-agent]
 	removeVolErr  error
 	removeVolName string
+
+	logTailResp LogTailResult
+	logTailErr  error
+	logTailReq  logTailRequest
 }
 
 func (f *fakeAPI) Ping(context.Context) (PingResponse, error) { return f.pingResp, f.pingErr }
@@ -167,7 +171,17 @@ func (f *fakeAPI) RemoveVolume(_ context.Context, _, name string) error {
 	return f.removeVolErr
 }
 
-var _ API = (*fakeAPI)(nil)
+func (f *fakeAPI) LogTail(_ context.Context, app, name string, maxBytes int) (LogTailResult, error) {
+	f.mu.Lock()
+	f.logTailReq = logTailRequest{App: app, Name: name, MaxBytes: maxBytes}
+	f.mu.Unlock()
+	return f.logTailResp, f.logTailErr
+}
+
+var (
+	_ API       = (*fakeAPI)(nil)
+	_ LogTailer = (*fakeAPI)(nil)
+)
 
 // startTestServer serves srv over a real peer socket in a temp dir and returns
 // a Client that talks to it. It registers cleanup with t.

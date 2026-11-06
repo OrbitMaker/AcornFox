@@ -24,3 +24,15 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 	return positionals, nil
 }
+
+// flagWasSet reports whether the named flag appeared on the command line
+// (as opposed to keeping its default).
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}

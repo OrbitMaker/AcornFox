@@ -203,11 +203,35 @@ func (a *app) persistProject(res resolution) {
 // mode), until the deployment reaches a terminal status or the timeout fires.
 func (a *app) waitDeployment(ctx context.Context, api client.API, appName string, dep client.Deployment, timeout time.Duration) int {
 	start := time.Now()
+	final, code, ok := a.pollDeployment(ctx, api, dep, timeout)
+	if !ok {
+		return code
+	}
+	return a.reportDeployment(ctx, api, appName, final, &start)
+}
+
+// pollDeployment waits for dep to reach a terminal status, printing new
+// events in human mode. It returns the final deployment and ok=true, or
+// ok=false with the exit code once a cancellation, timeout or request error
+// has already been reported.
+func (a *app) pollDeployment(ctx context.Context, api client.API, dep client.Deployment, timeout time.Duration) (client.Deployment, int, bool) {
 	var afterEvent int64
 	deadline := time.Now().Add(timeout)
 
 	if isTerminal(dep.Status) {
-		return a.reportDeployment(ctx, api, appName, dep, &start)
+		return dep, exitOK, true
+	}
+
+	// Only the wait stops on cancellation; the server keeps working on the
+	// deployment, so the diagnosis names it.
+	cancelled := func() (client.Deployment, int, bool) {
+		d := client.Diagnosis{
+			Stage:   "deploy",
+			Code:    "cancelled",
+			Message: "已取消等待（部署在服务器上继续进行）",
+			Hint:    "用 acornfox status " + dep.ID + " 查看结果",
+		}
+		return dep, a.failDiag(d, exitOpFailed), false
 	}
 
 	ticker := time.NewTicker(pollInterval)
@@ -215,14 +239,18 @@ func (a *app) waitDeployment(ctx context.Context, api client.API, appName string
 	for {
 		select {
 		case <-ctx.Done():
-			d := client.Diagnosis{Stage: "deploy", Code: "cancelled", Message: "已取消等待"}
-			return a.failDiag(d, exitOpFailed)
+			return cancelled()
 		case <-ticker.C:
 		}
 
 		latest, events, err := api.Deployment(ctx, dep.ID, afterEvent)
 		if err != nil {
-			return a.out.fail(err)
+			// A signal that lands while a poll is in flight aborts that
+			// request; report the cancellation, not a connection failure.
+			if ctx.Err() != nil {
+				return cancelled()
+			}
+			return dep, a.out.fail(err), false
 		}
 		for _, ev := range events {
 			if ev.ID > afterEvent {
@@ -234,7 +262,7 @@ func (a *app) waitDeployment(ctx context.Context, api client.API, appName string
 		}
 		dep = latest
 		if isTerminal(dep.Status) {
-			return a.reportDeployment(ctx, api, appName, dep, &start)
+			return dep, exitOK, true
 		}
 		if time.Now().After(deadline) {
 			d := client.Diagnosis{
@@ -243,7 +271,7 @@ func (a *app) waitDeployment(ctx context.Context, api client.API, appName string
 				Message: fmt.Sprintf("等待部署超时（%s）", timeout),
 				Hint:    "用 acornfox status " + dep.ID + " 查看后续状态，或用 --timeout 延长等待",
 			}
-			return a.failDiag(d, exitOpFailed)
+			return dep, a.failDiag(d, exitOpFailed), false
 		}
 	}
 }
@@ -251,6 +279,12 @@ func (a *app) waitDeployment(ctx context.Context, api client.API, appName string
 // reportDeployment renders the terminal outcome of a deployment. When start is
 // non-nil the elapsed seconds are included. On success it fetches the app URL.
 func (a *app) reportDeployment(ctx context.Context, api client.API, appName string, dep client.Deployment, start *time.Time) int {
+	return a.reportDeploymentWith(ctx, api, appName, dep, start, nil)
+}
+
+// reportDeploymentWith is reportDeployment with extra fields merged into the
+// --json success object (redeploy adds status). Failures are unaffected.
+func (a *app) reportDeploymentWith(ctx context.Context, api client.API, appName string, dep client.Deployment, start *time.Time, extra map[string]any) int {
 	// Failure: print diagnosis and exit 1.
 	if dep.Status == "failed" {
 		diag := client.Diagnosis{Stage: "deploy", Code: "failed", Message: "部署失败"}
@@ -297,6 +331,9 @@ func (a *app) reportDeployment(ctx context.Context, api client.API, appName stri
 			fields["seconds"] = int(time.Since(*start).Seconds())
 		} else {
 			fields["seconds"] = 0
+		}
+		for k, v := range extra {
+			fields[k] = v
 		}
 		a.out.emitJSON(fields)
 		return exitOK

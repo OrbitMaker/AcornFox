@@ -20,9 +20,11 @@ type DockerEndpoint struct {
 var StatFile = os.Stat
 
 // ResolveDocker finds the Docker API in this order (the order the docker CLI
-// itself uses):
+// itself uses, plus acornfox's own runtime):
 //
 //  1. DOCKER_HOST;
+//     1b. on macOS and Windows, the built-in runtime "acornfox setup" installed
+//     (runtime.json in the data directory);
 //  2. the current docker context (DOCKER_CONTEXT, else currentContext in
 //     ~/.docker/config.json, DOCKER_CONFIG overrides ~/.docker), when it is
 //     not "default";
@@ -32,6 +34,11 @@ var StatFile = os.Stat
 func ResolveDocker() DockerEndpoint {
 	if h := Env("DOCKER_HOST"); h != "" {
 		return DockerEndpoint{Host: h, Source: "DOCKER_HOST", Runtime: guessRuntime(h)}
+	}
+	if DesktopMode() {
+		if r, ok := LoadBuiltinRuntime(DefaultPaths().DataDir); ok {
+			return DockerEndpoint{Host: r.Host, Source: "AcornFox 自带运行环境", Runtime: r.Name}
+		}
 	}
 	if name, host := currentContext(); host != "" {
 		return DockerEndpoint{Host: host, Source: "context " + name, Runtime: guessRuntime(host)}

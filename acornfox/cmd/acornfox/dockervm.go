@@ -17,7 +17,7 @@ import (
 // reported (the VM disk size is not exposed by the Docker API). Results are
 // cached for a few seconds so the console's polling stays cheap.
 type dockerVMHost struct {
-	cli    *dockerclient.Client
+	cli    func() *dockerclient.Client // follows runner.Docker.SetClient
 	runner runner.API
 
 	mu   sync.Mutex
@@ -25,7 +25,7 @@ type dockerVMHost struct {
 	last apiserver.HostView
 }
 
-func newDockerVMHost(cli *dockerclient.Client, r runner.API) *dockerVMHost {
+func newDockerVMHost(cli func() *dockerclient.Client, r runner.API) *dockerVMHost {
 	return &dockerVMHost{cli: cli, runner: r}
 }
 
@@ -44,7 +44,7 @@ func (h *dockerVMHost) Host(ctx context.Context) apiserver.HostView {
 func (h *dockerVMHost) sample(ctx context.Context) apiserver.HostView {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	info, err := h.cli.Info(ctx, dockerclient.InfoOptions{})
+	info, err := h.cli().Info(ctx, dockerclient.InfoOptions{})
 	if err != nil {
 		return apiserver.HostView{Available: false, Source: "docker_vm"}
 	}

@@ -17,7 +17,7 @@ func (d *Docker) managedContainer(ctx context.Context, app, name string) (contai
 		!validContainerSuffix(strings.TrimPrefix(name, VolumePrefix(app))) {
 		return container.InspectResponse{}, refusedContainer(name, app)
 	}
-	res, err := d.cli.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
+	res, err := d.c().ContainerInspect(ctx, name, client.ContainerInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return container.InspectResponse{}, ErrNotFound

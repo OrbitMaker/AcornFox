@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/moby/moby/client"
 )
@@ -88,7 +91,7 @@ func TestDockerLifecycle(t *testing.T) {
 		_ = d.RemoveContainer(cctx, app, name)
 		_ = d.RemoveImage(cctx, app, tag)
 		// The app network is created implicitly by EnsureContainer; remove it too.
-		_, _ = d.cli.NetworkRemove(cctx, NetworkName(app), client.NetworkRemoveOptions{})
+		_, _ = d.c().NetworkRemove(cctx, NetworkName(app), client.NetworkRemoveOptions{})
 	})
 
 	// Build.
@@ -105,6 +108,9 @@ func TestDockerLifecycle(t *testing.T) {
 	if len(buildResp.Image.ExposedPorts) == 0 || buildResp.Image.ExposedPorts[0] != 8080 {
 		t.Fatalf("expected exposed port 8080, got %v", buildResp.Image.ExposedPorts)
 	}
+	if !strings.Contains(buildResp.Log, "Step 1/") {
+		t.Fatalf("build log missing: %q", buildResp.Log)
+	}
 
 	// Rebuild returns the same image without building again.
 	rebuild, err := d.Build(ctx, BuildRequest{App: app, DeploymentID: dep, ContextPath: ctxPath})
@@ -113,6 +119,9 @@ func TestDockerLifecycle(t *testing.T) {
 	}
 	if rebuild.Image == nil || rebuild.Image.ID != buildResp.Image.ID {
 		t.Fatalf("rebuild produced a different image: %+v", rebuild.Image)
+	}
+	if rebuild.Log != "" {
+		t.Fatalf("reused image must not carry a build log: %q", rebuild.Log)
 	}
 
 	// Ensure container twice -> same ID (idempotent by name).
@@ -153,6 +162,25 @@ func TestDockerLifecycle(t *testing.T) {
 	// Logs should be retrievable (may be empty, but must not error).
 	if _, err := d.Logs(ctx, app, name, 40); err != nil {
 		t.Fatalf("Logs: %v", err)
+	}
+
+	// The log tail works on a stopped container and returns its environment.
+	if err := d.StopContainer(ctx, app, name); err != nil {
+		t.Fatalf("StopContainer: %v", err)
+	}
+	tailRes, err := d.LogTail(ctx, app, name, 0)
+	if err != nil {
+		t.Fatalf("LogTail: %v", err)
+	}
+	hasPath := false
+	for _, e := range tailRes.Env {
+		hasPath = hasPath || strings.HasPrefix(e, "PATH=")
+	}
+	if !hasPath || tailRes.Truncated {
+		t.Fatalf("unexpected log tail: %+v", tailRes)
+	}
+	if _, err := d.StartContainer(ctx, app, name); err != nil {
+		t.Fatalf("StartContainer: %v", err)
 	}
 
 	// Diff should surface database-like files created at build/run time.
@@ -309,5 +337,123 @@ func TestDockerVolumeLifecycle(t *testing.T) {
 	}
 	if len(vols) != 1 || vols[0].Name != volName || vols[0].App != app {
 		t.Fatalf("unexpected volumes: %+v", vols)
+	}
+}
+
+// TestDockerBuildLogBounded builds a failing step that prints ~800 KB and
+// checks the log is bounded, aligned and ends with the error, and that the
+// excerpt still follows its rules.
+func TestDockerBuildLogBounded(t *testing.T) {
+	d := newDockerIT(t)
+	ctx := context.Background()
+	const app = "afitlog"
+	const dep = "0123456789ef"
+	dockerfile := "FROM " + itBaseImage + "\n" +
+		"RUN head -c 800000 /dev/zero | tr '\\0' 'a' | fold -w 99; printf '\\033[31m<boom> & done\\033[0m\\n'; exit 3\n"
+	ctxPath := writeGzipTar(t, t.TempDir(), map[string]string{"Dockerfile": dockerfile})
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.RemoveImage(cctx, app, ImageTag(app, dep))
+	})
+	resp, err := d.Build(ctx, BuildRequest{App: app, DeploymentID: dep, ContextPath: ctxPath})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if resp.OK || resp.Failure == nil {
+		t.Fatalf("expected a build failure, got %+v", resp)
+	}
+	m := omittedPattern.FindString(resp.Log)
+	if m == "" || len(resp.Log)-len(m) > BuildLogMaxBytes {
+		t.Fatalf("log not bounded: header %q, %d bytes", m, len(resp.Log))
+	}
+	if strings.Contains(resp.Log, "\x1b[") || !strings.Contains(resp.Log, "<boom> & done") {
+		t.Fatalf("log tail wrong: %q", resp.Log[len(resp.Log)-200:])
+	}
+	if !strings.Contains(resp.Failure.LogExcerpt, "<boom> & done") || strings.Count(resp.Failure.LogExcerpt, "\n") >= MaxLogExcerptLine {
+		t.Fatalf("excerpt: %q", resp.Failure.LogExcerpt)
+	}
+}
+
+// TestDockerLogTail runs a container that prints 3000 lines (its image has no
+// RUN step, so the build needs no build-container networking) and checks
+// Logs' Docker-side tail and LogTail's bounded, aligned tail and environment,
+// before and after the container stops.
+func TestDockerLogTail(t *testing.T) {
+	d := newDockerIT(t)
+	ctx := context.Background()
+	const app = "afittail"
+	const dep = "0123456789aa"
+	name := ContainerName(app, dep)
+	tag := ImageTag(app, dep)
+	dockerfile := "FROM " + itBaseImage + "\n" +
+		"ENV AF_IT_SECRET=s3cr3t-value\n" +
+		`CMD ["sh","-c","i=0; while [ $i -lt 3000 ]; do echo \"line $i <x> & 字\"; i=$((i+1)); done; sleep 3600"]` + "\n"
+	ctxPath := writeGzipTar(t, t.TempDir(), map[string]string{"Dockerfile": dockerfile})
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.RemoveContainer(cctx, app, name)
+		_ = d.RemoveImage(cctx, app, tag)
+		_, _ = d.c().NetworkRemove(cctx, NetworkName(app), client.NetworkRemoveOptions{})
+	})
+	resp, err := d.Build(ctx, BuildRequest{App: app, DeploymentID: dep, ContextPath: ctxPath})
+	if err != nil || !resp.OK {
+		t.Fatalf("Build: %v %+v", err, resp.Failure)
+	}
+	if !strings.Contains(resp.Log, "Successfully tagged "+tag) || omittedPattern.MatchString(resp.Log) {
+		t.Fatalf("build log: %q", resp.Log)
+	}
+	if _, err := d.EnsureContainer(ctx, EnsureContainerRequest{
+		App: app, DeploymentID: dep, Image: tag, Port: 8080, MemoryMB: 64, CPUMilli: 500,
+		Env: map[string]string{"AF_IT_EXTRA": "extra-value"},
+	}); err != nil {
+		t.Fatalf("EnsureContainer: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		lines, err := d.Logs(ctx, app, name, 5)
+		if err != nil {
+			t.Fatalf("Logs: %v", err)
+		}
+		if len(lines) == 5 && lines[4] == "line 2999 <x> & 字" {
+			if lines[0] != "line 2995 <x> & 字" {
+				t.Fatalf("Logs tail: %q", lines)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("container output not complete: %q", lines)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	check := func(label string) {
+		res, err := d.LogTail(ctx, app, name, 4096)
+		if err != nil {
+			t.Fatalf("%s LogTail: %v", label, err)
+		}
+		if !res.Truncated || len(res.Data) > 4096 || !utf8.Valid(res.Data) {
+			t.Fatalf("%s: truncated %v, %d bytes", label, res.Truncated, len(res.Data))
+		}
+		first := strings.SplitN(string(res.Data), "\n", 2)[0]
+		if _, err := time.Parse(time.RFC3339Nano, strings.SplitN(first, " ", 2)[0]); err != nil || !strings.Contains(first, " line ") {
+			t.Fatalf("%s: tail not aligned to a timestamped line: %q", label, first)
+		}
+		if !strings.HasSuffix(string(res.Data), "line 2999 <x> & 字\n") {
+			t.Fatalf("%s: tail end: %q", label, res.Data[len(res.Data)-60:])
+		}
+		env := strings.Join(res.Env, "\n")
+		if !strings.Contains(env, "AF_IT_SECRET=s3cr3t-value") || !strings.Contains(env, "AF_IT_EXTRA=extra-value") {
+			t.Fatalf("%s: env %q", label, res.Env)
+		}
+	}
+	check("running")
+	if err := d.StopContainer(ctx, app, name); err != nil {
+		t.Fatalf("StopContainer: %v", err)
+	}
+	check("stopped")
+	if _, err := d.LogTail(ctx, app, ContainerName(app, "0123456789bb"), 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing container: %v", err)
 	}
 }

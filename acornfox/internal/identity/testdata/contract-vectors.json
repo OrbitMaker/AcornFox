@@ -1,0 +1,14 @@
+{
+  "body": "{\"file_id\":\"wsl-x64-3.0.3\",\"purpose\":\"runtime\",\"app\":null,\"account_token\":null}",
+  "body_sha256": "1642375f53e8918bbb31905a238771f5626f99dfcf9accc0962989174ffbd9c1",
+  "canonical": "AFX-GW-1\nPOST\n/v1/issue\n1794400000\nq1w2e3r4t5y6u7i8o9p0aA\n1642375f53e8918bbb31905a238771f5626f99dfcf9accc0962989174ffbd9c1",
+  "install_id": "afx-6vnjm4bf6lngwgjafays",
+  "method": "POST",
+  "nonce": "q1w2e3r4t5y6u7i8o9p0aA",
+  "note": "测试数据：私钥只用于测试。各端：从 private_key_d 导出的公钥、安装编号、签名串、请求体哈希必须和这里一致；自己签的签名必须能被网关的 sig.Verify 通过。",
+  "path": "/v1/issue",
+  "private_key_d": "6c3f1a2b9d8e7f60514233241506f7e8d9cab0a1928374655647382910fedcba",
+  "public_key": "BCM4Siq1c_riOx-LugQ0Tx7w34FgHNku-SZFltGYL1xHBxpuE2xJyDqKJ_iwK_Fa8W3b_QHIRvHuFV0XDewO5NE",
+  "signature_p1363": "N7Dat9Pp7jK1NBA4zLjngQOopRr059CLFymycccDedQPyaYfmRJF3iSyevY7vLy-Ofd36qEXxSTSBp34UJlH_g",
+  "timestamp": 1794400000
+}

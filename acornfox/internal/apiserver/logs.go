@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -31,38 +31,10 @@ type logBatchView struct {
 	Reset   bool     `json:"reset"`
 }
 
+// logSecrets returns the values masked in every log response; the same rule
+// is used when deployment logs are archived.
 func (s *server) logSecrets(ctx context.Context, app string) ([]string, error) {
-	vars, err := s.store.ListEnv(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	var secrets []string
-	for _, v := range vars {
-		if v.Secret && len(v.Value) >= 4 {
-			secrets = append(secrets, v.Value)
-		}
-	}
-	active, err := s.store.ListAddons(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	removed, err := s.store.ListRemovedAddons(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	for _, addon := range append(active, removed...) {
-		creds, err := addon.DecodeCredentials()
-		if err != nil {
-			return nil, err
-		}
-		for _, value := range []string{creds.URL, creds.Password, creds.RootPassword} {
-			if len(value) >= 4 {
-				secrets = append(secrets, value)
-			}
-		}
-	}
-	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	return secrets, nil
+	return deploylog.SecretsForApp(ctx, s.store, app)
 }
 
 func redactObservedLines(lines, secrets []string) []string {

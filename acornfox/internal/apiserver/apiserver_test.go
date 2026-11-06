@@ -311,6 +311,43 @@ func TestDeployImageJSON(t *testing.T) {
 	}
 }
 
+// Image and git deploys take the port / health_path query parameters like an
+// upload does (an image without EXPOSE would otherwise be checked on 8080).
+func TestDeployJSONTakesPortAndHealthPath(t *testing.T) {
+	h, st, _, _, _ := newTestServer(t)
+	hdr := map[string]string{"Content-Type": "application/json"}
+	for app, body := range map[string]string{
+		"pod": `{"image":"ghcr.io/stefanprodan/podinfo:6.7.1"}`,
+		"src": `{"git":"https://github.com/acme/app.git","ref":"main"}`,
+	} {
+		w := do(t, h, "POST", "/v1/apps/"+app+"/deployments?port=9898&health_path=/healthz", []byte(body), hdr)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("%s: status = %d, want 202; body=%s", app, w.Code, w.Body.String())
+		}
+		got, err := st.GetApp(context.Background(), app)
+		if err != nil {
+			t.Fatalf("%s: GetApp: %v", app, err)
+		}
+		if got.Port != 9898 || got.HealthPath != "/healthz" {
+			t.Fatalf("%s: port=%d health_path=%q, want 9898 /healthz", app, got.Port, got.HealthPath)
+		}
+	}
+}
+
+func TestDeployJSONRejectsBadPortBeforeCreatingApp(t *testing.T) {
+	h, st, k, _, _ := newTestServer(t)
+	w := do(t, h, "POST", "/v1/apps/pod/deployments?port=70000", []byte(`{"image":"nginx:1.27-alpine"}`), map[string]string{"Content-Type": "application/json"})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_port") {
+		t.Fatalf("status = %d, want 400 invalid_port; body=%s", w.Code, w.Body.String())
+	}
+	if _, err := st.GetApp(context.Background(), "pod"); err == nil {
+		t.Fatalf("app created despite bad port")
+	}
+	if len(k.kicks) != 0 {
+		t.Fatalf("unexpected kick")
+	}
+}
+
 func TestDeployImageJSONIdempotencyKey(t *testing.T) {
 	h, _, _, _, _ := newTestServer(t)
 	hdr := map[string]string{"Content-Type": "application/json", "Idempotency-Key": "k1"}

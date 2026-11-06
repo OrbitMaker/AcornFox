@@ -5,16 +5,20 @@ package main
 //	acornfox install [--rollback]    set up or upgrade this computer's acornfox
 //	acornfox uninstall [--purge]     remove it (keeps data unless --purge)
 //	acornfox doctor                  check Docker, the service and LAN access
+//	                                 (Linux: Docker, disk space and ports)
 //
 // install copies the running binary to the data directory's bin/, keeps the
 // previous copy and database as *.prev (for --rollback), registers the
 // autostart entry (LaunchAgent / logon task) running "acornfox serve
-// --background", waits for the API and adds the "local" target. Linux uses
-// install.sh / upgrade.sh instead.
+// --background", waits for the API and adds the "local" target. It does not
+// need Docker: preparing the runtime (Docker, the gateway, the self checks)
+// is "acornfox setup", which install runs at the end (and the console shows
+// the same steps). Linux uses install.sh / upgrade.sh instead.
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,6 +36,7 @@ import (
 	"github.com/acornfox/acornfox/internal/client"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/runner"
+	"github.com/acornfox/acornfox/internal/setup"
 )
 
 const (
@@ -174,6 +179,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	rollback := fs.Bool("rollback", false, "回到上一次安装的版本（程序和数据库都恢复到升级前）")
 	china := fs.Bool("china", false, "中国大陆网络：镜像直接从国内源拉")
 	global := fs.Bool("global", false, "海外网络：镜像从 Docker Hub 拉")
+	noSetup := fs.Bool("no-setup", false, "只装主程序，不接着准备运行环境（之后在控制台或用 acornfox setup 准备）")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -189,34 +195,22 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	start := time.Now()
 	paths := platform.DefaultPaths()
 
-	// 1. Docker must be reachable.
-	ep, dc, info, err := dockerConnect(ctx)
-	if err != nil {
-		fmt.Fprintln(stderr, dockerHelp(ep, err))
-		fmt.Fprintf(stderr, "（尝试的地址：%s，来源 %s）\n", ep.Host, ep.Source)
-		return 3
-	}
-	_ = dc.Close()
-	fmt.Fprintf(stdout, "Docker：%s %s（%s，%s/%s，%d 核 %.1f GB）\n", ep.Runtime, info.Info.ServerVersion, ep.Host, info.Info.OSType, info.Info.Architecture, info.Info.NCPU, float64(info.Info.MemTotal)/(1<<30))
-
-	// 2. Network: where images come from (users in mainland China use domestic sources).
+	// 1. Network: where images and runtime files come from (users in
+	// mainland China use domestic sources).
 	if err := os.MkdirAll(paths.DataDir, 0o700); err != nil {
 		fmt.Fprintln(stderr, "创建目录失败：", err)
 		return 1
 	}
 	netcfg := decideNetwork(ctx, paths.DataDir, *china, *global)
+	prevNet := platform.LoadNetwork(paths.DataDir)
+	netcfg.DownloadBase, netcfg.Gateway = prevNet.DownloadBase, prevNet.Gateway
 	if err := platform.SaveNetwork(paths.DataDir, netcfg); err != nil {
 		fmt.Fprintln(stderr, "保存网络设置失败：", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "网络：%s（%s）\n", map[bool]string{true: "中国大陆，镜像从国内源拉", false: "海外，镜像从 Docker Hub 拉"}[netcfg.China], netcfg.Source)
+	fmt.Fprintf(stdout, "网络：%s（%s）\n", map[bool]string{true: "中国大陆，从国内源下载", false: "海外，从官方源下载"}[netcfg.China], netcfg.Source)
 
-	// 3. The gateway component (Caddy image) is part of the product: prepare
-	// it now, with progress, instead of downloading it in the background on
-	// first start.
-	prepareCaddyImage(ctx, netcfg, stdout, stderr)
-
-	// 4. Put the binary in place (and keep the previous one for --rollback).
+	// 2. Put the binary in place (and keep the previous one for --rollback).
 	if err := os.MkdirAll(paths.BinDir, 0o700); err != nil {
 		fmt.Fprintln(stderr, "创建目录失败：", err)
 		return 1
@@ -257,7 +251,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// 5. Autostart entry; this also (re)starts the process.
+	// 3. Autostart entry; this also (re)starts the process.
 	if err := platform.InstallAutostart(platform.AutostartEntry{
 		Binary:  bin,
 		Args:    []string{"serve", "--background"},
@@ -267,7 +261,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 6. Wait for the API.
+	// 4. Wait for the API.
 	st, err := waitAPI(ctx, paths.APISocket, installWait)
 	if err != nil {
 		fmt.Fprintln(stderr, "服务没有按时启动：", err)
@@ -275,7 +269,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 7. The "local" target for the CLI and AI workbenches; on Windows also
+	// 5. The "local" target for the CLI and AI workbenches; on Windows also
 	// put the installed copy on the user's PATH.
 	ensureLocalTarget(paths.APISocket, stdout, stderr)
 	if changed, err := platform.EnsureUserPath(paths.BinDir); err != nil {
@@ -284,11 +278,17 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "已把 "+paths.BinDir+" 加入用户 PATH（新开的终端里可直接用 acornfox）")
 	}
 
-	fmt.Fprintf(stdout, "已安装并在后台运行（用时 %d 秒，Docker %s）\n", int(time.Since(start).Seconds()), st.DockerVersion)
-	fmt.Fprintln(stdout, "控制台：运行 acornfox open（只在本机打开；要在局域网打开运行 acornfox lan-console enable）")
+	_ = st
+	fmt.Fprintf(stdout, "主程序已安装并在后台运行（用时 %d 秒）\n", int(time.Since(start).Seconds()))
 	fmt.Fprintln(stdout, "数据目录："+paths.DataDir)
-	runDoctorChecks(ctx, stdout, true)
-	return 0
+	if *noSetup {
+		fmt.Fprintln(stdout, "下一步：准备运行环境。运行 acornfox setup，或运行 acornfox open 在控制台里点")
+		return 0
+	}
+
+	// 6. Prepare the runtime, following the same steps the console shows.
+	fmt.Fprintln(stdout, "")
+	return run([]string{"setup"}, os.Stdin, stdout, stderr)
 }
 
 // decideNetwork picks China or global: a flag wins, then an earlier choice
@@ -309,47 +309,6 @@ func decideNetwork(ctx context.Context, dataDir string, china, global bool) plat
 		return platform.Network{China: c, Source: "自动判断"}
 	}
 	return platform.Network{China: true, Source: "没判断出来，按国内处理；海外用户请加 --global 重新运行"}
-}
-
-// prepareCaddyImage pulls the Caddy image used by the gateway container if
-// it is missing, printing progress. Failure is not fatal: serve retries.
-func prepareCaddyImage(ctx context.Context, n platform.Network, stdout, stderr io.Writer) {
-	_, dc, _, err := dockerConnect(ctx)
-	if err != nil {
-		return
-	}
-	defer dc.Close()
-	d := runner.NewDocker(dc)
-	d.SetRegistry(runner.Registry{China: n.China, Mirrors: n.Mirrors})
-	if d.EdgeImagePresent(ctx) {
-		fmt.Fprintln(stdout, "网关组件：Caddy 镜像已就绪")
-		return
-	}
-	fmt.Fprint(stdout, "网关组件：正在下载 Caddy 镜像（约 50 MB）")
-	start := time.Now()
-	done := make(chan error, 1)
-	go func() {
-		pctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		defer cancel()
-		_, err := d.PrepareEdgeImage(pctx)
-		done <- err
-	}()
-	tick := time.NewTicker(5 * time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case err := <-done:
-			if err != nil {
-				fmt.Fprintln(stdout)
-				fmt.Fprintln(stderr, "网关组件下载失败（后台会继续重试）：", err)
-				return
-			}
-			fmt.Fprintf(stdout, " 完成（%d 秒）\n", int(time.Since(start).Seconds()))
-			return
-		case <-tick.C:
-			fmt.Fprint(stdout, ".")
-		}
-	}
 }
 
 // keepPrevious saves the installed binary and database as *.prev before an
@@ -449,7 +408,27 @@ func runUninstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "已清理 Docker：%s\n", removed)
 	}
 
-	// 3. Files.
+	// 3. Windows: the LAN firewall rule (removing it needs an administrator)
+	// and, with --purge, the built-in runtime's WSL distribution.
+	if platform.GOOS == "windows" {
+		if platform.FirewallRulePresent() {
+			launch := "try { Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','" +
+				strings.ReplaceAll(platform.FirewallRemovePS(), "'", "''") + "'; exit 0 } catch { exit 5 }"
+			_, _ = platform.RunHidden("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", launch)
+			if platform.FirewallRulePresent() {
+				fmt.Fprintln(stderr, "防火墙规则 "+platform.FirewallRuleName+" 没能删掉（管理员确认被取消？）；可以用管理员 PowerShell 运行："+platform.FirewallRemovePS())
+			} else {
+				fmt.Fprintln(stdout, "已删除防火墙规则 "+platform.FirewallRuleName)
+			}
+		}
+		if *purge {
+			if _, err := platform.RunHidden("wsl.exe", "--unregister", "AcornFox"); err == nil {
+				fmt.Fprintln(stdout, "已删除自带运行环境（WSL 发行版 AcornFox）")
+			}
+		}
+	}
+
+	// 4. Files.
 	_ = run([]string{"target", "remove", localTargetName}, strings.NewReader(""), io.Discard, io.Discard)
 	if *purge {
 		if left := purgeDataDir(paths.DataDir); len(left) > 0 {
@@ -558,70 +537,165 @@ func cleanupDocker(ctx context.Context, dc *dockerclient.Client, purge bool, std
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "输出 JSON：{\"ok\":bool,\"items\":[{\"ok\",\"level\",\"text\",\"code\"}],\"setup\":{...}}")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if !runDoctorChecks(context.Background(), stdout, false) {
+	r := doctorRun(context.Background(), false)
+	if *asJSON {
+		b, _ := json.Marshal(r)
+		fmt.Fprintln(stdout, string(b))
+	} else {
+		r.print(stdout)
+	}
+	if !r.OK {
 		return 1
 	}
 	return 0
 }
 
-// runDoctorChecks prints the state of this computer's acornfox and returns
-// false when something needs fixing. afterInstall skips checks install has
-// just printed.
-func runDoctorChecks(ctx context.Context, w io.Writer, afterInstall bool) bool {
-	ok := true
-	paths := platform.DefaultPaths()
-	say := func(good bool, format string, a ...any) {
-		mark := "✓"
-		if !good {
-			mark, ok = "✗", false
-		}
-		fmt.Fprintf(w, "%s %s\n", mark, fmt.Sprintf(format, a...))
+// doctorItem is one line of doctor's report. Code is a fault code from
+// internal/setup (Faults) when the item needs fixing.
+type doctorItem struct {
+	OK    bool   `json:"ok"`
+	Level string `json:"level"` // ok | fail | warn
+	Text  string `json:"text"`
+	Code  string `json:"code,omitempty"`
+}
+
+type doctorReport struct {
+	OK    bool          `json:"ok"`
+	Items []doctorItem  `json:"items"`
+	Setup *setup.Status `json:"setup,omitempty"` // the server's runtime setup, when the service answers
+}
+
+func (r *doctorReport) add(ok bool, code, format string, a ...any) {
+	lvl := "ok"
+	if !ok {
+		lvl, r.OK = "fail", false
+	} else {
+		code = ""
 	}
-	warn := func(format string, a ...any) { fmt.Fprintf(w, "! %s\n", fmt.Sprintf(format, a...)) }
+	r.Items = append(r.Items, doctorItem{OK: ok, Level: lvl, Text: fmt.Sprintf(format, a...), Code: code})
+}
+
+func (r *doctorReport) warn(code, format string, a ...any) {
+	r.Items = append(r.Items, doctorItem{OK: true, Level: "warn", Text: fmt.Sprintf(format, a...), Code: code})
+}
+
+func (r *doctorReport) print(w io.Writer) {
+	for _, it := range r.Items {
+		mark := map[string]string{"ok": "✓", "fail": "✗", "warn": "!"}[it.Level]
+		if it.Code != "" {
+			fmt.Fprintf(w, "%s %s（%s）\n", mark, it.Text, it.Code)
+		} else {
+			fmt.Fprintf(w, "%s %s\n", mark, it.Text)
+		}
+	}
+	if r.Setup != nil && r.Setup.Error != nil {
+		fmt.Fprintf(w, "  准备运行环境停在“%s”：%s\n  怎么办：%s\n", r.Setup.Error.Step, r.Setup.Error.Message, r.Setup.Error.Next)
+	}
+}
+
+// runDoctorChecks prints the report and returns false when something needs
+// fixing (used after install).
+func runDoctorChecks(ctx context.Context, w io.Writer, afterInstall bool) bool {
+	r := doctorRun(ctx, afterInstall)
+	r.print(w)
+	return r.OK
+}
+
+// doctorRun checks this computer's acornfox. afterInstall skips checks
+// install has just printed.
+func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
+	r := doctorReport{OK: true}
+	paths := platform.DefaultPaths()
+
+	// The server's own view of the runtime setup comes first: it names the
+	// step and the fault code when the setup stopped.
+	if platform.DesktopMode() && !afterInstall {
+		if c, err := client.Connect(ctx, client.Target{URL: unixURL(paths.APISocket)}); err == nil {
+			if sa, ok := any(c).(client.SetupAPI); ok {
+				if st, err := sa.SetupStatus(ctx); err == nil {
+					r.Setup = &st
+					switch st.State {
+					case setup.StateDone:
+						r.add(true, "", "运行环境：已就绪（%s）", strings.TrimSpace(st.RuntimeDetail))
+					case setup.StateFailed:
+						code := ""
+						if st.Error != nil {
+							code = st.Error.Code
+						}
+						r.add(false, code, "运行环境：准备失败")
+					case setup.StateNeedsUser:
+						r.add(false, "SETUP-RT-01", "运行环境：等你操作（在控制台或运行 acornfox setup 查看）")
+					default:
+						r.warn("", "运行环境：%s（运行 acornfox setup 查看进度）", st.State)
+					}
+				}
+			}
+			_ = c.Close()
+		}
+	}
 
 	ep, dc, info, err := dockerConnect(ctx)
 	if err != nil {
-		say(false, "Docker：%s", dockerHelp(ep, err))
-		return false
+		// On Linux, ask acornfox-server first: a user in acornfox-users needs
+		// no Docker access of their own when the server's runner has it.
+		var svc serviceProbe
+		if platform.GOOS == "linux" {
+			svc = probeService(ctx)
+		}
+		if platform.GOOS != "linux" || !dockerViaService(&r, err, svc) {
+			code := "SETUP-RT-03"
+			if ok, _ := dockerDesktopInstalled(); ok && ep.Runtime == "Docker Desktop" {
+				code = "SETUP-RT-01"
+			}
+			r.add(false, code, "Docker：%s", dockerHelp(ep, err))
+		}
+		if platform.GOOS == "linux" {
+			linuxHostChecks(ctx, &r, nil, "", svc)
+		}
+		return r
 	}
 	defer dc.Close()
 	if !afterInstall {
-		say(true, "Docker：%s %s（%s，来源 %s）", ep.Runtime, info.Info.ServerVersion, ep.Host, ep.Source)
+		r.add(true, "", "Docker：%s %s（%s，来源 %s）", ep.Runtime, info.Info.ServerVersion, ep.Host, ep.Source)
 	}
 	arch := strings.ToLower(info.Info.Architecture)
 	if arch == "aarch64" || arch == "arm64" {
-		warn("苹果芯片 / ARM：只有 amd64 镜像的应用也能装，靠转译运行，可能较慢")
+		r.warn("", "苹果芯片 / ARM：只有 amd64 镜像的应用也能装，靠转译运行，可能较慢")
 	}
 	if !platform.DesktopMode() {
-		return ok
+		if platform.GOOS == "linux" {
+			linuxHostChecks(ctx, &r, dc, info.Info.DockerRootDir, probeService(ctx))
+		}
+		return r
 	}
 	if !afterInstall {
-		say(platform.AutostartInstalled(), "开机自启：%s", map[bool]string{true: "已设置", false: "没有设置（运行 acornfox install）"}[platform.AutostartInstalled()])
+		r.add(platform.AutostartInstalled(), "", "开机自启：%s", map[bool]string{true: "已设置", false: "没有设置（运行 acornfox install）"}[platform.AutostartInstalled()])
 		if st, err := waitAPI(ctx, paths.APISocket, 2*time.Second); err == nil {
-			say(true, "后台服务：运行中（%s 个应用，执行器 %s）", strconv.Itoa(st.Apps), st.Runner)
+			r.add(true, "", "后台服务：运行中（%s 个应用，执行器 %s）", strconv.Itoa(st.Apps), st.Runner)
 		} else {
-			say(false, "后台服务：没有响应（日志 %s）", paths.LogFile)
+			r.add(false, "", "后台服务：没有响应（日志 %s）", paths.LogFile)
 		}
 	}
 	d := runner.NewDocker(dc)
 	if d.EdgeImagePresent(ctx) {
 		if res, err := dc.ContainerInspect(ctx, runner.EdgeContainerName, dockerclient.ContainerInspectOptions{}); err == nil && res.Container.State != nil && res.Container.State.Running {
-			say(true, "网关组件（Caddy）：镜像已就绪，容器运行中")
-		} else if platform.DesktopMode() || !afterInstall {
-			say(false, "网关组件（Caddy）：镜像已就绪，但容器没有运行（后台服务启动后会自动创建；查看 docker logs %s）", runner.EdgeContainerName)
+			r.add(true, "", "网关组件（Caddy）：镜像已就绪，容器运行中")
+		} else {
+			r.add(false, "SETUP-EDGE-01", "网关组件（Caddy）：镜像已就绪，但容器没有运行（后台服务启动后会自动创建；查看 docker logs %s）", runner.EdgeContainerName)
 		}
 	} else {
 		netcfg := platform.LoadNetwork(paths.DataDir)
-		say(false, "网关组件（Caddy）：镜像还没下载好（%s）；运行 acornfox install 会重新下载", map[bool]string{true: "从国内源拉", false: "从 Docker Hub 拉"}[netcfg.China])
+		r.add(false, "SETUP-EDGE-01", "网关组件（Caddy）：镜像还没下载好（%s）；运行 acornfox setup --resume 会重新下载", map[bool]string{true: "从国内源拉", false: "从 Docker Hub 拉"}[netcfg.China])
 	}
 	lan := platform.LANAddress()
 	if lan == "" {
-		warn("没取到局域网地址（没联网？），应用只能用 localhost 打开")
+		r.warn("SETUP-CHK-04", "没取到局域网地址（没联网？），应用只能用 localhost 打开")
 	} else {
-		say(true, "局域网地址：%s（应用的局域网网址形如 http://%s:18810）", lan, lan)
+		r.add(true, "", "局域网地址：%s（应用的局域网网址形如 http://%s:18810）", lan, lan)
 	}
 	// LAN reachability: a published 0.0.0.0 port of the edge must answer on
 	// the LAN address too. Colima (and some setups) forward only 127.0.0.1.
@@ -631,21 +705,34 @@ func runDoctorChecks(ctx context.Context, w io.Writer, afterInstall bool) bool {
 			remote := dialOK(lan, port)
 			switch {
 			case local && remote:
-				say(true, "局域网访问：%s:%d 能连通", lan, port)
+				r.add(true, "", "局域网访问：%s:%d 能连通", lan, port)
 			case local && !remote:
 				msg := "局域网访问：端口 %d 只在 127.0.0.1 能连，局域网地址 %s 连不上，别的设备打不开应用"
 				if ep.Runtime == "Colima" {
-					msg += "。Colima 默认只把端口转发到 127.0.0.1，处理方法见使用文档“Colima”一节"
+					msg += "。Colima 默认只把端口转发到 127.0.0.1，处理方法见使用手册“Colima”一节"
 				} else if platform.GOOS == "windows" {
-					msg += "。检查 Windows 防火墙是否放行了 Docker Desktop（com.docker.backend）"
+					msg += "。检查 Windows 防火墙是否放行了 Docker 或 WSL"
 				}
-				say(false, msg, port, lan)
+				r.add(false, "SETUP-CHK-04", msg, port, lan)
 			default:
-				warn("局域网访问：端口 %d 暂时连不上（应用可能还在启动）", port)
+				r.warn("", "局域网访问：端口 %d 暂时连不上（应用可能还在启动）", port)
 			}
 		}
 	}
-	return ok
+	return r
+}
+
+// dockerDesktopInstalled reports whether Docker Desktop is installed here.
+func dockerDesktopInstalled() (bool, string) {
+	switch platform.GOOS {
+	case "darwin":
+		_, err := os.Stat("/Applications/Docker.app")
+		return err == nil, ""
+	case "windows":
+		_, err := os.Stat(filepath.Join(os.Getenv("ProgramFiles"), "Docker", "Docker", "Docker Desktop.exe"))
+		return err == nil, ""
+	}
+	return false, ""
 }
 
 // edgeLANPort returns one port the edge container publishes on 0.0.0.0, or 0.

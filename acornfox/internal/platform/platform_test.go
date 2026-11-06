@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -217,5 +219,71 @@ func TestNetworkFile(t *testing.T) {
 	}
 	if _, ok := LinuxInstallChina(filepath.Join(dir, "missing")); ok {
 		t.Fatal("missing file must report !ok")
+	}
+}
+
+// The logon task runs as the user's SID; without one, a WORKGROUP domain is
+// replaced by the computer name (schtasks cannot map WORKGROUP\name).
+func TestWindowsTaskUser(t *testing.T) {
+	old := currentUser
+	t.Cleanup(func() { currentUser = old })
+	currentUser = func() (*osuser.User, error) { return &osuser.User{Uid: "S-1-5-21-1-2-3-1001"}, nil }
+	withEnv(t, "windows", map[string]string{"USERNAME": "codex", "USERDOMAIN": "WORKGROUP"}, t.TempDir())
+	if u, _ := windowsTaskUser(); u != "S-1-5-21-1-2-3-1001" {
+		t.Fatalf("got %q", u)
+	}
+	currentUser = func() (*osuser.User, error) { return nil, errors.New("no user") }
+	withEnv(t, "windows", map[string]string{"USERNAME": "codex", "USERDOMAIN": "WORKGROUP", "COMPUTERNAME": "DEVBOX"}, t.TempDir())
+	if u, _ := windowsTaskUser(); u != `DEVBOX\codex` {
+		t.Fatalf("got %q", u)
+	}
+	withEnv(t, "windows", map[string]string{"USERNAME": "codex", "USERDOMAIN": "CORP"}, t.TempDir())
+	if u, _ := windowsTaskUser(); u != `CORP\codex` {
+		t.Fatalf("got %q", u)
+	}
+}
+
+// VPN, proxy TUN and virtual adapters are not LAN addresses.
+func TestLANCandidate(t *testing.T) {
+	for _, c := range []struct {
+		ip, name string
+		want     bool
+	}{
+		{"192.168.31.20", "Ethernet", true},
+		{"192.168.31.20", "en0", true},
+		{"172.30.0.2", "Wi-Fi", true},
+		{"172.19.0.1", "sing-box-tun", false},
+		{"172.19.176.1", "vEthernet (WSL (Hyper-V firewall))", false},
+		{"10.8.0.2", "utun3", false},
+		{"198.18.0.1", "Meta", false},
+		{"100.101.1.2", "eth1", false},
+		{"8.8.8.8", "eth0", false},
+	} {
+		if got := lanCandidate(net.ParseIP(c.ip), c.name); got != c.want {
+			t.Errorf("%s on %s: got %v", c.ip, c.name, got)
+		}
+	}
+}
+
+func TestLinuxInstallCloud(t *testing.T) {
+	dir := t.TempDir()
+	for content, want := range map[string]string{
+		"ACORNFOX_IN_CHINA=true\nACORNFOX_CLOUD=tencent\n": "tencent",
+		"ACORNFOX_CLOUD=volcengine\n":                      "volcengine",
+		"ACORNFOX_CLOUD=\"huawei\"\n":                      "huawei",
+		"ACORNFOX_CLOUD=Aliyun\n":                          "aliyun",
+		"ACORNFOX_CLOUD=\n":                                "",
+		"ACORNFOX_IN_CHINA=true\n":                         "",
+	} {
+		p := filepath.Join(dir, "install.env")
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := LinuxInstallCloud(p); got != want {
+			t.Fatalf("%q: got %q want %q", content, got, want)
+		}
+	}
+	if got := LinuxInstallCloud(filepath.Join(dir, "missing")); got != "" {
+		t.Fatalf("missing file: %q", got)
 	}
 }

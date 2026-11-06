@@ -81,20 +81,35 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 	v.ObservedState = s.observeApp(ctx, a, &v)
 
 	// The newest deployment tells the console whether a deploy is in progress
-	// or failed, including apps that never went live.
+	// or failed, including apps that never went live. Only the detail view
+	// asks the runner which images are still here; the list stays DB-only so
+	// polling it does not inspect every app's images.
+	var show []state.Deployment
+	var latest, live *state.Deployment
 	if ds, err := s.store.ListDeployments(ctx, a.Name, 1); err == nil && len(ds) > 0 {
-		latest := ds[0]
-		v.Latest = &latest
+		latest = &ds[0]
+		show = append(show, ds[0])
+	}
+	if detail && a.CurrentDeployment != "" {
+		if d, err := s.store.GetDeployment(ctx, a.CurrentDeployment); err == nil {
+			live = &d
+			show = append(show, d)
+		}
+	}
+	viewer := s.newDeploymentViewer(ctx, a, show, detail)
+	v.RollbackTargetSeq = viewer.plan.TargetSeq
+	if latest != nil {
+		out := viewer.view(*latest)
+		v.Latest = &out
 	}
 
 	if !detail {
 		return v
 	}
 
-	if a.CurrentDeployment != "" {
-		if live, err := s.store.GetDeployment(ctx, a.CurrentDeployment); err == nil {
-			v.Live = &live
-		}
+	if live != nil {
+		out := viewer.view(*live)
+		v.Live = &out
 	}
 	if vars, err := s.store.ListEnv(ctx, a.Name); err == nil {
 		v.Env = makeEnvView(vars)
@@ -404,6 +419,14 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The deployment logs go with the app. A failure (e.g. a file still open
+	// on Windows) only leaves an orphan directory for the global prune.
+	if s.deployLogs != nil {
+		if err := s.deployLogs.DeleteApp(app); err != nil {
+			s.log.Warn("delete deployment logs", "app", app, "err", err)
+		}
+	}
+
 	// Kick the reconciler to clean up any remaining resources
 	s.kicker.Kick(app)
 
@@ -667,6 +690,12 @@ func (s *server) redactLogLines(ctx context.Context, app string, lines []string)
 	return out
 }
 
+// serverFeatures lists the capabilities added after api_version 1 that a
+// newer CLI must check before using: rollback to a named version, archived
+// deployment logs, and deployment durations. api_version stays 1 so older
+// CLIs keep connecting.
+var serverFeatures = []string{"rollback_to", "deploy_logs", "deploy_timing"}
+
 // status implements GET /v1/status.
 func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -686,6 +715,7 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 
 	body := map[string]any{
 		"api_version":    apiVersion,
+		"features":       serverFeatures,
 		"runner":         runnerState,
 		"docker_version": dockerVersion,
 		"apps":           appCount,
@@ -694,6 +724,10 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		if st, msg := s.edgeStatus(); st != "" {
 			body["edge"] = map[string]string{"state": st, "message": msg}
 		}
+	}
+	if s.setup != nil {
+		st := s.setup.Status()
+		body["setup"] = map[string]string{"state": st.State}
 	}
 	writeJSON(w, http.StatusOK, body)
 }

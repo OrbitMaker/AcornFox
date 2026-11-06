@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -35,6 +36,11 @@ type Store interface {
 	PendingDeployments(ctx context.Context, app string) ([]state.Deployment, error)
 	UpdateDeployment(ctx context.Context, id string, fn func(*state.Deployment) error) (state.Deployment, error)
 	KeptImageDeployments(ctx context.Context, app string) ([]state.Deployment, error)
+	// KeptImageIDs is the image set image GC must keep (kept versions plus
+	// what pending deployments use or will resolve).
+	KeptImageIDs(ctx context.Context, app string) (map[string]struct{}, error)
+	// ListDeployments returns deployments newest first; limit <= 0 is all.
+	ListDeployments(ctx context.Context, app string, limit int) ([]state.Deployment, error)
 
 	// Env, volumes
 	AddVolume(ctx context.Context, app, path string, auto bool) (state.Volume, bool, error)
@@ -43,6 +49,9 @@ type Store interface {
 
 	// Addons (N4)
 	ListAddons(ctx context.Context, app string) ([]state.Addon, error)
+	// ListRemovedAddons returns soft-deleted add-ons; their credentials are
+	// still redacted from logs.
+	ListRemovedAddons(ctx context.Context, app string) ([]state.Addon, error)
 
 	// Events
 	AddEvent(ctx context.Context, e state.Event) error
@@ -87,6 +96,11 @@ type Config struct {
 	Edge *EdgeConfig
 	// DefaultExposure applies to apps whose exposure is "" ("public" when empty).
 	DefaultExposure string
+
+	// DeployLogs keeps each deployment's build log and, before its container
+	// is removed, its run log (see deploylogs.go). Nil keeps no logs and
+	// changes nothing else.
+	DeployLogs *deploylog.Store
 }
 
 // Default configuration values.
@@ -118,6 +132,10 @@ type Reconciler struct {
 	edgeMsg      string
 	edgeFailures int
 	edgeOpMu     sync.Mutex
+	// lanUnbindable is a LAN address Docker could not bind (Docker runs in a
+	// VM that does not have it, e.g. WSL 2 in NAT mode); the edge then
+	// publishes on 127.0.0.1 only and apps get no LAN address.
+	lanUnbindable string
 
 	// runner/unavailable event throttle: app -> last time an event was written
 	pingMu      sync.Mutex
@@ -137,6 +155,9 @@ type Reconciler struct {
 
 	// N4.2: poll interval of the add-on readiness gate (tests shorten it)
 	addonPoll time.Duration
+
+	// noLogTailOnce limits the "runner cannot return log tails" warning to one.
+	noLogTailOnce sync.Once
 }
 
 // worker owns one app's serial reconcile goroutine.
@@ -339,7 +360,7 @@ func (r *Reconciler) round(ctx context.Context, app string) {
 	r.reconcileAddons(ctx, appRec, addons)
 
 	// 2.2.2 supersede: keep only the newest pending deployment.
-	pending = r.supersede(ctx, app, pending)
+	pending = r.supersede(ctx, app, pending, env)
 
 	// 2.2.3 advance the single pending deployment.
 	if len(pending) == 1 {
@@ -390,19 +411,19 @@ func (r *Reconciler) round(ctx context.Context, app string) {
 
 // supersede marks all but the newest pending deployment as superseded, removing
 // their containers and uploads. Returns the surviving pending slice (0 or 1).
-func (r *Reconciler) supersede(ctx context.Context, app string, pending []state.Deployment) []state.Deployment {
+func (r *Reconciler) supersede(ctx context.Context, app string, pending []state.Deployment, env []state.EnvVar) []state.Deployment {
 	if len(pending) <= 1 {
 		return pending
 	}
 	// PendingDeployments is oldest first; the last is the newest.
 	newest := pending[len(pending)-1]
 	for i := 0; i < len(pending)-1; i++ {
-		r.markSuperseded(ctx, app, pending[i])
+		r.markSuperseded(ctx, app, pending[i], env)
 	}
 	return []state.Deployment{newest}
 }
 
-func (r *Reconciler) markSuperseded(ctx context.Context, app string, d state.Deployment) {
+func (r *Reconciler) markSuperseded(ctx context.Context, app string, d state.Deployment, env []state.EnvVar) {
 	_, err := r.cfg.Store.UpdateDeployment(ctx, d.ID, func(dep *state.Deployment) error {
 		dep.Status = state.StatusSuperseded
 		return nil
@@ -412,9 +433,8 @@ func (r *Reconciler) markSuperseded(ctx context.Context, app string, d state.Dep
 		return
 	}
 	r.event(ctx, app, d.ID, "deploy", "被更新的提交取代")
-	// remove any container this deployment created
-	name := runner.ContainerName(app, d.ID)
-	_ = r.cfg.Runner.RemoveContainer(ctx, app, name)
+	// remove any container this deployment created, keeping its output
+	r.retireContainer(ctx, app, runner.ContainerName(app, d.ID), d, env, nil)
 	r.removeUpload(d)
 }
 
@@ -484,130 +504,89 @@ func (r *Reconciler) build(ctx context.Context, app state.App, d *state.Deployme
 
 	switch d.SourceKind {
 	case state.SourceUpload:
-		// global build semaphore, cancellable via ctx
-		select {
-		case r.buildSem <- struct{}{}:
-		case <-ctx.Done():
+		img, ok := r.runBuild(ctx, app, d, env, d.SourceRef, "")
+		if !ok {
 			return
 		}
-		resp, err := r.cfg.Runner.Build(ctx, runner.BuildRequest{
-			App:          app.Name,
-			DeploymentID: d.ID,
-			ContextPath:  d.SourceRef,
-		})
-		<-r.buildSem
-		if err != nil {
-			r.log.Error("build", "deployment", d.ID, "err", err)
-			// Transient runner/transport failure: stay in building and retry on a
-			// later round. Attempts only count builds interrupted by a server
-			// crash, so give this attempt back.
-			if u, uerr := r.cfg.Store.UpdateDeployment(ctx, d.ID, func(dep *state.Deployment) error {
-				if dep.Attempts > 0 {
-					dep.Attempts--
-				}
-				return nil
-			}); uerr == nil {
-				*d = u
-			}
-			return
-		}
-		if !resp.OK {
-			diag := &state.Diagnosis{Stage: "build", Code: "build_failed", Message: "构建失败"}
-			if resp.Failure != nil {
-				diag.Stage = resp.Failure.Stage
-				diag.Code = resp.Failure.Code
-				diag.Message = resp.Failure.Message
-				diag.LogExcerpt = resp.Failure.LogExcerpt
-				diag.Hint = resp.Failure.Hint
-			}
-			r.fail(ctx, app, d, env, diag)
-			return
-		}
-		if resp.Image != nil {
-			imageID = resp.Image.ID
-			imageVolumes = resp.Image.Volumes
+		if img != nil {
+			imageID = img.ID
+			imageVolumes = img.Volumes
 		}
 	case state.SourceGit:
 		// Clone the repo into a tar.gz, then build it like an upload. The clone
 		// itself is network I/O and is not gated by the build semaphore; the
 		// build is.
-		tarball, diag, gerr := r.buildGitTarball(ctx, d)
+		tarball, gitOutput, diag, gerr := r.buildGitTarball(ctx, d)
 		if gerr != nil {
 			// Transient/internal failure: stay in building, retry next round and
 			// hand the crash-retry attempt back.
 			r.log.Error("git clone", "deployment", d.ID, "err", gerr)
-			if u, uerr := r.cfg.Store.UpdateDeployment(ctx, d.ID, func(dep *state.Deployment) error {
-				if dep.Attempts > 0 {
-					dep.Attempts--
-				}
-				return nil
-			}); uerr == nil {
-				*d = u
-			}
+			r.giveBackAttempt(ctx, d)
 			return
 		}
 		if diag != nil {
+			text := lastLines(gitOutput, gitLogLines)
+			if text == "" {
+				text = diag.Message
+			}
+			r.saveBuildLog(ctx, app.Name, *d, text+"\n")
 			r.fail(ctx, app, d, env, diag)
 			return
 		}
-		select {
-		case r.buildSem <- struct{}{}:
-		case <-ctx.Done():
+		img, ok := r.runBuild(ctx, app, d, env, tarball, gitOutput)
+		if !ok {
 			return
 		}
-		resp, err := r.cfg.Runner.Build(ctx, runner.BuildRequest{
-			App:          app.Name,
-			DeploymentID: d.ID,
-			ContextPath:  tarball,
-		})
-		<-r.buildSem
-		if err != nil {
-			r.log.Error("build (git)", "deployment", d.ID, "err", err)
-			if u, uerr := r.cfg.Store.UpdateDeployment(ctx, d.ID, func(dep *state.Deployment) error {
-				if dep.Attempts > 0 {
-					dep.Attempts--
-				}
-				return nil
-			}); uerr == nil {
-				*d = u
-			}
-			return
-		}
-		if !resp.OK {
-			bdiag := &state.Diagnosis{Stage: "build", Code: "build_failed", Message: "构建失败"}
-			if resp.Failure != nil {
-				bdiag.Stage = resp.Failure.Stage
-				bdiag.Code = resp.Failure.Code
-				bdiag.Message = resp.Failure.Message
-				bdiag.LogExcerpt = resp.Failure.LogExcerpt
-				bdiag.Hint = resp.Failure.Hint
-			}
-			r.fail(ctx, app, d, env, bdiag)
-			return
-		}
-		if resp.Image != nil {
-			imageID = resp.Image.ID
-			imageVolumes = resp.Image.Volumes
+		if img != nil {
+			imageID = img.ID
+			imageVolumes = img.Volumes
 		}
 	case state.SourceImage:
 		// Rollback and already-resolved deployments reference an image present
 		// locally: inspect it. A fresh `deploy --image` references an external
 		// image that must be pulled first (stage=image).
+		reuse := strings.HasPrefix(d.SourceRef, "sha256:")
 		info, err := r.cfg.Runner.ImageInspect(ctx, app.Name, d.SourceRef)
 		if err == nil {
 			imageID = info.ID
 			imageVolumes = info.Volumes
+			if !reuse && r.cfg.DeployLogs != nil {
+				if built, _ := r.cfg.DeployLogs.Has(app.Name, d.ID); !built {
+					r.saveBuildLog(ctx, app.Name, *d, fmt.Sprintf(buildLogLocalPattern, d.SourceRef)+"\n")
+				}
+			}
 			break
 		}
 		if !errors.Is(err, runner.ErrNotFound) {
 			r.log.Error("image inspect", "deployment", d.ID, "err", err)
+			r.giveBackAttempt(ctx, d)
+			return // transient: retry next round
+		}
+		if reuse {
+			// An image ID cannot be pulled: the image this version used was
+			// collected or deleted by hand.
+			r.fail(ctx, app, d, env, &state.Diagnosis{
+				Stage:   "image",
+				Code:    "image_gone",
+				Message: "这一版的程序已不在本机（可能被自动清理或手动删除）",
+				Hint:    "请重新部署那一版的代码",
+			})
 			return
 		}
 		resp, perr := r.cfg.Runner.PullImage(ctx, app.Name, d.ID, d.SourceRef)
 		if perr != nil {
 			r.log.Error("image pull", "deployment", d.ID, "err", perr)
+			r.giveBackAttempt(ctx, d)
 			return // transient: retry next round
 		}
+		pullLog := buildLogPullPrefix + d.SourceRef + "\n"
+		if !resp.OK && resp.Failure != nil {
+			pullLog += resp.Failure.Message + "\n"
+			if resp.Failure.LogExcerpt != "" {
+				pullLog += strings.TrimRight(resp.Failure.LogExcerpt, "\n") + "\n"
+			}
+		}
+		r.saveBuildLog(ctx, app.Name, *d, pullLog)
 		if !resp.OK {
 			diag := &state.Diagnosis{Stage: "image", Code: "pull_failed", Message: "拉取镜像失败"}
 			if resp.Failure != nil {
@@ -656,6 +635,71 @@ func (r *Reconciler) build(ctx context.Context, app state.App, d *state.Deployme
 	}
 	*d = updated
 	r.event(ctx, app.Name, d.ID, "build", "镜像就绪，启动容器")
+}
+
+// runBuild builds contextPath under the global build semaphore and saves
+// the build log (gitOutput first, for git sources). ok is false when the
+// round must stop: a transient runner error (the attempt is given back and
+// the build retried later) or a terminal failure (the deployment is failed).
+func (r *Reconciler) runBuild(ctx context.Context, app state.App, d *state.Deployment, env []state.EnvVar, contextPath, gitOutput string) (*runner.ImageInfo, bool) {
+	select {
+	case r.buildSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false
+	}
+	resp, err := r.cfg.Runner.Build(ctx, runner.BuildRequest{
+		App:          app.Name,
+		DeploymentID: d.ID,
+		ContextPath:  contextPath,
+	})
+	<-r.buildSem
+	if errors.Is(err, runner.ErrResponseTooLarge) {
+		// Retrying would rebuild and overflow again: fail for good.
+		r.log.Error("build", "deployment", d.ID, "err", err)
+		r.saveBuildLog(ctx, app.Name, *d, buildLogText(gitOutput, runner.BuildResponse{Failure: &runner.Failure{Message: buildLogTooLarge}}))
+		r.fail(ctx, app, d, env, &state.Diagnosis{
+			Stage:   "build",
+			Code:    "runner_response_too_large",
+			Message: "构建输出过大",
+			Hint:    "请减少构建时的输出后重新部署",
+		})
+		return nil, false
+	}
+	if err != nil {
+		r.log.Error("build", "deployment", d.ID, "err", err)
+		// Transient runner/transport failure: stay in building and retry on a
+		// later round. Attempts only count builds interrupted by a server
+		// crash, so give this attempt back.
+		r.giveBackAttempt(ctx, d)
+		return nil, false
+	}
+	r.saveBuildLog(ctx, app.Name, *d, buildLogText(gitOutput, resp))
+	if !resp.OK {
+		diag := &state.Diagnosis{Stage: "build", Code: "build_failed", Message: "构建失败"}
+		if resp.Failure != nil {
+			diag.Stage = resp.Failure.Stage
+			diag.Code = resp.Failure.Code
+			diag.Message = resp.Failure.Message
+			diag.LogExcerpt = resp.Failure.LogExcerpt
+			diag.Hint = resp.Failure.Hint
+		}
+		r.fail(ctx, app, d, env, diag)
+		return nil, false
+	}
+	return resp.Image, true
+}
+
+// giveBackAttempt undoes the Attempts increment of a build that did not run
+// to completion for a transient reason.
+func (r *Reconciler) giveBackAttempt(ctx context.Context, d *state.Deployment) {
+	if u, err := r.cfg.Store.UpdateDeployment(ctx, d.ID, func(dep *state.Deployment) error {
+		if dep.Attempts > 0 {
+			dep.Attempts--
+		}
+		return nil
+	}); err == nil {
+		*d = u
+	}
 }
 
 // doStart creates and starts the container, then moves to checking.
@@ -723,14 +767,14 @@ func (r *Reconciler) doStart(ctx context.Context, app state.App, d *state.Deploy
 	})
 	if err != nil {
 		name := runner.ContainerName(app.Name, d.ID)
-		logs := r.tailLogs(ctx, app.Name, name, env)
-		r.fail(ctx, app, d, env, &state.Diagnosis{
-			Stage:      "start",
-			Code:       "start_failed",
-			Message:    "容器启动失败",
-			LogExcerpt: logs,
+		r.retireContainer(ctx, app.Name, name, *d, env, func(logs string) {
+			r.fail(ctx, app, d, env, &state.Diagnosis{
+				Stage:      "start",
+				Code:       "start_failed",
+				Message:    "容器启动失败",
+				LogExcerpt: logs,
+			})
 		})
-		_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, name)
 		return
 	}
 
@@ -773,27 +817,27 @@ func (r *Reconciler) doCheck(ctx context.Context, app state.App, d *state.Deploy
 		if ok {
 			// container-level failure detection
 			if ci.OOMKilled {
-				logs := r.tailLogs(ctx, app.Name, name, env)
-				r.fail(ctx, app, d, env, &state.Diagnosis{
-					Stage:      "health",
-					Code:       "out_of_memory",
-					Message:    "容器因内存超限被杀死",
-					LogExcerpt: logs,
-					Hint:       "请调高内存上限（acornfox app set --memory）",
+				r.retireContainer(ctx, app.Name, name, *d, env, func(logs string) {
+					r.fail(ctx, app, d, env, &state.Diagnosis{
+						Stage:      "health",
+						Code:       "out_of_memory",
+						Message:    "容器因内存超限被杀死",
+						LogExcerpt: logs,
+						Hint:       "请调高内存上限（acornfox app set --memory）",
+					})
 				})
-				_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, name)
 				return
 			}
 			if ci.RestartCount > 0 || ci.Restarting || (ci.State != "" && ci.State != "running") {
-				logs := r.tailLogs(ctx, app.Name, name, env)
-				r.fail(ctx, app, d, env, &state.Diagnosis{
-					Stage:      "health",
-					Code:       "container_exited",
-					Message:    "容器启动后退出或反复重启",
-					LogExcerpt: logs,
-					Hint:       "请检查启动命令与日志",
+				r.retireContainer(ctx, app.Name, name, *d, env, func(logs string) {
+					r.fail(ctx, app, d, env, &state.Diagnosis{
+						Stage:      "health",
+						Code:       "container_exited",
+						Message:    "容器启动后退出或反复重启",
+						LogExcerpt: logs,
+						Hint:       "请检查启动命令与日志",
+					})
 				})
-				_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, name)
 				return
 			}
 			if ci.HostPort > 0 {
@@ -813,8 +857,7 @@ func (r *Reconciler) doCheck(ctx context.Context, app state.App, d *state.Deploy
 		}
 	}
 	// timed out
-	{
-		logs := r.tailLogs(ctx, app.Name, name, env)
+	r.retireContainer(ctx, app.Name, name, *d, env, func(logs string) {
 		r.fail(ctx, app, d, env, &state.Diagnosis{
 			Stage:      "health",
 			Code:       "port_not_listening",
@@ -822,9 +865,8 @@ func (r *Reconciler) doCheck(ctx context.Context, app state.App, d *state.Deploy
 			LogExcerpt: logs,
 			Hint:       fmt.Sprintf("请确认应用在容器内监听 0.0.0.0:%d（可用 EXPOSE 声明端口）", containerPort),
 		})
-		_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, name)
-		return
-	}
+	})
+	return
 
 healthy:
 	// unpersisted database warning (non-fatal)
@@ -887,7 +929,7 @@ func (r *Reconciler) doRoute(ctx context.Context, app state.App, d *state.Deploy
 				Message: "路由持续同步失败超过 5 分钟",
 				Hint:    "请检查 Caddy admin 是否可用",
 			})
-			_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, runner.ContainerName(app.Name, d.ID))
+			r.retireContainer(ctx, app.Name, runner.ContainerName(app.Name, d.ID), *d, nil, nil)
 		}
 		return // stay in routing, retry next round
 	}
@@ -953,7 +995,13 @@ func (r *Reconciler) converge(ctx context.Context, app state.App, containers []r
 			expected = true
 		}
 		if !expected {
-			_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, c.Name)
+			// Keep the output of a known deployment of this app (usually the
+			// version just replaced) before its container goes.
+			if dep, err := r.cfg.Store.GetDeployment(ctx, c.DeploymentID); err == nil && dep.App == app.Name {
+				r.retireContainer(ctx, app.Name, c.Name, dep, nil, nil)
+			} else {
+				_ = r.cfg.Runner.RemoveContainer(ctx, app.Name, c.Name)
+			}
 			r.event(ctx, app.Name, "", "converge", "清理旧容器 "+c.Name)
 			continue
 		}
@@ -1036,23 +1084,27 @@ func (r *Reconciler) recreateLive(ctx context.Context, app state.App) {
 		return
 	}
 	r.event(ctx, app.Name, live.ID, "converge", "容器缺失，已重建")
+	if r.cfg.DeployLogs != nil {
+		r.event(ctx, app.Name, live.ID, "logs", "容器丢失，之前的日志没有保存")
+	}
 }
 
-// appGC removes images outside the kept set for one app (2.5 per-app part).
+// appGC removes images outside the kept set for one app (2.5 per-app part),
+// then trims the app's deployment logs.
 func (r *Reconciler) appGC(ctx context.Context, app string, pending []state.Deployment) {
-	kept, err := r.cfg.Store.KeptImageDeployments(ctx, app)
+	r.gcImages(ctx, app, pending)
+	r.pruneAppLogs(ctx, app)
+}
+
+// gcImages removes the app's images that KeptImageIDs does not protect.
+func (r *Reconciler) gcImages(ctx context.Context, app string, pending []state.Deployment) {
+	// Protected by actual image ID, not deployment: a shared image may carry
+	// an old deployment's label but still back a kept version, and a queued
+	// rollback names its image only by ID in its source.
+	keepImageIDs, err := r.cfg.Store.KeptImageIDs(ctx, app)
 	if err != nil {
-		r.log.Error("kept deployments", "app", app, "err", err)
+		r.log.Error("kept images", "app", app, "err", err)
 		return
-	}
-	// Build a set of image IDs that must be kept (not deployment IDs).
-	// A shared image may have been built by an old deployment but is still
-	// referenced by a kept deployment, so we protect by actual ImageID.
-	keepImageIDs := map[string]struct{}{}
-	for _, d := range kept {
-		if d.ImageID != "" {
-			keepImageIDs[d.ImageID] = struct{}{}
-		}
 	}
 	for _, d := range pending {
 		if d.ImageID != "" {
@@ -1097,6 +1149,9 @@ func (r *Reconciler) globalGC(ctx context.Context, appNames []string) {
 
 	// stale uploads: not belonging to any pending deployment, mtime > 1h
 	r.gcUploads(ctx, appNames)
+
+	// deployment logs of deleted apps, and the total size cap
+	r.pruneGlobalLogs(ctx)
 }
 
 // gcUploads removes upload files older than 1h that no pending deployment references.

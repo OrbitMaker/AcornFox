@@ -30,8 +30,9 @@ func isJSONDeploy(r *http.Request) bool {
 
 // createDeploymentJSON handles a JSON deploy body for image or git sources. It
 // mirrors the tar.gz path's idempotency (Idempotency-Key and content digest)
-// without touching the upload directory.
-func (s *server) createDeploymentJSON(w http.ResponseWriter, r *http.Request, app string) {
+// without touching the upload directory, and takes the same port /
+// health_path query parameters.
+func (s *server) createDeploymentJSON(w http.ResponseWriter, r *http.Request, app string, q deployQuery) {
 	ctx := r.Context()
 
 	var body deployJSONRequest
@@ -80,6 +81,9 @@ func (s *server) createDeploymentJSON(w http.ResponseWriter, r *http.Request, ap
 	s.resMu.Unlock()
 	if ensureErr != nil {
 		s.mapStoreError(w, ensureErr)
+		return
+	}
+	if !s.applyDeployQuery(w, r, app, q) {
 		return
 	}
 

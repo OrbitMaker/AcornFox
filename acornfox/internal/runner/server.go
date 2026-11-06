@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -54,6 +55,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathContainerUpdate, s.handleContainerUpdate)
 	s.mux.HandleFunc("POST "+PathContainerLogs, s.handleContainerLogs)
 	s.mux.HandleFunc("POST "+PathContainerLogBatch, s.handleLogBatch)
+	s.mux.HandleFunc("POST "+PathContainerLogTail, s.handleLogTail)
 	s.mux.HandleFunc("POST "+PathContainerStats, s.handleContainerStats)
 	s.mux.HandleFunc("POST "+PathContainerDiff, s.handleContainerDiff)
 	s.mux.HandleFunc("POST "+PathVolumeEnsure, s.handleVolumeEnsure)
@@ -66,10 +68,57 @@ func (s *Server) routes() {
 
 // ---- response helpers ----
 
+// writeJSON does not escape < > & (log text is full of them and escaping
+// would grow it sixfold); both ends are Go JSON, not HTML.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+}
+
+// marshalJSON encodes v the way writeJSON does.
+func marshalJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// buildResponseMaxBytes bounds an encoded BuildResponse, well under the
+// client's bound for the build route, by cutting BuildResponse.Log from its
+// beginning.
+var buildResponseMaxBytes = 2 << 20
+
+// writeBuildResponse writes resp, first shrinking Log from its head until the
+// encoding fits buildResponseMaxBytes. Each round keeps the share of the log
+// that should fit, assuming its bytes encode about evenly (escape-heavy output
+// can take up to six bytes per byte), so it converges in a few rounds.
+func writeBuildResponse(w http.ResponseWriter, resp BuildResponse) {
+	for range 8 {
+		body, err := marshalJSON(resp)
+		if err != nil {
+			break
+		}
+		if len(body) <= buildResponseMaxBytes || resp.Log == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body)
+			return
+		}
+		// 1 KiB of slack covers the other fields and the omitted header.
+		keep := int(int64(len(resp.Log)) * int64(buildResponseMaxBytes-1024) / int64(len(body)))
+		next := shrinkLog(resp.Log, keep)
+		if next == resp.Log {
+			next = "" // a tiny log beside oversized other fields
+		}
+		resp.Log = next
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {
@@ -200,7 +249,7 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeBuildResponse(w, resp)
 }
 
 func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {

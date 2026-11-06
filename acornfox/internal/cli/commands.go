@@ -473,69 +473,6 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 	return exitOK
 }
 
-// cmdRollback implements `rollback` and waits to a terminal status.
-func (a *app) cmdRollback(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
-	fs.SetOutput(a.out.stderr)
-	var (
-		noWait  = fs.Bool("no-wait", false, "提交后不等待终态")
-		timeout = fs.Duration("timeout", 20*time.Minute, "等待终态的超时时间")
-	)
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
-	}
-	res, err := a.resolveTargetAndApp()
-	if err != nil {
-		return a.out.usageError("%s", err.Error())
-	}
-	api, derr := a.dial(ctx, res.target)
-	if derr != nil {
-		return a.out.fail(derr)
-	}
-	defer api.Close()
-
-	dep, serr := api.Rollback(ctx, res.app)
-	if serr != nil {
-		return a.out.fail(serr)
-	}
-	a.rememberDeployment(res.targetName, res.app, dep.ID)
-	if *noWait {
-		return a.reportDeployment(ctx, api, res.app, dep, nil)
-	}
-	return a.waitDeployment(ctx, api, res.app, dep, *timeout)
-}
-
-// cmdRedeploy submits `redeploy` and prints the ID for subsequent status queries.
-func (a *app) cmdRedeploy(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("redeploy", flag.ContinueOnError)
-	fs.SetOutput(a.out.stderr)
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
-	}
-	res, err := a.resolveTargetAndApp()
-	if err != nil {
-		return a.out.usageError("%s", err.Error())
-	}
-	api, derr := a.dial(ctx, res.target)
-	if derr != nil {
-		return a.out.fail(derr)
-	}
-	defer api.Close()
-
-	deploymentID, serr := api.Redeploy(ctx, res.app)
-	if serr != nil {
-		return a.out.fail(serr)
-	}
-	a.rememberDeployment(res.targetName, res.app, deploymentID)
-	if a.out.json {
-		a.out.emitJSON(map[string]any{"deployment_id": deploymentID})
-		return exitOK
-	}
-	a.out.human("已触发重新部署，部署 ID: %s", deploymentID)
-	a.out.human("可使用 acornfox status %s 查看进度和诊断", deploymentID)
-	return exitOK
-}
-
 // cmdStop implements `stop`.
 func (a *app) cmdStop(ctx context.Context, args []string) int {
 	return a.simpleAppAction(ctx, args, "stop")

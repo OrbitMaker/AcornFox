@@ -313,6 +313,11 @@ func (s *Store) SetCurrentDeployment(ctx context.Context, app, deploymentID stri
 		if d.App != app {
 			return fmt.Errorf("%w: deployment %s is not in app %s", ErrInvalid, deploymentID, app)
 		}
+		// A deployment cancelled meanwhile (rollback with cancel-pending)
+		// must not go live.
+		if d.Status == StatusSuperseded || d.Status == StatusFailed || d.Status == StatusRetired {
+			return fmt.Errorf("%w: deployment %s is %s", ErrConflict, deploymentID, d.Status)
+		}
 		now := time.Now().UTC()
 		nowText := formatTime(now)
 		// Retire the previous live deployment, if any and different.
@@ -392,34 +397,43 @@ func (s *Store) CreateDeployment(ctx context.Context, in NewDeployment) (Deploym
 			}
 		}
 
-		var maxSeq sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT MAX(seq) FROM deployments WHERE app=?`, in.App).Scan(&maxSeq); err != nil {
-			return fmt.Errorf("query max seq: %w", err)
-		}
-		seq := int(maxSeq.Int64) + 1
-
-		id, err := newDeploymentID(ctx, tx)
+		inserted, err := insertDeploymentTx(ctx, tx, in)
 		if err != nil {
 			return err
 		}
-		now := time.Now().UTC()
-		nowText := formatTime(now)
-		_, err = tx.ExecContext(ctx, `INSERT INTO deployments
-			(id, app, seq, source_kind, source_ref, source_digest, request_key, image_id, status, attempts, diagnosis, warnings, created_at, updated_at, finished_at, based_on_seq, origin_kind, reason)
-			VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 0, '', '', ?, ?, NULL, ?, ?, ?)`,
-			id, in.App, seq, in.SourceKind, in.SourceRef, in.SourceDigest, in.RequestKey, StatusQueued, nowText, nowText,
-			in.BasedOnSeq, in.OriginKind, in.Reason)
-		if err != nil {
-			return fmt.Errorf("insert deployment: %w", err)
-		}
-		created = true
-		dep, err = scanDeploymentTx(ctx, tx, id)
-		return err
+		dep, created = inserted, true
+		return nil
 	})
 	if err != nil {
 		return Deployment{}, false, err
 	}
 	return dep, created, nil
+}
+
+// insertDeploymentTx inserts a queued deployment with Seq=max(seq)+1 and a
+// random 12-hex ID, without any deduplication, and returns the stored row.
+func insertDeploymentTx(ctx context.Context, tx *sql.Tx, in NewDeployment) (Deployment, error) {
+	var maxSeq sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(seq) FROM deployments WHERE app=?`, in.App).Scan(&maxSeq); err != nil {
+		return Deployment{}, fmt.Errorf("query max seq: %w", err)
+	}
+	seq := int(maxSeq.Int64) + 1
+
+	id, err := newDeploymentID(ctx, tx)
+	if err != nil {
+		return Deployment{}, err
+	}
+	now := time.Now().UTC()
+	nowText := formatTime(now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO deployments
+		(id, app, seq, source_kind, source_ref, source_digest, request_key, image_id, status, attempts, diagnosis, warnings, created_at, updated_at, finished_at, based_on_seq, origin_kind, reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 0, '', '', ?, ?, NULL, ?, ?, ?)`,
+		id, in.App, seq, in.SourceKind, in.SourceRef, in.SourceDigest, in.RequestKey, StatusQueued, nowText, nowText,
+		in.BasedOnSeq, in.OriginKind, in.Reason)
+	if err != nil {
+		return Deployment{}, fmt.Errorf("insert deployment: %w", err)
+	}
+	return scanDeploymentTx(ctx, tx, id)
 }
 
 // GetDeployment returns one deployment or ErrNotFound.
@@ -527,9 +541,11 @@ func (s *Store) UpdateDeployment(ctx context.Context, id string, fn func(*Deploy
 }
 
 // KeptImageDeployments returns the deployments whose images must be kept: the
-// current live deployment, the newest KeepVersions retired deployments that
-// have an ImageID, and the newest deployment if it failed with a built image.
-// Everything else may be garbage collected.
+// current live deployment; then, scanning every retired deployment that has an
+// ImageID from newest to oldest and counting the live image as already seen,
+// the newest deployment of each of the next KeepVersions distinct images; and
+// the newest deployment if it failed with a built image. Everything else may
+// be garbage collected. ClassifyRollback uses the same window.
 func (s *Store) KeptImageDeployments(ctx context.Context, app string) ([]Deployment, error) {
 	var out []Deployment
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
@@ -537,54 +553,11 @@ func (s *Store) KeptImageDeployments(ctx context.Context, app string) ([]Deploym
 		if err != nil {
 			return err
 		}
-		seen := map[string]bool{}
-		if a.CurrentDeployment != "" {
-			live, err := scanDeploymentTx(ctx, tx, a.CurrentDeployment)
-			if err == nil {
-				out = append(out, live)
-				seen[live.ID] = true
-			} else if !errors.Is(err, ErrNotFound) {
-				return err
-			}
-		}
-		rows, err := tx.QueryContext(ctx, deploymentSelect+`
-			FROM deployments
-			WHERE app=? AND status=? AND image_id<>''
-			ORDER BY seq DESC
-			LIMIT ?`, app, StatusRetired, KeepVersions)
-		if err != nil {
-			return fmt.Errorf("kept image deployments: %w", err)
-		}
-		defer rows.Close()
-		kept, err := scanDeploymentRows(rows)
+		deps, err := listDeploymentsTx(ctx, tx, app)
 		if err != nil {
 			return err
 		}
-		for _, d := range kept {
-			if !seen[d.ID] {
-				out = append(out, d)
-				seen[d.ID] = true
-			}
-		}
-		// The newest deployment, when it failed after its image was built, is
-		// kept too: adding the missing database from its diagnosis redeploys
-		// exactly that image. Older failed images are still collected.
-		rows, err = tx.QueryContext(ctx, deploymentSelect+`
-			FROM deployments
-			WHERE app=?
-			ORDER BY seq DESC
-			LIMIT 1`, app)
-		if err != nil {
-			return fmt.Errorf("newest deployment: %w", err)
-		}
-		defer rows.Close()
-		newest, err := scanDeploymentRows(rows)
-		if err != nil {
-			return err
-		}
-		if len(newest) == 1 && newest[0].Status == StatusFailed && newest[0].ImageID != "" && !seen[newest[0].ID] {
-			out = append(out, newest[0])
-		}
+		out = keptImageDeployments(deps, a.CurrentDeployment)
 		return nil
 	})
 	if err != nil {

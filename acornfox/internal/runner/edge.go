@@ -59,8 +59,9 @@ const (
 	// EdgeImageLocal is built by install.sh from the Caddy release archive
 	// (docker import, no registry needed); EdgeImagePublic is pulled when the
 	// local image is absent (macOS, Windows, or Linux without the archive).
-	EdgeImageLocal  = "acornfox/caddy:2.8.4"
-	EdgeImagePublic = "caddy:2.8.4-alpine"
+	EdgeCaddyVersion = "2.8.4"
+	EdgeImageLocal   = "acornfox/caddy:" + EdgeCaddyVersion
+	EdgeImagePublic  = "caddy:" + EdgeCaddyVersion + "-alpine"
 
 	EdgeDataVolume   = "acornfox-caddy-data"   // certificates, ACME accounts (/data)
 	EdgeConfigVolume = "acornfox-caddy-config" // Caddy's autosave dir (/config)
@@ -225,7 +226,7 @@ func (d *Docker) EnsureEdge(ctx context.Context, spec EdgeSpec) (EdgeInfo, error
 	}
 	hash := edgeHash(spec, image)
 
-	if res, err := d.cli.ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{}); err == nil {
+	if res, err := d.c().ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{}); err == nil {
 		c := res.Container
 		if c.Config == nil || c.Config.Labels[LabelEdge] != "1" {
 			return EdgeInfo{}, &RemoteError{Status: http.StatusConflict, ErrorResponse: ErrorResponse{
@@ -240,7 +241,7 @@ func (d *Docker) EnsureEdge(ctx context.Context, spec EdgeSpec) (EdgeInfo, error
 			}
 			return EdgeInfo{ID: c.ID, Image: image, Running: true}, nil
 		}
-		if _, err := d.cli.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+		if _, err := d.c().ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
 			return EdgeInfo{}, err
 		}
 	} else if !cerrdefs.IsNotFound(err) {
@@ -290,12 +291,12 @@ func (d *Docker) EnsureEdge(ctx context.Context, spec EdgeSpec) (EdgeInfo, error
 		cfg.ExposedPorts = exposed
 		hostCfg.PortBindings = bindings
 	}
-	created, err := d.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Name: EdgeContainerName, Config: cfg, HostConfig: hostCfg})
+	created, err := d.c().ContainerCreate(ctx, client.ContainerCreateOptions{Name: EdgeContainerName, Config: cfg, HostConfig: hostCfg})
 	if err != nil {
 		// Another caller (a second server process during an upgrade) created
 		// it first: use theirs when it carries the same spec.
 		if cerrdefs.IsConflict(err) {
-			if res, ierr := d.cli.ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{}); ierr == nil &&
+			if res, ierr := d.c().ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{}); ierr == nil &&
 				res.Container.Config != nil && res.Container.Config.Labels[LabelEdgeHash] == hash {
 				if serr := d.startByName(ctx, EdgeContainerName); serr != nil {
 					return EdgeInfo{}, serr
@@ -306,10 +307,10 @@ func (d *Docker) EnsureEdge(ctx context.Context, spec EdgeSpec) (EdgeInfo, error
 		return EdgeInfo{}, err
 	}
 	if err := d.copyCaddyfile(ctx, created.ID, EdgeCaddyfile(spec)); err != nil {
-		_, _ = d.cli.ContainerRemove(ctx, created.ID, client.ContainerRemoveOptions{Force: true})
+		_, _ = d.c().ContainerRemove(ctx, created.ID, client.ContainerRemoveOptions{Force: true})
 		return EdgeInfo{}, err
 	}
-	if _, err := d.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := d.c().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return EdgeInfo{}, err
 	}
 	return EdgeInfo{ID: created.ID, Image: image, Running: true, Recreated: true}, nil
@@ -318,7 +319,7 @@ func (d *Docker) EnsureEdge(ctx context.Context, spec EdgeSpec) (EdgeInfo, error
 // edgeImage prefers the locally imported image and pulls the public one
 // otherwise.
 func (d *Docker) edgeImage(ctx context.Context) (string, error) {
-	if _, err := d.cli.ImageInspect(ctx, EdgeImageLocal); err == nil {
+	if _, err := d.c().ImageInspect(ctx, EdgeImageLocal); err == nil {
 		return EdgeImageLocal, nil
 	}
 	if err := d.ensureAddonImage(ctx, EdgeImagePublic); err != nil {
@@ -328,7 +329,7 @@ func (d *Docker) edgeImage(ctx context.Context) (string, error) {
 }
 
 func (d *Docker) ensureEdgeNetwork(ctx context.Context) error {
-	if res, err := d.cli.NetworkInspect(ctx, EdgeNetwork, client.NetworkInspectOptions{}); err == nil {
+	if res, err := d.c().NetworkInspect(ctx, EdgeNetwork, client.NetworkInspectOptions{}); err == nil {
 		if res.Network.Labels[LabelEdge] != "1" {
 			return &RemoteError{Status: http.StatusConflict, ErrorResponse: ErrorResponse{Code: "refused", Message: "已有同名网络 " + EdgeNetwork + " 但不是 AcornFox 创建的"}}
 		}
@@ -336,7 +337,7 @@ func (d *Docker) ensureEdgeNetwork(ctx context.Context) error {
 	} else if !cerrdefs.IsNotFound(err) {
 		return err
 	}
-	_, err := d.cli.NetworkCreate(ctx, EdgeNetwork, client.NetworkCreateOptions{Driver: "bridge", Labels: map[string]string{LabelEdge: "1"}})
+	_, err := d.c().NetworkCreate(ctx, EdgeNetwork, client.NetworkCreateOptions{Driver: "bridge", Labels: map[string]string{LabelEdge: "1"}})
 	if err != nil && cerrdefs.IsConflict(err) {
 		return nil
 	}
@@ -359,7 +360,7 @@ func (d *Docker) copyCaddyfile(ctx context.Context, id, content string) error {
 	if err := tw.Close(); err != nil {
 		return err
 	}
-	_, err := d.cli.CopyToContainer(ctx, id, client.CopyToContainerOptions{DestinationPath: "/etc", Content: &buf})
+	_, err := d.c().CopyToContainer(ctx, id, client.CopyToContainerOptions{DestinationPath: "/etc", Content: &buf})
 	return err
 }
 
@@ -370,7 +371,7 @@ func (d *Docker) ConnectEdge(ctx context.Context, app string) error {
 	if !ValidApp(app) {
 		return &RemoteError{Status: http.StatusBadRequest, ErrorResponse: ErrorResponse{Code: "invalid_request", Message: "应用名不合法"}}
 	}
-	res, err := d.cli.ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{})
+	res, err := d.c().ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
@@ -390,7 +391,7 @@ func (d *Docker) ConnectEdge(ctx context.Context, app string) error {
 			return nil
 		}
 	}
-	nres, err := d.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+	nres, err := d.c().NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
@@ -400,7 +401,7 @@ func (d *Docker) ConnectEdge(ctx context.Context, app string) error {
 	if err := checkNetworkOwner(app, nres.Network); err != nil {
 		return err
 	}
-	_, err = d.cli.NetworkConnect(ctx, nres.Network.ID, client.NetworkConnectOptions{Container: c.ID})
+	_, err = d.c().NetworkConnect(ctx, nres.Network.ID, client.NetworkConnectOptions{Container: c.ID})
 	if err != nil && (cerrdefs.IsConflict(err) || strings.Contains(err.Error(), "already exists")) {
 		return nil
 	}
@@ -410,13 +411,13 @@ func (d *Docker) ConnectEdge(ctx context.Context, app string) error {
 // disconnectEdge detaches the edge from an app network before the network is
 // removed. Missing container or endpoint is success.
 func (d *Docker) disconnectEdge(ctx context.Context, networkID string) {
-	_, _ = d.cli.NetworkDisconnect(ctx, networkID, client.NetworkDisconnectOptions{Container: EdgeContainerName, Force: true})
+	_, _ = d.c().NetworkDisconnect(ctx, networkID, client.NetworkDisconnectOptions{Container: EdgeContainerName, Force: true})
 }
 
 // RemoveEdge stops and removes the edge container (volumes stay). Used by
 // uninstall; missing is success.
 func (d *Docker) RemoveEdge(ctx context.Context) error {
-	res, err := d.cli.ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{})
+	res, err := d.c().ContainerInspect(ctx, EdgeContainerName, client.ContainerInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
@@ -426,7 +427,7 @@ func (d *Docker) RemoveEdge(ctx context.Context) error {
 	if res.Container.Config == nil || res.Container.Config.Labels[LabelEdge] != "1" {
 		return nil
 	}
-	_, err = d.cli.ContainerRemove(ctx, res.Container.ID, client.ContainerRemoveOptions{Force: true})
+	_, err = d.c().ContainerRemove(ctx, res.Container.ID, client.ContainerRemoveOptions{Force: true})
 	if cerrdefs.IsNotFound(err) {
 		return nil
 	}

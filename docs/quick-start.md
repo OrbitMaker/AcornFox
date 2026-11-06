@@ -14,15 +14,16 @@ AI 先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国内�
 
 ### 服务器端
 
-- **操作系统**: Ubuntu 24.04/22.04/20.04 或 Debian 12/11
+- **操作系统**: Ubuntu 24.04/22.04 或 Debian 13/12（x86_64；arm64 有程序但还没实测）。推荐 Ubuntu 24.04 或 Debian 13；国内云厂商默认的 Alibaba Cloud Linux、OpenCloudOS 等装不上，买服务器时请选 Ubuntu 或 Debian
 - **硬件**: 最低 1 核 1GB，推荐 2 核 2GB+
 - **网络**: 公网 IP；安全组放行 22（SSH）、18810-18899（应用端口），绑定域名时再放行 80 和 443
 - **权限**: root 或 sudo 权限
 
 ### 客户端
 
-- **操作系统**: Windows 10+, macOS 10.15+, Linux (任意发行版)
+- **操作系统**: Linux、macOS 12 以上（苹果芯片或 Intel）
 - **工具**: SSH 客户端
+- **Windows 电脑**: 本版本没有 Windows 版命令行。电脑上不用装任何东西，用 `ssh` 登录服务器后直接在服务器上运行 `acornfox`（服务器安装时已经装好）；AI 工作台在 Windows 上时，也让它经 `ssh` 在服务器上运行
 
 ## 安装步骤
 
@@ -64,7 +65,7 @@ acf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ### 2. 安装客户端 CLI
 
-在你的本地电脑（Windows/macOS/Linux）执行：
+在你的本地电脑（macOS 或 Linux）执行：
 
 ```bash
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
@@ -72,7 +73,7 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
 ```
 
-**Windows 用户**：在 Git Bash 中执行，或从 GitHub Releases 下载 `acornfox_windows_amd64.exe`，改名为 `acornfox.exe` 后放到 PATH 中的目录。
+**Windows 用户**：跳过这一步和下一步，`ssh user@your-server-ip` 登录服务器，在服务器上执行 `acornfox target add local --url unix:///run/acornfox/api.sock` 登记本机，之后的命令都在服务器上运行。
 
 安装完成后验证：
 

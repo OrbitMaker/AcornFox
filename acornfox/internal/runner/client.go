@@ -14,9 +14,9 @@ import (
 	"github.com/acornfox/acornfox/internal/peer"
 )
 
-// Response size bounds. Most replies are small typed JSON, but build failures
-// carry a log excerpt and logs responses carry up to 1000 lines, so those two
-// routes use a larger bound.
+// Response size bounds. Most replies are small typed JSON, but builds carry
+// their output and logs responses carry up to 1000 lines (or a 1 MiB tail),
+// so those routes use a larger bound.
 const (
 	clientDefaultBound = peer.MaxMessageBytes
 	clientLargeBound   = 4 << 20
@@ -50,8 +50,9 @@ func NewClient(path string, peerUID uint32) *Client {
 }
 
 // call sends body to route and decodes the JSON reply into out. It maps
-// transport failures to ErrUnavailable, 404 not_found to ErrNotFound, and any
-// other non-2xx to *RemoteError.
+// transport failures to ErrUnavailable, a reply larger than bound to an error
+// matching ErrResponseTooLarge, 404 not_found to ErrNotFound, and any other
+// non-2xx to *RemoteError.
 func (c *Client) call(ctx context.Context, pc *peer.Client, route string, body any, bound int64, out any) error {
 	var buf bytes.Buffer
 	if body != nil {
@@ -75,7 +76,13 @@ func (c *Client) call(ctx context.Context, pc *peer.Client, route string, body a
 	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, bound+1))
+	if err == nil && int64(len(payload)) > bound {
+		err = peer.ErrResponseBodyExceeded
+	}
 	if err != nil {
+		if errors.Is(err, peer.ErrResponseBodyExceeded) {
+			return fmt.Errorf("%w (%s, limit %d bytes): %w", ErrResponseTooLarge, route, bound, err)
+		}
 		if isDialError(err) {
 			return ErrUnavailable
 		}

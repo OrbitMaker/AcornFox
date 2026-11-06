@@ -221,6 +221,8 @@ func TestConsoleRequiresCookieForEveryV1Route(t *testing.T) {
 		{http.MethodGet, "/v1/apps/web/deployments"},
 		{http.MethodPost, "/v1/apps/web/deployments"},
 		{http.MethodPost, "/v1/apps/web/rollback"},
+		{http.MethodPost, "/v1/apps/web/versions/1/rollback"},
+		{http.MethodGet, "/v1/deployments/0123456789ab/logs"},
 		{http.MethodPut, "/v1/apps/web/env/FOO"},
 		{http.MethodDelete, "/v1/apps/web/env/FOO"},
 		{http.MethodPost, "/v1/apps/web/volumes"},

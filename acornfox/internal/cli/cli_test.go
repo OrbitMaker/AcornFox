@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -443,5 +444,56 @@ func TestLogsTailClamp(t *testing.T) {
 	h.run("logs", "--tail", "5000")
 	if gotTail != 1000 {
 		t.Fatalf("tail clamp = %d want 1000", gotTail)
+	}
+}
+
+// Cancelling the wait (Ctrl+C, SIGTERM, hangup) still prints one JSON object
+// that names the deployment, because the server keeps working on it.
+func TestDeployCancelledWaitJSONNamesDeployment(t *testing.T) {
+	h := newHarness(t)
+	h.addTarget("dev", "http://dev")
+	h.api.deployFn = func(ctx context.Context, app string, opt client.DeployOptions) (client.Deployment, bool, error) {
+		return client.Deployment{ID: "d42", App: app, Seq: 3, Status: "building"}, true, nil
+	}
+	h.api.deploymentFn = func(ctx context.Context, id string, after int64) (client.Deployment, []client.Event, error) {
+		t.Fatal("must not poll after cancellation")
+		return client.Deployment{}, nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out, errBuf bytes.Buffer
+	code := MainWithConnector(ctx, []string{"--json", "deploy", "--image", "nginx:1.27-alpine"}, bytes.NewReader(nil), &out, &errBuf, func(string) string { return "" }, h.connect, h.configDir, h.workDir)
+	if code != exitOpFailed {
+		t.Fatalf("exit = %d want %d; out=%s err=%s", code, exitOpFailed, out.String(), errBuf.String())
+	}
+	m := decodeJSON(t, out.String())
+	d := m["diagnosis"].(map[string]any)
+	if m["ok"] != false || d["code"] != "cancelled" || !strings.Contains(d["hint"].(string), "acornfox status d42") {
+		t.Fatalf("json = %v", m)
+	}
+}
+
+// A cancellation that aborts an in-flight poll is reported as cancelled, not
+// as the transport error the aborted request produced.
+func TestDeployCancelledDuringPollIsNotConnectError(t *testing.T) {
+	h := newHarness(t)
+	h.addTarget("dev", "http://dev")
+	h.api.deployFn = func(ctx context.Context, app string, opt client.DeployOptions) (client.Deployment, bool, error) {
+		return client.Deployment{ID: "d43", App: app, Seq: 1, Status: "building"}, true, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.api.deploymentFn = func(pctx context.Context, id string, after int64) (client.Deployment, []client.Event, error) {
+		cancel()
+		return client.Deployment{}, nil, &client.Error{Diag: client.Diagnosis{Stage: "connect", Code: "connect_failed", Message: "SSH 连接失败"}}
+	}
+	var out, errBuf bytes.Buffer
+	code := MainWithConnector(ctx, []string{"--json", "deploy", "--image", "nginx:1.27-alpine"}, bytes.NewReader(nil), &out, &errBuf, func(string) string { return "" }, h.connect, h.configDir, h.workDir)
+	if code != exitOpFailed {
+		t.Fatalf("exit = %d want %d; out=%s", code, exitOpFailed, out.String())
+	}
+	d := decodeJSON(t, out.String())["diagnosis"].(map[string]any)
+	if d["code"] != "cancelled" || !strings.Contains(d["hint"].(string), "acornfox status d43") {
+		t.Fatalf("diagnosis = %v", d)
 	}
 }

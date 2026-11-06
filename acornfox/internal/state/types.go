@@ -74,7 +74,7 @@ const (
 	DefaultMemoryMB   = 256 // 512 MB did not fit on a 1 GB machine
 	DefaultCPUMilli   = 1000
 	DefaultHealthPath = "/"
-	KeepVersions      = 3 // successful versions whose images are kept for rollback
+	KeepVersions      = 5 // distinct images, besides the live one, kept for rollback
 	MaxBuildAttempts  = 2 // a build interrupted by a crash is retried once
 )
 
@@ -256,7 +256,14 @@ exactly these signatures):
 	UpdateDeployment(ctx, id string, fn func(*Deployment) error) (Deployment, error)
 	    // read-modify-write; sets UpdatedAt; sets FinishedAt when status becomes terminal; rejects leaving a terminal status (ErrConflict)
 	KeptImageDeployments(ctx, app string) ([]Deployment, error)
-	    // the live deployment plus the newest KeepVersions retired ones that have ImageID; everything else may be garbage collected
+	    // the live deployment, the newest retired deployment of each of the KeepVersions newest distinct non-live images,
+	    // and the newest deployment if it failed with an image; everything else may be garbage collected
+	KeptImageIDs(ctx, app string) (map[string]struct{}, error)
+	    // image IDs GC must keep: KeptImageDeployments plus images and sha256: source refs of pending deployments
+	CreateRollbackDeployment(ctx, req RollbackRequest) (RollbackResult, error)
+	    // checks with ClassifyRollback and inserts in one transaction; refusals are *RollbackError
+	LiveTimes(ctx, deploymentIDs []string) (map[string]time.Time, error)
+	    // first "已上线" deploy event per deployment
 
 	// Env, volumes, add-ons
 	SetEnv(ctx, v EnvVar) error                  // key must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$

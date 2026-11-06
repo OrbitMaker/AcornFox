@@ -500,6 +500,7 @@ function render() {
   if (state.fatal) return;
   renderConnectionBanner();
   renderEdgeBanner();
+  renderSetupLayer();
   renderChrome();
   const next = document.createElement("div");
   buildPage(next);
@@ -536,7 +537,7 @@ function renderConnectionBanner() {
 function renderEdgeBanner() {
   const existing = $("edge-banner");
   const e = state.edge;
-  const show = e && (e.state === "preparing" || e.state === "error") && !state.connectionLost && !state.fatal;
+  const show = e && (e.state === "preparing" || e.state === "error") && !state.connectionLost && !state.fatal && !setupVisible() && !(state.setup && state.setup.state !== "done");
   if (!show) { if (existing) existing.remove(); return; }
   const text = e.state === "preparing"
     ? "正在准备网关组件（首次启动要下载 Caddy 镜像，约 50 MB），完成前应用网址暂时打不开。"
@@ -1100,7 +1101,7 @@ function buildServer(page) {
   page.append(el("div", { class: "cards-3", dataset: { region: "more" } }, [
     card([
       el("h2", { class: "section-title", text: "版本与升级" }),
-      el("p", { class: "muted", text: "升级前自动备份程序和数据库，失败自动回退，运行中的应用不会中断。在服务器上执行：" }),
+      el("p", { class: "muted", text: "Linux 服务器：升级前自动备份程序和数据库，数据库迁移失败或服务起不来时自动换回原版本；应用容器一直运行，升级期间控制台会暂时连不上。在服务器上执行（Mac、Windows 用 acornfox install 升级）：" }),
       el("span", { class: "faint", text: "中国大陆服务器" }),
       copyBlock(UPGRADE_CN, "升级命令已复制", "复制国内升级命令", true),
       el("span", { class: "faint", text: "其他地区" }),
@@ -2231,6 +2232,231 @@ function toggleTheme() {
 }
 
 // ---------------------------------------------------------------------------
+// 准备运行环境（主程序装好后在页面里准备 Docker、网关组件、自检）
+// 和 `acornfox setup` 读同一个接口：GET /v1/setup、POST /v1/setup/{start,resume,pause}。
+// 没准备好时盖一层“准备运行环境”；以前准备好过、开机重新检查时只显示一条横幅。
+// ---------------------------------------------------------------------------
+
+const SETUP_STEP_NO = { binary: 1, runtime: 2, edge: 3, checks: 4 };
+let setupTimer = null;
+let setupChoice = "builtin";
+let setupMirrorOpen = false;
+
+function setupVisible() {
+  const s = state.setup;
+  if (!s || state.fatal) return false;
+  if (state.setupDismissed && s.state === "done") return false;
+  if (s.state === "done") return state.setupShownRun;  // 这次页面上看过准备过程，才显示“完成”页
+  if (["needs_user", "failed", "paused"].includes(s.state)) return true;
+  return !s.ever_done;                                  // 运行中 / 没开始：第一次准备才盖整页
+}
+
+async function loadSetup() {
+  try {
+    state.setup = await api.get("/v1/setup");
+  } catch (e) {
+    if (e.status === 404) { state.setup = null; return; }  // 服务端没有准备流程（旧版本）
+    throw e;
+  }
+  if (setupVisible() && state.setup.state !== "done") state.setupShownRun = true;
+  syncSetupTimer();
+}
+
+// 准备层显示时每秒刷新一次进度，其余时间跟着 3 秒的轮询走。
+function syncSetupTimer() {
+  const fast = state.setup && setupVisible() && ["running", "idle"].includes(state.setup.state);
+  if (fast && !setupTimer) {
+    setupTimer = setInterval(async () => {
+      if (document.hidden) return;
+      try { await loadSetup(); render(); } catch (e) { handleError(e); }
+    }, 1000);
+  } else if (!fast && setupTimer) { clearInterval(setupTimer); setupTimer = null; }
+}
+
+async function setupAction(path, body) {
+  try {
+    state.setup = await api.post(path, body || {});
+    state.setupShownRun = true;
+    state.setupDismissed = false;
+    syncSetupTimer();
+    render();
+  } catch (e) {
+    if (e.status === 409) { toast("运行环境正在准备中"); return; }
+    handleError(e);
+  }
+}
+
+function setupMB(b) { return (b / 1048576).toFixed(0) + " MB"; }
+
+function setupIcon(stateName, no) {
+  const map = { done: ["ok", "✓"], failed: ["bad", "!"], needs_user: ["now", String(no)], running: ["now", String(no)], paused: ["wait", "‖"] };
+  const [cls, t] = map[stateName] || ["wait", String(no)];
+  return el("span", { class: "setup-ic " + cls, "aria-hidden": "true", text: t });
+}
+
+function setupStepValue(st, s) {
+  if (st.state === "done") return el("span", { class: "setup-v", text: st.id === "binary" ? "已装好" : st.id === "checks" ? "通过" : "运行中" });
+  if (st.state === "running") {
+    const items = st.items || [];
+    const done = items.filter((i) => i.state === "done").length;
+    return el("span", { class: "pill now", text: items.length > 1 ? "进行中 " + done + "/" + items.length : "进行中" });
+  }
+  if (st.state === "needs_user") return el("span", { class: "pill now", text: s.need && s.need.kind === "reboot" ? "需要重启" : "需要你确认" });
+  if (st.state === "failed") return el("span", { class: "pill bad", text: "没成功 · " + ((s.error && s.error.code) || "") });
+  if (st.state === "paused") return el("span", { class: "setup-v", text: "已暂停" });
+  return el("span", { class: "setup-v", text: "等待" });
+}
+
+function setupItems(items) {
+  return el("div", { class: "setup-sub" }, items.map((it) => {
+    const right = it.state === "done"
+      ? el("span", { class: "setup-r ok", text: "✓ " + (it.total_bytes ? setupMB(it.total_bytes) + " · " : "") + (it.detail || "完成") })
+      : el("span", { class: "setup-r", text: it.total_bytes && it.done_bytes ? setupMB(it.done_bytes) + " / " + setupMB(it.total_bytes) : (it.detail || "进行中") });
+    const pct = it.state === "done" ? 100 : it.total_bytes ? Math.min(100, Math.round((it.done_bytes || 0) * 100 / it.total_bytes)) : 0;
+    const meta = [];
+    if (it.state !== "done") {
+      if (it.speed_bps) meta.push((it.speed_bps / 1048576).toFixed(1) + " MB/s");
+      if (it.eta_s) meta.push("还要约 " + it.eta_s + " 秒");
+      if (it.source) meta.push("来源 " + it.source);
+    }
+    return el("div", { class: "setup-item" }, [
+      el("div", { class: "setup-row" }, [el("b", { text: it.title }), right]),
+      it.total_bytes || it.state === "done" ? el("div", { class: "bar" + (it.state === "done" ? " done" : "") }, el("span", { style: "width:" + pct + "%" })) : null,
+      meta.length ? el("div", { class: "faint", text: meta.join(" · ") }) : null,
+    ]);
+  }));
+}
+
+function setupNeedBox(s) {
+  const n = s.need;
+  if (n.kind === "choose_runtime") {
+    return el("div", { class: "setup-ask", role: "radiogroup", "aria-label": "选择运行环境" }, [
+      el("div", { class: "section-title", text: "用哪个？" }),
+      ...(n.options || []).map((o) => el("button", {
+        class: "setup-box" + (setupChoice === o.id ? " on" : ""), role: "radio", "aria-checked": String(setupChoice === o.id),
+        onclick: () => { setupChoice = o.id; render(); },
+      }, [el("span", { class: "setup-rd", "aria-hidden": "true" }), el("span", {}, [
+        el("span", { class: "section-title", text: o.title }), o.recommended ? el("span", { class: "setup-rec", text: "推荐" }) : null,
+        el("div", { class: "faint", text: o.detail }),
+      ])])),
+    ]);
+  }
+  return el("div", { class: "setup-warn" }, [
+    el("div", { class: "section-title", text: n.kind === "reboot" ? "重启电脑后自动接着装" : "点“继续”后会这样：" }),
+    n.steps && n.steps.length ? el("ol", { class: "setup-steps" }, n.steps.map((t) => el("li", { text: t }))) : el("p", { class: "muted", text: n.message }),
+  ]);
+}
+
+function setupFailBox(s) {
+  const f = s.error;
+  return el("div", { class: "setup-fix" }, [
+    el("p", { text: f.message }),
+    f.next ? el("p", { class: "muted", text: "怎么办：" + f.next }) : null,
+    f.kept_bytes ? el("p", { class: "faint", text: "已下载的 " + setupMB(f.kept_bytes) + " 会保留，重试从断点接着下。" }) : null,
+    el("div", { class: "setup-btns" }, [
+      el("button", { class: "btn sm", text: "重试", onclick: () => setupAction("/v1/setup/resume") }),
+      el("button", { class: "btn sm", text: "换下载源", onclick: () => { setupMirrorOpen = !setupMirrorOpen; render(); } }),
+      el("button", { class: "btn sm", text: "复制诊断信息给 AI", onclick: () => copyToClipboard(
+        "AcornFox 准备运行环境失败，请帮我排查。故障编号 " + f.code + "。\n" + JSON.stringify({ error: f, steps: s.steps, found: s.found, network: s.network, version: s.version }, null, 2),
+        "已复制，可以发给 AI 工作台") }),
+    ]),
+    setupMirrorOpen ? setupMirrorForm() : null,
+  ]);
+}
+
+function setupMirrorForm() {
+  const input = el("input", { class: "input", type: "url", placeholder: "下载源地址，例如 https://dl.example.com", "aria-label": "下载源地址" });
+  return el("div", { class: "setup-btns" }, [input, el("button", { class: "btn sm primary", text: "用这个源重试", onclick: () => {
+    const v = input.value.trim();
+    if (!/^https?:\/\//.test(v)) { toast("请输入 http:// 或 https:// 开头的地址"); return; }
+    setupMirrorOpen = false;
+    setupAction("/v1/setup/start", { mirror: v });
+  } })]);
+}
+
+function buildSetupSheet(s) {
+  const done = s.state === "done";
+  const steps = s.steps || [];
+  const sub = done ? "运行环境准备好了" + (s.started_at && s.finished_at ? "，用时 " + setupDuration(s) : "") + "。以后开机会自动准备好，不用再管。"
+    : s.state === "failed" ? "有一步没成功。已经装好的部分不会丢，重试只补没完成的。"
+    : s.state === "needs_user" ? (s.need ? s.need.message : "")
+    : s.state === "paused" ? "已暂停，已下载的部分会保留。"
+    : "主程序已经装好。正在准备运行应用需要的环境，完成前应用暂时不能部署。";
+  const rows = [];
+  for (const st of steps) {
+    rows.push(el("div", { class: "setup-gr" }, [
+      setupIcon(st.state, SETUP_STEP_NO[st.id]),
+      el("div", {}, [el("div", { class: "section-title", text: st.title }), st.detail ? el("div", { class: "faint", text: st.detail }) : null]),
+      setupStepValue(st, s),
+    ]));
+    if (st.state === "running" && (st.items || []).length) rows.push(setupItems(st.items));
+    if (st.state === "needs_user" && s.need) rows.push(setupNeedBox(s));
+    if (st.state === "failed" && s.error) rows.push(setupFailBox(s));
+  }
+  const checks = (s.checks || []).length && (done || s.state === "failed") ? el("div", {}, [
+    el("div", { class: "setup-ghead", text: "自检 " + s.checks.filter((c) => c.ok).length + "/" + s.checks.length + " 通过" }),
+    el("div", { class: "setup-group" }, s.checks.map((c) => el("div", { class: "setup-gr" }, [
+      el("span", { class: "setup-ic " + (c.ok ? "ok" : c.required ? "bad" : "wait"), "aria-hidden": "true", text: c.ok ? "✓" : "!" }),
+      el("div", {}, [el("div", { class: "section-title", text: c.title }), c.detail ? el("div", { class: "faint mono", text: c.detail }) : null]),
+    ]))),
+  ]) : null;
+
+  const foot = [];
+  if (done) {
+    foot.push(el("a", { class: "btn primary", href: "#/store", text: "去应用中心", onclick: () => { state.setupDismissed = true; } }));
+    foot.push(el("a", { class: "btn", href: "#/new", text: "部署我自己的项目", onclick: () => { state.setupDismissed = true; } }));
+    foot.push(el("span", { class: "faint setup-hint", text: "也可以在 AI 工作台里说“帮我部署”" }));
+  } else if (s.state === "needs_user" && s.need && s.need.kind === "choose_runtime") {
+    foot.push(el("button", { class: "btn primary", text: "继续", onclick: () => setupAction("/v1/setup/start", { runtime: setupChoice }) }));
+    foot.push(el("span", { class: "faint setup-hint", text: "终端：acornfox setup --runtime " + setupChoice }));
+  } else if (s.state === "needs_user" && s.need && s.need.kind === "admin") {
+    foot.push(el("button", { class: "btn primary", text: "继续（需要管理员确认）", onclick: () => setupAction("/v1/setup/start", { runtime: "builtin", confirm_admin: true }) }));
+    if ((s.need.options || []).some((o) => o.id === "local-only")) {
+      foot.push(el("button", { class: "btn", text: "只在本机用", onclick: () => setupAction("/v1/setup/start", { runtime: "builtin", local_only: true }) }));
+    } else {
+      foot.push(el("span", { class: "faint setup-hint", text: "已经装了 Docker Desktop？打开它后点“重新检测”" }));
+      foot.push(el("button", { class: "btn", text: "重新检测", onclick: () => setupAction("/v1/setup/start", {}) }));
+    }
+  } else if (s.state === "needs_user") {
+    foot.push(el("button", { class: "btn", text: "已经重启过了，接着装", onclick: () => setupAction("/v1/setup/resume") }));
+  } else if (s.state === "running" || s.state === "idle") {
+    foot.push(el("button", { class: "btn", text: "暂停", onclick: () => setupAction("/v1/setup/pause") }));
+    foot.push(el("span", { class: "faint setup-hint", text: "关掉这个页面也会在后台继续" }));
+  } else if (s.state === "paused") {
+    foot.push(el("button", { class: "btn primary", text: "继续", onclick: () => setupAction("/v1/setup/resume") }));
+  } else if (s.state === "failed") {
+    foot.push(el("span", { class: "faint setup-hint", text: "终端里重试：acornfox setup --resume · 详细诊断：acornfox doctor" }));
+  }
+  return el("section", { class: "setup-sheet", role: "dialog", "aria-modal": "true", "aria-labelledby": "setup-title" }, [
+    el("div", { class: "setup-head" }, [
+      el("div", { class: "setup-sq" + (done ? " ok" : s.state === "failed" ? " bad" : ""), "aria-hidden": "true", text: done ? "✓" : s.state === "failed" ? "!" : "…" }),
+      el("div", {}, [el("h1", { id: "setup-title", text: done ? "可以部署应用了" : "准备运行环境" }), el("div", { class: "muted", text: sub })]),
+    ]),
+    el("div", { class: "setup-body" }, [el("div", { class: "setup-group" }, rows), checks, el("div", { class: "setup-foot" }, foot)]),
+  ]);
+}
+
+function setupDuration(s) {
+  const secs = Math.max(0, Math.round((Date.parse(s.finished_at) - Date.parse(s.started_at)) / 1000));
+  return secs >= 60 ? Math.floor(secs / 60) + " 分 " + (secs % 60) + " 秒" : secs + " 秒";
+}
+
+// 准备层盖在页面上；以前准备好过、开机重新检查时只出一条横幅。
+function renderSetupLayer() {
+  const existing = $("setup-layer");
+  const s = state.setup;
+  const banner = $("setup-banner");
+  const showBanner = s && !setupVisible() && s.ever_done && s.state === "running" && !state.fatal;
+  if (!showBanner && banner) banner.remove();
+  if (showBanner && !banner) {
+    document.body.append(el("div", { id: "setup-banner", class: "banner", role: "status" }, el("div", { class: "inner", text: "正在检查运行环境…" })));
+  }
+  if (!setupVisible()) { if (existing) existing.remove(); return; }
+  const layer = el("div", { id: "setup-layer", class: "setup-layer" }, buildSetupSheet(s));
+  if (existing) existing.replaceWith(layer); else document.body.append(layer);
+}
+
+// ---------------------------------------------------------------------------
 // 轮询与错误
 // ---------------------------------------------------------------------------
 
@@ -2246,6 +2472,8 @@ async function poll() {
     state.apps = appsBody.apps || [];
     state.host = hostBody;
     state.edge = statusBody.edge || null;
+    if (statusBody.setup && (statusBody.setup.state !== "done" || (state.setup && state.setup.state !== "done"))) await loadSetup();
+    else if (statusBody.setup && !state.setup) await loadSetup();
     if (needsResources()) await loadResources(false);
     state.loaded = true;
     state.connectionLost = false;

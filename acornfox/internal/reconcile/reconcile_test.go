@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,8 @@ type fakeStore struct {
 	events      []state.Event
 	domains     map[string]*state.Domain // key: app+"/"+name
 	addons      map[string][]state.Addon // N4.2 [addon-agent]
+	removed     map[string][]state.Addon // soft-deleted add-ons
+	removedErr  error                    // returned by ListRemovedAddons when set
 }
 
 func newStore() *fakeStore {
@@ -155,12 +158,24 @@ func (s *fakeStore) UpdateDeployment(_ context.Context, id string, fn func(*stat
 func (s *fakeStore) KeptImageDeployments(_ context.Context, app string) ([]state.Deployment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// live + newest KeepVersions retired with ImageID
+	return s.keptLocked(app), nil
+}
+
+// keptLocked mirrors state.Store.KeptImageDeployments: the live deployment,
+// the newest retired deployment of each of the newest KeepVersions distinct
+// images other than the live one, and the newest deployment if it failed with
+// an image.
+func (s *fakeStore) keptLocked(app string) []state.Deployment {
 	var live *state.Deployment
 	var retired []state.Deployment
+	var newest *state.Deployment
 	for _, d := range s.deployments {
 		if d.App != app {
 			continue
+		}
+		if newest == nil || d.Seq > newest.Seq {
+			cp := *d
+			newest = &cp
 		}
 		if d.Status == state.StatusLive {
 			cp := *d
@@ -169,23 +184,79 @@ func (s *fakeStore) KeptImageDeployments(_ context.Context, app string) ([]state
 			retired = append(retired, *d)
 		}
 	}
-	// newest first by Seq
-	for i := 0; i < len(retired); i++ {
-		for j := i + 1; j < len(retired); j++ {
-			if retired[j].Seq > retired[i].Seq {
-				retired[i], retired[j] = retired[j], retired[i]
-			}
-		}
-	}
-	if len(retired) > state.KeepVersions {
-		retired = retired[:state.KeepVersions]
-	}
+	sort.Slice(retired, func(i, j int) bool { return retired[i].Seq > retired[j].Seq })
 	var out []state.Deployment
+	seen := map[string]bool{}
 	if live != nil {
 		out = append(out, *live)
+		if live.ImageID != "" {
+			seen[live.ImageID] = true
+		}
 	}
-	out = append(out, retired...)
+	n := 0
+	for _, d := range retired {
+		if n >= state.KeepVersions {
+			break
+		}
+		if seen[d.ImageID] {
+			continue
+		}
+		seen[d.ImageID] = true
+		out = append(out, d)
+		n++
+	}
+	if newest != nil && newest.Status == state.StatusFailed && newest.ImageID != "" {
+		out = append(out, *newest)
+	}
+	return out
+}
+
+func (s *fakeStore) KeptImageIDs(_ context.Context, app string) (map[string]struct{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]struct{}{}
+	for _, d := range s.keptLocked(app) {
+		if d.ImageID != "" {
+			out[d.ImageID] = struct{}{}
+		}
+	}
+	for _, d := range s.deployments {
+		if d.App != app || !state.IsPending(d.Status) {
+			continue
+		}
+		if d.ImageID != "" {
+			out[d.ImageID] = struct{}{}
+		}
+		if d.SourceKind == state.SourceImage && strings.HasPrefix(d.SourceRef, "sha256:") {
+			out[d.SourceRef] = struct{}{}
+		}
+	}
 	return out, nil
+}
+
+func (s *fakeStore) ListDeployments(_ context.Context, app string, limit int) ([]state.Deployment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []state.Deployment
+	for _, d := range s.deployments {
+		if d.App == app {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq > out[j].Seq })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *fakeStore) ListRemovedAddons(_ context.Context, app string) ([]state.Addon, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.removedErr != nil {
+		return nil, s.removedErr
+	}
+	return append([]state.Addon(nil), s.removed[app]...), nil
 }
 
 func (s *fakeStore) AddVolume(_ context.Context, app, path string, auto bool) (state.Volume, bool, error) {
@@ -370,6 +441,41 @@ type fakeRunner struct {
 	// Called on every EnsureContainer before the container is created (tests
 	// use it to simulate a slow image pull).
 	onEnsure func(req runner.EnsureContainerRequest)
+
+	// LogTail behaviour by container name: data defaults to f.logs with a
+	// timestamp prefix per line; env and errors are optional.
+	tailData  map[string][]byte
+	tailEnv   map[string][]string
+	tailErr   map[string]error
+	tailCalls []string // container names, in call order
+}
+
+var _ runner.LogTailer = (*fakeRunner)(nil)
+
+// LogTail returns the configured tail of an existing container; a missing
+// container is runner.ErrNotFound, like the real runner.
+func (f *fakeRunner) LogTail(_ context.Context, app, name string, maxBytes int) (runner.LogTailResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tailCalls = append(f.tailCalls, name)
+	if err := f.tailErr[name]; err != nil {
+		return runner.LogTailResult{}, err
+	}
+	if _, ok := f.containers[name]; !ok {
+		return runner.LogTailResult{}, runner.ErrNotFound
+	}
+	data, ok := f.tailData[name]
+	if !ok {
+		var b strings.Builder
+		for _, l := range f.logs[name] {
+			b.WriteString("2026-11-03T02:10:31.000000000Z " + l + "\n")
+		}
+		data = []byte(b.String())
+	}
+	if len(data) > maxBytes {
+		data = data[len(data)-maxBytes:]
+	}
+	return runner.LogTailResult{Data: data, Env: f.tailEnv[name]}, nil
 }
 
 func newRunner() *fakeRunner {
@@ -384,6 +490,9 @@ func newRunner() *fakeRunner {
 		logs:       map[string][]string{},
 		diff:       map[string][]string{},
 		ensureErr:  map[string]error{},
+		tailData:   map[string][]byte{},
+		tailEnv:    map[string][]string{},
+		tailErr:    map[string]error{},
 	}
 }
 
@@ -1072,32 +1181,37 @@ func TestRunnerUnavailableLeavesPendingThenContinues(t *testing.T) {
 func TestImageGCKeepsKeptVersions(t *testing.T) {
 	h := newHarness(t)
 	app := baseApp("web")
-	app.CurrentDeployment = "live00000005"
+	n := state.KeepVersions + 2
+	liveID := fmt.Sprintf("live%08d", n)
+	app.CurrentDeployment = liveID
 	h.store.putApp(app)
 
-	// live + 3 retired (kept) + 1 old retired (should be GC'd)
+	// live + KeepVersions retired (kept) + 1 old retired (should be GC'd)
 	mk := func(id string, seq int, status string) {
 		imgID := "sha256:web-" + id
 		h.store.putDeployment(state.Deployment{ID: id, App: "web", Seq: seq, SourceKind: state.SourceUpload, Status: status, ImageID: imgID})
 		h.runner.images[imgID] = runner.ImageInfo{ID: imgID, App: "web", DeploymentID: id}
 	}
-	mk("live00000005", 5, state.StatusLive)
-	mk("ret000000004", 4, state.StatusRetired)
-	mk("ret000000003", 3, state.StatusRetired)
-	mk("ret000000002", 2, state.StatusRetired)
+	mk(liveID, n, state.StatusLive)
+	keep := []string{liveID}
+	for seq := n - 1; seq >= 2; seq-- {
+		id := fmt.Sprintf("ret%09d", seq)
+		mk(id, seq, state.StatusRetired)
+		keep = append(keep, id)
+	}
 	mk("ret000000001", 1, state.StatusRetired) // oldest -> should be removed
 	// live container present so converge doesn't try to recreate
-	name := runner.ContainerName("web", "live00000005")
-	h.runner.containers[name] = runner.ContainerInfo{ID: "c", Name: name, App: "web", DeploymentID: "live00000005", Role: runner.RoleApp, State: "running", Running: true, HostPort: 44000}
+	name := runner.ContainerName("web", liveID)
+	h.runner.containers[name] = runner.ContainerInfo{ID: "c", Name: name, App: "web", DeploymentID: liveID, Role: runner.RoleApp, State: "running", Running: true, HostPort: 44000}
 
 	h.rec.appGC(context.Background(), "web", nil)
 
 	if _, ok := h.runner.images["sha256:web-ret000000001"]; ok {
 		t.Fatalf("oldest image should be GC'd")
 	}
-	for _, keep := range []string{"live00000005", "ret000000004", "ret000000003", "ret000000002"} {
-		if _, ok := h.runner.images["sha256:web-"+keep]; !ok {
-			t.Fatalf("kept image %s was removed", keep)
+	for _, id := range keep {
+		if _, ok := h.runner.images["sha256:web-"+id]; !ok {
+			t.Fatalf("kept image %s was removed", id)
 		}
 	}
 }

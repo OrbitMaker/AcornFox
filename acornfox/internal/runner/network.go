@@ -34,7 +34,7 @@ func (d *Docker) RemoveNetwork(ctx context.Context, app string) error {
 			Code: "invalid_request", Message: "应用名不合法",
 		}}
 	}
-	res, err := d.cli.NetworkInspect(ctx, NetworkName(app), client.NetworkInspectOptions{})
+	res, err := d.c().NetworkInspect(ctx, NetworkName(app), client.NetworkInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
@@ -48,7 +48,7 @@ func (d *Docker) RemoveNetwork(ctx context.Context, app string) error {
 	// it so an app's network can be removed with the app.
 	if onlyEdgeAttached(res.Network) {
 		d.disconnectEdge(ctx, res.Network.ID)
-		if again, ierr := d.cli.NetworkInspect(ctx, NetworkName(app), client.NetworkInspectOptions{}); ierr == nil {
+		if again, ierr := d.c().NetworkInspect(ctx, NetworkName(app), client.NetworkInspectOptions{}); ierr == nil {
 			res = again
 		}
 	}
@@ -57,7 +57,7 @@ func (d *Docker) RemoveNetwork(ctx context.Context, app string) error {
 			Code: "network_in_use", Message: "应用网络仍有容器连接或缺少资源 ID，未删除",
 		}}
 	}
-	_, err = d.cli.NetworkRemove(ctx, res.Network.ID, client.NetworkRemoveOptions{})
+	_, err = d.c().NetworkRemove(ctx, res.Network.ID, client.NetworkRemoveOptions{})
 	if cerrdefs.IsNotFound(err) {
 		return nil
 	}

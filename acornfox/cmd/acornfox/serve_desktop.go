@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/acornfox/acornfox/internal/cli"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/runner"
+	"github.com/acornfox/acornfox/internal/setup"
 )
 
 const (
@@ -77,6 +79,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		defer f.Close()
 		stdout, stderr = f, f
 		detachConsole(f)
+		// A crash (panic) goes to the log too; otherwise it is lost, because a
+		// background process started by the logon task has no console.
+		_ = debug.SetCrashOutput(f, debug.CrashOptions{})
 	}
 
 	ep := platform.ResolveDocker()
@@ -109,8 +114,23 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		EdgeAdminPort:   *edgeAdminPort,
 		DefaultExposure: *exposure,
 		LANHost:         cachedLANAddress(),
-		HostMetrics:     newDockerVMHost(dc, docker),
+		HostMetrics:     newDockerVMHost(docker.Client, docker),
 		LANConsolePort:  *lanPort,
+		LANRelay:        true,
+		Setup: &setupDeps{
+			DataDir: *dataDir,
+			Console: "http://" + *consoleListen,
+			Runner:  docker,
+			Docker:  docker,
+			Runtime: setup.NewDesktopRuntime(setup.DesktopRuntimeConfig{
+				DataDir: *dataDir,
+				Version: cli.Version,
+				Logf: func(f string, a ...any) {
+					fmt.Fprintf(stdout, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(f, a...))
+				},
+			}),
+			Log: stdout,
+		},
 	}, docker, stdout, stderr)
 }
 

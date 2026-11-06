@@ -18,7 +18,9 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
+	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -55,6 +57,9 @@ type Store interface {
 	GetDeployment(ctx context.Context, id string) (state.Deployment, error)
 	ListDeployments(ctx context.Context, app string, limit int) ([]state.Deployment, error)
 	UpdateDeployment(ctx context.Context, id string, fn func(*state.Deployment) error) (state.Deployment, error)
+	// Rollback: check and create in one transaction; go-live times for durations.
+	CreateRollbackDeployment(ctx context.Context, req state.RollbackRequest) (state.RollbackResult, error)
+	LiveTimes(ctx context.Context, deploymentIDs []string) (map[string]time.Time, error)
 
 	SetEnv(ctx context.Context, v state.EnvVar) error
 	DeleteEnv(ctx context.Context, app, key string) error
@@ -107,6 +112,8 @@ type Runner interface {
 	RemoveVolume(ctx context.Context, app, name string) error
 	RemoveNetwork(ctx context.Context, app string) error
 	ListVolumes(ctx context.Context, app string) ([]runner.VolumeInfo, error)
+	// Which images of an app are still on this machine (rollback checks).
+	ListImages(ctx context.Context, app string) ([]runner.ImageInfo, error)
 	// Apply new app limits to the existing container without a restart.
 	UpdateResources(ctx context.Context, req runner.UpdateResourcesRequest) error
 }
@@ -141,6 +148,14 @@ type Config struct {
 	// EdgeStatus reports the Caddy container ("preparing" / "running" /
 	// "error" + message); nil or "" state => not reported.
 	EdgeStatus func() (state, message string)
+	// Setup is the runtime setup (find or install Docker, gateway, checks);
+	// nil => the /v1/setup routes answer 404.
+	Setup Setup
+
+	// DeployLogs keeps each deployment's build and run logs; nil => no
+	// archived logs (GET /v1/deployments/{id}/logs answers logs_not_kept and
+	// every deployment's "logs" is all false).
+	DeployLogs *deploylog.Store
 }
 
 // HostProvider returns a point-in-time host resource snapshot. It must return
@@ -175,6 +190,8 @@ type server struct {
 	lanHost         func() string
 	lanConsole      LANConsole
 	edgeStatus      func() (string, string)
+	setup           Setup
+	deployLogs      *deploylog.Store
 
 	// resMu serializes the allocation check and the write that follows it
 	// (app limits, add-ons, new apps, server-wide caps), see resources.go.
@@ -230,6 +247,8 @@ func newServer(cfg Config) *server {
 		lanHost:         cfg.LANHost,
 		lanConsole:      cfg.LANConsole,
 		edgeStatus:      cfg.EdgeStatus,
+		setup:           cfg.Setup,
+		deployLogs:      cfg.DeployLogs,
 	}
 }
 
@@ -248,8 +267,10 @@ func (s *server) effectiveExposure(a state.App) string {
 func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/apps/{app}/deployments", s.createDeployment)
 	mux.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
+	mux.HandleFunc("POST /v1/apps/{app}/versions/{seq}/rollback", s.rollbackTo)
 	mux.HandleFunc("POST /v1/apps/{app}/redeploy", s.redeploy)
 	mux.HandleFunc("GET /v1/deployments/{id}", s.getDeployment)
+	mux.HandleFunc("GET /v1/deployments/{id}/logs", s.deploymentLogs)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{app}", s.getApp)
 	mux.HandleFunc("PATCH /v1/apps/{app}", s.patchApp)
@@ -275,6 +296,12 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/resources", s.getResources)
 	mux.HandleFunc("PUT /v1/resources", s.putResources)
+	mux.HandleFunc("GET /v1/setup", s.getSetup)
+	mux.HandleFunc("GET /v1/setup/events", s.getSetupEvents)
+	mux.HandleFunc("GET /v1/setup/faults", s.getSetupFaults)
+	mux.HandleFunc("POST /v1/setup/start", s.postSetupStart)
+	mux.HandleFunc("POST /v1/setup/resume", s.postSetupResume)
+	mux.HandleFunc("POST /v1/setup/pause", s.postSetupPause)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the

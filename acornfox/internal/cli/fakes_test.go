@@ -17,7 +17,10 @@ import (
 type fakeAPI struct {
 	statusFn     func(ctx context.Context) (client.Status, error)
 	deployFn     func(ctx context.Context, app string, opt client.DeployOptions) (client.Deployment, bool, error)
-	rollbackFn   func(ctx context.Context, app string) (client.Deployment, error)
+	rollbackFn   func(ctx context.Context, app string, opts client.RollbackOptions) (client.RollbackResult, error)
+	listDepsFn   func(ctx context.Context, app string, limit int) (client.DeploymentList, error)
+	depLogsFn    func(ctx context.Context, id, kind string, tail int) (client.DeploymentLogLines, error)
+	featuresFn   func(ctx context.Context) ([]string, error)
 	redeployFn   func(ctx context.Context, app string) (string, error)
 	deploymentFn func(ctx context.Context, id string, after int64) (client.Deployment, []client.Event, error)
 	appsFn       func(ctx context.Context) ([]client.App, error)
@@ -58,9 +61,12 @@ type fakeAPI struct {
 	closed bool
 
 	// captured inputs for assertions
-	lastDeployApp string
-	lastDeployOpt client.DeployOptions
-	lastSetEnv    struct {
+	lastDeployApp   string
+	rollbackCalls   int
+	lastRollbackApp string
+	lastRollback    client.RollbackOptions
+	lastDeployOpt   client.DeployOptions
+	lastSetEnv      struct {
 		app, key, value string
 		secret          bool
 	}
@@ -82,11 +88,42 @@ func (f *fakeAPI) Deploy(ctx context.Context, app string, opt client.DeployOptio
 	return client.Deployment{ID: "abc123", App: app, Seq: 1, Status: "live"}, true, nil
 }
 
-func (f *fakeAPI) Rollback(ctx context.Context, app string) (client.Deployment, error) {
+func (f *fakeAPI) Rollback(ctx context.Context, app string, opts client.RollbackOptions) (client.RollbackResult, error) {
+	f.rollbackCalls++
+	f.lastRollbackApp, f.lastRollback = app, opts
 	if f.rollbackFn != nil {
-		return f.rollbackFn(ctx, app)
+		return f.rollbackFn(ctx, app, opts)
 	}
-	return client.Deployment{ID: "roll1", App: app, Seq: 2, Status: "live"}, nil
+	based := opts.ToSeq
+	if based == 0 {
+		based = 1
+	}
+	return client.RollbackResult{
+		Deployment: client.Deployment{ID: "roll1", App: app, Seq: 2, Status: "live", BasedOnSeq: based},
+		Created:    true, TargetSeq: based,
+	}, nil
+}
+
+func (f *fakeAPI) ListDeployments(ctx context.Context, app string, limit int) (client.DeploymentList, error) {
+	if f.listDepsFn != nil {
+		return f.listDepsFn(ctx, app, limit)
+	}
+	return client.DeploymentList{}, nil
+}
+
+func (f *fakeAPI) DeploymentLogs(ctx context.Context, id, kind string, tail int) (client.DeploymentLogLines, error) {
+	if f.depLogsFn != nil {
+		return f.depLogsFn(ctx, id, kind, tail)
+	}
+	return client.DeploymentLogLines{DeploymentID: id, Kind: kind, Lines: []string{}, Source: "archive"}, nil
+}
+
+// Features defaults to a current server.
+func (f *fakeAPI) Features(ctx context.Context) ([]string, error) {
+	if f.featuresFn != nil {
+		return f.featuresFn(ctx)
+	}
+	return []string{client.FeatureRollbackTo, client.FeatureDeployLogs, client.FeatureDeployTiming}, nil
 }
 
 func (f *fakeAPI) Redeploy(ctx context.Context, app string) (string, error) {

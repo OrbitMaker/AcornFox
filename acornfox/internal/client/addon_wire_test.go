@@ -38,6 +38,9 @@ func (*wireRunner) ListVolumes(context.Context, string) ([]runner.VolumeInfo, er
 	return nil, nil
 }
 func (*wireRunner) Logs(context.Context, string, string, int) ([]string, error) { return nil, nil }
+func (*wireRunner) ListImages(context.Context, string) ([]runner.ImageInfo, error) {
+	return nil, nil
+}
 func (*wireRunner) ContainerStats(context.Context, string, string) (runner.StatsResponse, error) {
 	return runner.StatsResponse{}, nil
 }

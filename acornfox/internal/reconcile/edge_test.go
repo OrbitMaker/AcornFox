@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -19,12 +20,20 @@ type edgeRunner struct {
 	specs     []runner.EdgeSpec
 	connected []string
 	lastKey   string
+	// noBind makes binding this host address fail like Docker does when it
+	// runs in a VM without that address (WSL 2 in NAT mode).
+	noBind string
 }
 
 func (e *edgeRunner) EnsureEdge(_ context.Context, s runner.EdgeSpec) (runner.EdgeInfo, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.specs = append(e.specs, s)
+	for _, p := range s.Ports {
+		if e.noBind != "" && p.HostIP == e.noBind {
+			return runner.EdgeInfo{}, errors.New("driver failed programming external connectivity: failed to bind port " + p.HostIP + ": bind: cannot assign requested address")
+		}
+	}
 	key := specKey(s)
 	recreated := key != e.lastKey
 	e.lastKey = key
@@ -222,5 +231,36 @@ func TestEnsureEdgeIsSerialized(t *testing.T) {
 	wg.Wait()
 	if ce.maxActive != 1 {
 		t.Fatalf("EnsureEdge ran %d at once; the edge container would be created twice", ce.maxActive)
+	}
+}
+
+// Docker inside a VM without the LAN address (WSL 2 in NAT mode) cannot bind
+// it: the edge falls back to 127.0.0.1 only and the address is reported as
+// unbindable (apps then get no LAN address).
+func TestEdgeLANUnbindableFallsBackToLocal(t *testing.T) {
+	rec, st, er, _ := newEdgeHarness(t, runner.EdgeModeBridge, state.ExposureLAN)
+	er.noBind = testLAN
+	liveEdgeApp(st, er, "web", "", 18810)
+	if !rec.EnsureEdge(context.Background()) {
+		t.Fatal("EnsureEdge failed instead of falling back")
+	}
+	fwd := 0
+	for _, p := range er.last().Ports {
+		if p.HostIP == testLAN {
+			t.Fatalf("still publishing on the LAN address: %+v", er.last().Ports)
+		}
+		if p.HostIP == "127.0.0.1" && p.Port == p.ContainerPort && p.Port >= 18810+LANPortOffset {
+			fwd++
+		}
+	}
+	// The LAN listeners move to 127.0.0.1:P+offset for acornfox serve to relay to.
+	if fwd == 0 {
+		t.Fatalf("no 127.0.0.1:P+offset ports for the LAN relay: %+v", er.last().Ports)
+	}
+	if st, _ := rec.EdgeStatus(); st != EdgeStateRunning {
+		t.Fatalf("edge state %s", st)
+	}
+	if !rec.LANUnbindable(testLAN) || rec.LANUnbindable("192.168.1.2") {
+		t.Fatal("LANUnbindable wrong")
 	}
 }

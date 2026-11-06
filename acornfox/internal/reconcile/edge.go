@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/acornfox/acornfox/internal/caddyroute"
@@ -122,10 +123,23 @@ func (r *Reconciler) edgeSpec(_ context.Context, routes []caddyroute.Route) runn
 			lan = ip.String()
 		}
 	}
+	// Docker cannot bind the LAN address (it runs in a VM without it, e.g.
+	// WSL 2 in NAT mode): publish the LAN listeners on 127.0.0.1:P+offset
+	// instead; acornfox serve listens on <LAN>:P and relays there
+	// (lanforward.go), so "local only" apps stay unreachable from the LAN.
+	forward := false
+	r.edgeMu.Lock()
+	if lan != "" && lan == r.lanUnbindable {
+		lan, forward = "", true
+	}
+	r.edgeMu.Unlock()
 	for p := e.PortMin; p <= e.PortMax; p++ {
 		spec.Ports = append(spec.Ports, runner.EdgePort{HostIP: "127.0.0.1", Port: p})
 		if lan != "" {
 			spec.Ports = append(spec.Ports, runner.EdgePort{HostIP: lan, Port: p, ContainerPort: p + LANPortOffset})
+		}
+		if forward {
+			spec.Ports = append(spec.Ports, runner.EdgePort{HostIP: "127.0.0.1", Port: p + LANPortOffset, ContainerPort: p + LANPortOffset})
 		}
 	}
 	for _, rt := range routes {
@@ -139,6 +153,24 @@ func (r *Reconciler) edgeSpec(_ context.Context, routes []caddyroute.Route) runn
 		}
 	}
 	return spec
+}
+
+// specLANHost returns the LAN address a spec publishes on, or "".
+func specLANHost(s runner.EdgeSpec) string {
+	for _, p := range s.Ports {
+		if p.ContainerPort != 0 && p.HostIP != "127.0.0.1" && p.HostIP != "0.0.0.0" {
+			return p.HostIP
+		}
+	}
+	return ""
+}
+
+// LANUnbindable reports whether host is a LAN address Docker could not bind
+// (the edge then publishes on 127.0.0.1 only; apps have no LAN address).
+func (r *Reconciler) LANUnbindable(host string) bool {
+	r.edgeMu.Lock()
+	defer r.edgeMu.Unlock()
+	return host != "" && host == r.lanUnbindable
 }
 
 func specKey(s runner.EdgeSpec) string {
@@ -173,6 +205,19 @@ func (r *Reconciler) ensureEdge(ctx context.Context, routes []caddyroute.Route, 
 			r.log.Info("preparing edge container (the first start may download the Caddy image)")
 		}
 		info, err := m.EnsureEdge(ctx, spec)
+		if err != nil && strings.Contains(err.Error(), "cannot assign requested address") {
+			// Docker cannot bind the LAN address (it runs in a VM without it,
+			// e.g. WSL 2 in NAT mode): publish on 127.0.0.1 only.
+			if lan := specLANHost(spec); lan != "" {
+				r.edgeMu.Lock()
+				r.lanUnbindable = lan
+				r.edgeMu.Unlock()
+				r.log.Warn("edge: LAN address not bindable by Docker, apps reachable on this computer only", "lan", lan, "err", err)
+				spec = r.edgeSpec(ctx, routes)
+				key = specKey(spec)
+				info, err = m.EnsureEdge(ctx, spec)
+			}
+		}
 		if err != nil {
 			r.edgeMu.Lock()
 			r.edgeFailures++

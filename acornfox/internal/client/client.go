@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/acornfox/acornfox/internal/setup"
 )
 
 // Client talks to one acornfox server, either directly over HTTP (t.URL set) or
@@ -297,14 +300,146 @@ func (c *Client) Deploy(ctx context.Context, app string, opt DeployOptions) (Dep
 	return dep, created, nil
 }
 
-// Rollback calls POST /v1/apps/{app}/rollback.
-func (c *Client) Rollback(ctx context.Context, app string) (Deployment, error) {
-	var dep Deployment
+// Rollback calls POST /v1/apps/{app}/rollback (opts.ToSeq 0) or POST
+// /v1/apps/{app}/versions/{seq}/rollback. Each call carries a fresh
+// Idempotency-Key so a transport retry never creates a second rollback.
+// A server without the versions route answers server_too_old.
+func (c *Client) Rollback(ctx context.Context, app string, opts RollbackOptions) (RollbackResult, error) {
 	path := "/v1/apps/" + url.PathEscape(app) + "/rollback"
-	if _, err := c.do(ctx, http.MethodPost, path, nil, -1, "", &dep); err != nil {
-		return Deployment{}, err
+	if opts.ToSeq > 0 {
+		path = "/v1/apps/" + url.PathEscape(app) + "/versions/" + strconv.Itoa(opts.ToSeq) + "/rollback"
 	}
-	return dep, nil
+	var body io.Reader
+	contentType := ""
+	if opts.CancelPending {
+		body = strings.NewReader(`{"cancel_pending":true}`)
+		contentType = "application/json"
+	}
+	key, err := newRequestKey()
+	if err != nil {
+		return RollbackResult{}, err
+	}
+	var raw json.RawMessage
+	status, err := c.doWithKey(ctx, http.MethodPost, path, body, -1, contentType, key, &raw)
+	if err != nil {
+		if opts.ToSeq > 0 {
+			err = tooOld(err, "回退到指定版本")
+		}
+		return RollbackResult{}, err
+	}
+	var res RollbackResult
+	if err := json.Unmarshal(raw, &res.Deployment); err != nil {
+		return RollbackResult{}, err
+	}
+	var extra struct {
+		Target     int `json:"rollback_target_seq"`
+		Superseded int `json:"superseded_seq"`
+	}
+	if err := json.Unmarshal(raw, &extra); err != nil {
+		return RollbackResult{}, err
+	}
+	res.Created = status == http.StatusAccepted
+	res.TargetSeq, res.SupersededSeq = extra.Target, extra.Superseded
+	if res.TargetSeq == 0 {
+		// Older servers do not report it; the deployment records it.
+		res.TargetSeq = res.Deployment.BasedOnSeq
+	}
+	return res, nil
+}
+
+// ListDeployments calls GET /v1/apps/{app}/deployments?limit=N (1..100; 0
+// uses the server default of 20), newest first.
+func (c *Client) ListDeployments(ctx context.Context, app string, limit int) (DeploymentList, error) {
+	path := "/v1/apps/" + url.PathEscape(app) + "/deployments"
+	if limit > 0 {
+		path += "?limit=" + strconv.Itoa(limit)
+	}
+	var list DeploymentList
+	if _, err := c.do(ctx, http.MethodGet, path, nil, -1, "", &list); err != nil {
+		return DeploymentList{}, err
+	}
+	return list, nil
+}
+
+// DeploymentLogs calls GET /v1/deployments/{id}/logs. kind is "run" or
+// "build" ("" = run); tail 0 uses the server default (500, at most 2000).
+func (c *Client) DeploymentLogs(ctx context.Context, id, kind string, tail int) (DeploymentLogLines, error) {
+	q := url.Values{}
+	if kind != "" {
+		q.Set("kind", kind)
+	}
+	if tail > 0 {
+		q.Set("tail", strconv.Itoa(tail))
+	}
+	path := "/v1/deployments/" + url.PathEscape(id) + "/logs"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var out DeploymentLogLines
+	if _, err := c.do(ctx, http.MethodGet, path, nil, -1, "", &out); err != nil {
+		return DeploymentLogLines{}, tooOld(err, "查看某一版的日志")
+	}
+	if out.Lines == nil {
+		out.Lines = []string{}
+	}
+	return out, nil
+}
+
+// Features returns the server's feature list from GET /v1/status (empty
+// for servers older than the list).
+func (c *Client) Features(ctx context.Context) ([]string, error) {
+	st, err := c.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return st.Features, nil
+}
+
+// HasFeature reports whether name is in features.
+func HasFeature(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ServerTooOld is the error for a feature the server does not have; what
+// names the feature in the message.
+func ServerTooOld(what string) *Error {
+	return &Error{Diag: Diagnosis{
+		Stage:   "server",
+		Code:    CodeServerTooOld,
+		Message: "服务器上的 AcornFox 版本较旧，不支持“" + what + "”",
+		Hint:    "先在服务器上升级 AcornFox，再执行这条命令",
+	}}
+}
+
+// tooOld turns the plain 404/405 an older server's router gives for an
+// unknown route into server_too_old. This API's own 404s are JSON errors
+// with a code and pass through unchanged.
+func tooOld(err error, what string) error {
+	var ce *Error
+	if !errors.As(err, &ce) || ce.Diag.Stage != "server" {
+		return err
+	}
+	if (ce.Status == http.StatusNotFound && ce.Diag.Code == "http_404") ||
+		(ce.Status == http.StatusMethodNotAllowed && ce.Diag.Code == "http_405") {
+		e := ServerTooOld(what)
+		e.Status = ce.Status
+		return e
+	}
+	return err
+}
+
+// newRequestKey returns a random Idempotency-Key for one operation.
+func newRequestKey() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce[:]), nil
 }
 
 // Redeploy calls POST /v1/apps/{app}/redeploy and returns the new deployment ID.
@@ -643,4 +778,58 @@ func (c *Client) LANConsoleEnable(ctx context.Context, reset bool) (LANConsoleSt
 func (c *Client) LANConsoleDisable(ctx context.Context) error {
 	_, err := c.do(ctx, http.MethodDelete, "/v1/lan-console", nil, -1, "", nil)
 	return err
+}
+
+// ---- runtime setup ----
+
+// SetupAPI is the optional capability for the runtime setup (find or install
+// Docker, prepare the gateway, self checks); *Client implements it.
+type SetupAPI interface {
+	SetupStatus(ctx context.Context) (setup.Status, error)
+	SetupStart(ctx context.Context, opts setup.StartOptions) (setup.Status, error)
+	SetupResume(ctx context.Context) (setup.Status, error)
+	SetupPause(ctx context.Context) (bool, error)
+	SetupEvents(ctx context.Context, since int64, waitSeconds int) ([]setup.Event, bool, error)
+}
+
+var _ SetupAPI = (*Client)(nil)
+
+// SetupStatus calls GET /v1/setup.
+func (c *Client) SetupStatus(ctx context.Context) (setup.Status, error) {
+	var st setup.Status
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/setup", nil, &st)
+	return st, err
+}
+
+// SetupStart calls POST /v1/setup/start.
+func (c *Client) SetupStart(ctx context.Context, opts setup.StartOptions) (setup.Status, error) {
+	var st setup.Status
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/setup/start", opts, &st)
+	return st, err
+}
+
+// SetupResume calls POST /v1/setup/resume.
+func (c *Client) SetupResume(ctx context.Context) (setup.Status, error) {
+	var st setup.Status
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/setup/resume", nil, &st)
+	return st, err
+}
+
+// SetupPause calls POST /v1/setup/pause.
+func (c *Client) SetupPause(ctx context.Context) (bool, error) {
+	var out struct {
+		Paused bool `json:"paused"`
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/setup/pause", nil, &out)
+	return out.Paused, err
+}
+
+// SetupEvents calls GET /v1/setup/events?since=&wait=.
+func (c *Client) SetupEvents(ctx context.Context, since int64, waitSeconds int) ([]setup.Event, bool, error) {
+	var out struct {
+		Events []setup.Event `json:"events"`
+		Resync bool          `json:"resync"`
+	}
+	_, err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/setup/events?since=%d&wait=%d", since, waitSeconds), nil, &out)
+	return out.Events, out.Resync, err
 }

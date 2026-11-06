@@ -133,16 +133,25 @@ type BuildRequest struct {
 // BuildResponse: OK=false means the build itself failed (user error); the
 // runner then returns HTTP 200 with a classified Failure. Transport or Docker
 // daemon problems are returned as ErrorResponse instead.
+//
+// Log is the build output (successful or not): its last BuildLogMaxBytes,
+// ANSI codes removed, starting at a line boundary and prefixed with a
+// "（前面 N KB 已省略）" line when the beginning was cut. It is empty when no
+// build ran (the image already existed, or the upload was rejected).
 type BuildResponse struct {
 	OK      bool       `json:"ok"`
 	Image   *ImageInfo `json:"image,omitempty"`
 	Failure *Failure   `json:"failure,omitempty"`
+	Log     string     `json:"log,omitempty"`
 }
+
+// BuildLogMaxBytes bounds BuildResponse.Log (the kept build output).
+const BuildLogMaxBytes = 512 << 10
 
 // Failure mirrors state.Diagnosis without importing it.
 type Failure struct {
 	Stage      string `json:"stage"`
-	Code       string `json:"code"` // upload_invalid | dockerfile_missing | build_failed | dependency_missing | registry_timeout | base_image_not_found | pull_timeout | image_not_found | pull_failed
+	Code       string `json:"code"` // upload_invalid | context_too_large | dockerfile_missing | build_failed | dependency_missing | registry_timeout | base_image_not_found | pull_timeout | image_not_found | pull_failed
 	Message    string `json:"message"`
 	LogExcerpt string `json:"log_excerpt,omitempty"` // <= 40 lines, ANSI and step noise removed
 	Hint       string `json:"hint,omitempty"`
@@ -240,7 +249,7 @@ type ContainerListResponse struct {
 type LogsRequest struct {
 	App  string `json:"app"`
 	Name string `json:"name"`
-	Tail int    `json:"tail"` // 1..1000, default 40
+	Tail int    `json:"tail"` // 1..MaxLogLines, default 100
 }
 
 type LogsResponse struct {
@@ -310,6 +319,12 @@ var (
 	ErrNotFound    = errors.New("runner: not found")
 	ErrStopped     = errors.New("runner: container stopped")
 	ErrUnavailable = errors.New("runner: unavailable")
+	// ErrResponseTooLarge: the runner's reply exceeded the client's bound for
+	// that route. Retrying will not help; the caller should fail the operation.
+	ErrResponseTooLarge = errors.New("runner: response too large")
+	// ErrUnsupported: the runner does not implement an optional capability
+	// (an older runner, or an API implementation without it).
+	ErrUnsupported = errors.New("runner: unsupported")
 )
 
 // RemoteError is an ErrorResponse returned by the runner.
@@ -321,3 +336,6 @@ type RemoteError struct {
 func (e *RemoteError) Error() string {
 	return fmt.Sprintf("runner %d %s: %s", e.Status, e.Code, e.Message)
 }
+
+// MaxLogLines is the most lines Logs and LogBatch return in one call.
+const MaxLogLines = 1000

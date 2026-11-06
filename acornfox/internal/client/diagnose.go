@@ -65,7 +65,7 @@ func connectMessage(code string) (message, hint string) {
 	case codeServerDown:
 		return "acornfox 服务未运行", "在服务器上执行 `systemctl status acornfox-server`"
 	case codeLocalDown:
-		return "连不上本机的 acornfox 服务", "运行 `acornfox doctor` 检查；Mac、Windows 上运行 `acornfox install` 会重新启动它，Linux 服务器上执行 `systemctl status acornfox-server`"
+		return "连不上本机的 acornfox 服务", "Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机运行 AcornFox 服务还没发布，请把 AcornFox 装到 Linux 服务器上，再用 `acornfox target add 名字 --ssh 用户@地址` 连接"
 	case codeVersionMismatch:
 		return "CLI 与服务器 API 版本不兼容", "升级 CLI 或服务器"
 	case codeForwardingOff:

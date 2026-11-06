@@ -101,3 +101,34 @@ func (a *app) dial(ctx context.Context, t client.Target) (client.API, error) {
 	}
 	return a.connect(ctx, t)
 }
+
+// resolveAppArg resolves the target and app for commands that take an
+// optional APP argument (rollback, redeploy, versions, logs). At most one
+// positional is allowed; when --app is also given they must name the same
+// app, so `rollback web` never acts on the app of the current directory.
+func (a *app) resolveAppArg(cmd string, pos []string) (resolution, error) {
+	if len(pos) > 1 {
+		return resolution{}, fmt.Errorf("%s 最多接受一个应用名，收到 %d 个：%v", cmd, len(pos), pos)
+	}
+	t, name, err := a.resolveTarget()
+	if err != nil {
+		return resolution{}, err
+	}
+	if len(pos) == 0 {
+		appName, explicit, err := a.resolveApp()
+		if err != nil {
+			return resolution{}, err
+		}
+		return resolution{target: t, targetName: name, app: appName, appExplicit: explicit}, nil
+	}
+	appName, ok := normalizeAppName(pos[0])
+	if !ok {
+		return resolution{}, fmt.Errorf("应用名 %q 不合法；只能用小写字母、数字和连字符", pos[0])
+	}
+	if a.flagApp != "" {
+		if flagName, fok := normalizeAppName(a.flagApp); !fok || flagName != appName {
+			return resolution{}, fmt.Errorf("应用名 %s 和 --app %s 不一致，只用其中一个", pos[0], a.flagApp)
+		}
+	}
+	return resolution{target: t, targetName: name, app: appName, appExplicit: true}, nil
+}

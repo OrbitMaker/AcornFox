@@ -31,20 +31,18 @@ func (s *server) createDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A JSON body selects an image or git source; the default is a tar.gz upload.
-	if isJSONDeploy(r) {
-		s.createDeploymentJSON(w, r, app)
+	// Parse optional port / health_path before touching the store so a bad
+	// value fails fast without side effects. Every source takes them.
+	q, ok := parseDeployQuery(w, r)
+	if !ok {
 		return
 	}
 
-	// Parse optional port / health_path before touching the store so a bad
-	// value fails fast without side effects.
-	port, hasPort, perr := parsePort(r.URL.Query().Get("port"))
-	if perr != nil {
-		writeError(w, http.StatusBadRequest, "invalid_port", perr.Error())
+	// A JSON body selects an image or git source; the default is a tar.gz upload.
+	if isJSONDeploy(r) {
+		s.createDeploymentJSON(w, r, app, q)
 		return
 	}
-	healthPath := r.URL.Query().Get("health_path")
 
 	// A new app takes the default limits, which must fit under the memory cap.
 	s.resMu.Lock()
@@ -59,19 +57,8 @@ func (s *server) createDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if hasPort || healthPath != "" {
-		if _, err := s.store.UpdateApp(ctx, app, func(a *state.App) error {
-			if hasPort {
-				a.Port = port
-			}
-			if healthPath != "" {
-				a.HealthPath = healthPath
-			}
-			return nil
-		}); err != nil {
-			s.mapStoreError(w, err)
-			return
-		}
+	if !s.applyDeployQuery(w, r, app, q) {
+		return
 	}
 
 	// Stream to a temp file with a size cap and running sha256.
@@ -171,55 +158,6 @@ func (s *server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, deploymentView(dep))
 }
 
-// rollback implements POST /v1/apps/{app}/rollback: create a new image-source
-// deployment from the most recent retired deployment that still has an ImageID.
-func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	app := r.PathValue("app")
-	if !state.ValidAppName(app) {
-		writeError(w, http.StatusBadRequest, "invalid_app", "应用名不合法")
-		return
-	}
-	if _, err := s.store.GetApp(ctx, app); err != nil {
-		s.mapStoreError(w, err)
-		return
-	}
-
-	deps, err := s.store.ListDeployments(ctx, app, 100)
-	if err != nil {
-		s.mapStoreError(w, err)
-		return
-	}
-	var target *state.Deployment
-	for i := range deps {
-		d := deps[i]
-		if d.Status == state.StatusRetired && d.ImageID != "" {
-			target = &deps[i]
-			break // newest first, so the first match is the most recent
-		}
-	}
-	if target == nil {
-		writeError(w, http.StatusConflict, "no_rollback_target", "没有可回退的历史版本")
-		return
-	}
-
-	dep, _, err := s.store.CreateDeployment(ctx, state.NewDeployment{
-		App:          app,
-		SourceKind:   state.SourceImage,
-		SourceRef:    target.ImageID,
-		SourceDigest: target.ImageID,
-		BasedOnSeq:   target.Seq,
-		OriginKind:   originKind(*target),
-		Reason:       state.ReasonRollback,
-	})
-	if err != nil {
-		s.mapStoreError(w, err)
-		return
-	}
-	s.kicker.Kick(app)
-	writeJSON(w, http.StatusAccepted, deploymentView(dep))
-}
-
 // redeploy implements POST /v1/apps/{app}/redeploy: recreate the live
 // deployment using its current image, bypassing deduplication.
 func (s *server) redeploy(w http.ResponseWriter, r *http.Request) {
@@ -302,14 +240,22 @@ func (s *server) getDeployment(w http.ResponseWriter, r *http.Request) {
 		events = []state.Event{}
 	}
 
+	view := deploymentView(dep)
+	if a, err := s.store.GetApp(ctx, dep.App); err == nil {
+		view = s.newDeploymentViewer(ctx, a, []state.Deployment{dep}, true).view(dep)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"deployment": deploymentView(dep),
+		"deployment": view,
 		"events":     events,
 	})
 }
 
 // listDeployments implements GET /v1/apps/{app}/deployments?limit=N: the
 // version history, newest first. limit is clamped to 1..100 (default 20).
+// Each record carries the display texts, duration, logs and rollback facts;
+// the reply also has rollback_target_seq (where a rollback without a version
+// goes) and image_check ("ok", or "unknown" when the runner could not list
+// the images on this machine and only the kept window was applied).
 func (s *server) listDeployments(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	app := r.PathValue("app")
@@ -326,7 +272,8 @@ func (s *server) listDeployments(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = v
 	}
-	if _, err := s.store.GetApp(ctx, app); err != nil {
+	a, err := s.store.GetApp(ctx, app)
+	if err != nil {
 		s.mapStoreError(w, err)
 		return
 	}
@@ -335,13 +282,54 @@ func (s *server) listDeployments(w http.ResponseWriter, r *http.Request) {
 		s.mapStoreError(w, err)
 		return
 	}
-	if deps == nil {
-		deps = []state.Deployment{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"deployments": deps})
+	v := s.newDeploymentViewer(ctx, a, deps, true)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deployments":         v.views(deps),
+		"rollback_target_seq": v.plan.TargetSeq,
+		"image_check":         v.imageCheck,
+	})
 }
 
 // parsePort validates the optional ?port= query parameter.
+// deployQuery holds the optional query parameters of a deploy request.
+type deployQuery struct {
+	port       int
+	hasPort    bool
+	healthPath string
+}
+
+// parseDeployQuery reads port / health_path; on a bad value it writes 400 and
+// returns false.
+func parseDeployQuery(w http.ResponseWriter, r *http.Request) (deployQuery, bool) {
+	port, hasPort, err := parsePort(r.URL.Query().Get("port"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_port", err.Error())
+		return deployQuery{}, false
+	}
+	return deployQuery{port: port, hasPort: hasPort, healthPath: r.URL.Query().Get("health_path")}, true
+}
+
+// applyDeployQuery stores port / health_path on the app (which must exist).
+// On a store error it writes the response and returns false.
+func (s *server) applyDeployQuery(w http.ResponseWriter, r *http.Request, app string, q deployQuery) bool {
+	if !q.hasPort && q.healthPath == "" {
+		return true
+	}
+	if _, err := s.store.UpdateApp(r.Context(), app, func(a *state.App) error {
+		if q.hasPort {
+			a.Port = q.port
+		}
+		if q.healthPath != "" {
+			a.HealthPath = q.healthPath
+		}
+		return nil
+	}); err != nil {
+		s.mapStoreError(w, err)
+		return false
+	}
+	return true
+}
+
 func parsePort(raw string) (port int, ok bool, err error) {
 	if raw == "" {
 		return 0, false, nil

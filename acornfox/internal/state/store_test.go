@@ -405,9 +405,11 @@ func TestKeptImageDeployments(t *testing.T) {
 	ctx := context.Background()
 	s.EnsureApp(ctx, "web")
 
-	// Build a chain: 5 successful versions promoted one after another.
+	// Build a chain of KeepVersions+2 successful versions promoted one after
+	// another: the live one, KeepVersions kept and the oldest to collect.
+	n := KeepVersions + 2
 	var ids []string
-	for i := 0; i < 5; i++ {
+	for i := 0; i < n; i++ {
 		d, _, _ := s.CreateDeployment(ctx, NewDeployment{App: "web", SourceKind: SourceUpload, SourceRef: "/u", SourceDigest: string(rune('a' + i))})
 		s.UpdateDeployment(ctx, d.ID, func(dep *Deployment) error {
 			dep.Status = StatusStarting
@@ -422,7 +424,7 @@ func TestKeptImageDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("KeptImageDeployments: %v", err)
 	}
-	// live (last) + KeepVersions(3) retired = 4.
+	// live (last) + KeepVersions retired.
 	if len(kept) != 1+KeepVersions {
 		t.Fatalf("kept = %d, want %d", len(kept), 1+KeepVersions)
 	}
@@ -430,16 +432,18 @@ func TestKeptImageDeployments(t *testing.T) {
 	for _, d := range kept {
 		keptSet[d.ID] = true
 	}
-	// The oldest retired deployment must be eligible for GC (not kept):
-	// retired = {d0,d1,d2,d3}, keep newest 3 (d3,d2,d1) + live d4.
+	// The oldest retired deployment must be eligible for GC (not kept);
+	// the KeepVersions newest retired ones are kept.
 	if keptSet[ids[0]] {
 		t.Errorf("oldest deployment should not be kept: %v", keptSet)
 	}
-	if !keptSet[ids[1]] || !keptSet[ids[2]] || !keptSet[ids[3]] {
-		t.Errorf("three newest retired must be kept: %v", keptSet)
+	for _, id := range ids[1 : n-1] {
+		if !keptSet[id] {
+			t.Errorf("newest %d retired must be kept: %s missing from %v", KeepVersions, id, keptSet)
+		}
 	}
 	// The live one must be kept.
-	if !keptSet[ids[4]] {
+	if !keptSet[ids[n-1]] {
 		t.Errorf("live deployment must be kept")
 	}
 }

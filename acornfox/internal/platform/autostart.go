@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -260,13 +261,35 @@ func WindowsTaskXML(e AutostartEntry, user string) string {
 `
 }
 
-func installTask(e AutostartEntry) error {
-	user := Env("USERNAME")
-	if d := Env("USERDOMAIN"); d != "" && user != "" {
-		user = d + `\` + user
+// currentUser is os/user.Current; tests override it.
+var currentUser = osuser.Current
+
+// windowsTaskUser names the account the logon task runs as. The SID works on
+// every machine; DOMAIN\name does not when USERDOMAIN is "WORKGROUP" (an SSH
+// session on a workgroup machine: schtasks then fails with "No mapping
+// between account names and security IDs").
+func windowsTaskUser() (string, error) {
+	if u, err := currentUser(); err == nil && strings.HasPrefix(u.Uid, "S-1-") {
+		return u.Uid, nil
 	}
-	if user == "" {
-		return errors.New("取不到当前 Windows 用户名（USERNAME）")
+	name := Env("USERNAME")
+	if name == "" {
+		return "", errors.New("取不到当前 Windows 用户名（USERNAME）")
+	}
+	domain := Env("USERDOMAIN")
+	if domain == "" || strings.EqualFold(domain, "WORKGROUP") {
+		domain = Env("COMPUTERNAME")
+	}
+	if domain == "" {
+		return name, nil
+	}
+	return domain + `\` + name, nil
+}
+
+func installTask(e AutostartEntry) error {
+	user, err := windowsTaskUser()
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(e.LogFile), 0o700); err != nil {
 		return err

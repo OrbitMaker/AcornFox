@@ -54,14 +54,14 @@ func (d *Docker) LogBatch(ctx context.Context, app, name string, tail int, since
 	if tail <= 0 {
 		tail = 100
 	}
-	if tail > 1000 {
-		tail = 1000
+	if tail > MaxLogLines {
+		tail = MaxLogLines
 	}
 	// Count the complete timestamp boundary before trimming the initial tail.
 	// Docker timestamps alone are not unique: starting from a suffix must not
 	// replay earlier records sharing its last timestamp on the next poll.
 	tailArg := "all"
-	rc, err := d.cli.ContainerLogs(ctx, c.ID, client.ContainerLogsOptions{
+	rc, err := d.c().ContainerLogs(ctx, c.ID, client.ContainerLogsOptions{
 		ShowStdout: true, ShowStderr: true, Timestamps: true, Tail: tailArg, Since: since,
 	})
 	if err != nil {

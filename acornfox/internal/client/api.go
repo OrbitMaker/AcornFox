@@ -62,7 +62,70 @@ type Deployment struct {
 	Warnings   []Diagnosis `json:"warnings,omitempty"`
 	CreatedAt  time.Time   `json:"created_at"`
 	FinishedAt *time.Time  `json:"finished_at,omitempty"`
+
+	// Display texts and rollback facts computed by the server (features
+	// rollback_to, deploy_logs, deploy_timing); zero from older servers.
+	StatusText      string         `json:"status_text,omitempty"`
+	SourceText      string         `json:"source_text,omitempty"`
+	DurationSeconds *int           `json:"duration_seconds,omitempty"`
+	CanRollback     bool           `json:"can_rollback,omitempty"`
+	RollbackBlocked string         `json:"rollback_blocked,omitempty"`
+	SameImageAs     int            `json:"same_image_as,omitempty"`
+	RollbackText    string         `json:"rollback_text,omitempty"`
+	FailureText     string         `json:"failure_text,omitempty"`
+	Logs            DeploymentLogs `json:"logs"`
 }
+
+// DeploymentLogs says which logs of a deployment can be read.
+type DeploymentLogs struct {
+	Build bool `json:"build"`
+	Run   bool `json:"run"`
+}
+
+// DeploymentList mirrors GET /v1/apps/{app}/deployments.
+type DeploymentList struct {
+	Deployments       []Deployment `json:"deployments"`
+	RollbackTargetSeq int          `json:"rollback_target_seq"` // where a rollback without a version goes; 0 = none
+	ImageCheck        string       `json:"image_check"`         // "ok", or "unknown" when the server could not list its images
+}
+
+// RollbackOptions select the version (0 = the newest one that can be rolled
+// back to) and whether an in-progress deployment may be cancelled.
+type RollbackOptions struct {
+	ToSeq         int
+	CancelPending bool
+}
+
+// RollbackResult is the rollback reply. Created is false when the server
+// returned a deployment it had already created for the same request.
+type RollbackResult struct {
+	Deployment    Deployment
+	Created       bool
+	TargetSeq     int // the version rolled back to
+	SupersededSeq int // the in-progress version that will be cancelled, 0 = none
+}
+
+// DeploymentLogLines mirrors GET /v1/deployments/{id}/logs.
+type DeploymentLogLines struct {
+	DeploymentID string   `json:"deployment_id"`
+	Version      int      `json:"version"`
+	Kind         string   `json:"kind"` // run | build
+	Lines        []string `json:"lines"`
+	Truncated    bool     `json:"truncated"`
+	Source       string   `json:"source"` // live | archive
+}
+
+// Server features (GET /v1/status "features") a newer CLI checks before
+// using them, so an older server is reported instead of misbehaving.
+const (
+	FeatureRollbackTo   = "rollback_to"
+	FeatureDeployLogs   = "deploy_logs"
+	FeatureDeployTiming = "deploy_timing"
+)
+
+// CodeServerTooOld is the client error code for a route the server does not
+// have yet (a plain 404/405 that is not this API's JSON error).
+const CodeServerTooOld = "server_too_old"
 
 type Event struct {
 	ID      int64     `json:"id"`
@@ -97,6 +160,8 @@ type App struct {
 	Exposure          string      `json:"exposure,omitempty"`
 	ObservedState     string      `json:"observed_state"`
 	Live              *Deployment `json:"live,omitempty"`
+	Latest            *Deployment `json:"latest,omitempty"`
+	RollbackTargetSeq int         `json:"rollback_target_seq,omitempty"`
 	Env               []EnvKey    `json:"env,omitempty"`
 	Volumes           []Volume    `json:"volumes,omitempty"`
 	Domains           []Domain    `json:"domains,omitempty"`
@@ -107,6 +172,8 @@ type Status struct {
 	Runner        string `json:"runner"`
 	DockerVersion string `json:"docker_version"`
 	Apps          int    `json:"apps"`
+	// Features lists capabilities added after api_version 1 (Feature*).
+	Features []string `json:"features,omitempty"`
 }
 
 // DeployOptions select the source (exactly one of Upload, Image, Git) and
@@ -173,10 +240,13 @@ type ResourceCaps struct {
 
 // API is what internal/cli depends on. Connect returns a *Client implementing it.
 type API interface {
-	Status(ctx context.Context) (Status, error)                                          // also verifies APIVersion (connect/version_mismatch)
-	Deploy(ctx context.Context, app string, opt DeployOptions) (Deployment, bool, error) // bool = newly created (false = duplicate)
-	Rollback(ctx context.Context, app string) (Deployment, error)
-	Redeploy(ctx context.Context, app string) (string, error) // N4.4: POST /v1/apps/{app}/redeploy, returns deployment_id
+	Status(ctx context.Context) (Status, error)                                                // also verifies APIVersion (connect/version_mismatch)
+	Deploy(ctx context.Context, app string, opt DeployOptions) (Deployment, bool, error)       // bool = newly created (false = duplicate)
+	Rollback(ctx context.Context, app string, opts RollbackOptions) (RollbackResult, error)    // ToSeq 0: POST /v1/apps/{app}/rollback; else POST /v1/apps/{app}/versions/{seq}/rollback
+	ListDeployments(ctx context.Context, app string, limit int) (DeploymentList, error)        // GET /v1/apps/{app}/deployments?limit=N
+	DeploymentLogs(ctx context.Context, id, kind string, tail int) (DeploymentLogLines, error) // GET /v1/deployments/{id}/logs?kind=&tail=
+	Features(ctx context.Context) ([]string, error)                                            // GET /v1/status "features"
+	Redeploy(ctx context.Context, app string) (string, error)                                  // N4.4: POST /v1/apps/{app}/redeploy, returns deployment_id
 	Deployment(ctx context.Context, id string, afterEvent int64) (Deployment, []Event, error)
 	Apps(ctx context.Context) ([]App, error)
 	App(ctx context.Context, app string) (App, error)

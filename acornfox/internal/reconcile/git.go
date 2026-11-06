@@ -93,12 +93,14 @@ var (
 
 // buildGitTarball clones the git source of d into <UploadDir>/<id>-src, packs
 // it as <UploadDir>/<id>.tar.gz, removes the source tree, and returns the
-// tarball path. On a user-visible failure it returns a stage=source diagnosis
-// (diag non-nil); on a transient/internal problem it returns a plain error.
-func (r *Reconciler) buildGitTarball(ctx context.Context, d *state.Deployment) (tarball string, diag *state.Diagnosis, err error) {
+// tarball path. output is git's combined output (clone, then checkout), kept
+// on success too for the build log. On a user-visible failure it returns a
+// stage=source diagnosis (diag non-nil); on a transient/internal problem it
+// returns a plain error.
+func (r *Reconciler) buildGitTarball(ctx context.Context, d *state.Deployment) (tarball, output string, diag *state.Diagnosis, err error) {
 	url, ref := splitGitRef(d.SourceRef)
 	if url == "" {
-		return "", &state.Diagnosis{
+		return "", "", &state.Diagnosis{
 			Stage: "source", Code: "clone_failed",
 			Message: "Git 地址为空",
 			Hint:    "请提供有效的 https Git 仓库地址",
@@ -119,13 +121,14 @@ func (r *Reconciler) buildGitTarball(ctx context.Context, d *state.Deployment) (
 
 	out, cerr := git.Clone(cctx, url, ref, srcDir)
 	if cerr != nil {
-		return "", classifyGitClone(cctx, cerr, out), nil
+		return "", out, classifyGitClone(cctx, cerr, out), nil
 	}
 	// A full commit hash needs an explicit checkout after the shallow clone.
 	if ref != "" && commitHashPattern.MatchString(ref) {
 		co, coerr := git.Checkout(cctx, srcDir, ref)
+		out = joinOutput(out, co)
 		if coerr != nil {
-			return "", classifyGitCheckout(cctx, coerr, co), nil
+			return "", out, classifyGitCheckout(cctx, coerr, co), nil
 		}
 	}
 
@@ -133,15 +136,27 @@ func (r *Reconciler) buildGitTarball(ctx context.Context, d *state.Deployment) (
 	if perr := packDirToTarGz(srcDir, tarPath); perr != nil {
 		_ = os.Remove(tarPath)
 		if errors.Is(perr, errTarTooLarge) {
-			return "", &state.Diagnosis{
+			return "", out, &state.Diagnosis{
 				Stage: "source", Code: "clone_failed",
 				Message: "仓库内容超过 200 MB 上限",
 				Hint:    "请精简仓库或改用 acornfox deploy 上传本地目录",
 			}, nil
 		}
-		return "", nil, fmt.Errorf("pack git clone: %w", perr)
+		return "", out, nil, fmt.Errorf("pack git clone: %w", perr)
 	}
-	return tarPath, nil, nil
+	return tarPath, out, nil, nil
+}
+
+// joinOutput concatenates two command outputs, one per line.
+func joinOutput(a, b string) string {
+	a = strings.TrimRight(a, "\n")
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + "\n" + b
 }
 
 // classifyGitClone maps a clone error and its output to a stage=source diagnosis.

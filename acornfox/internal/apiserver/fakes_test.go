@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -400,6 +401,12 @@ type fakeRunner struct {
 	updates   []runner.UpdateResourcesRequest
 	updateErr error
 	stats     map[string]runner.StatsResponse // keyed by container name
+
+	// Images on this machine per app (rollback checks). A nil map makes
+	// ListImages fail, so tests that do not care get "unknown" (the kept
+	// window alone decides), as with an unreachable runner.
+	images    map[string][]runner.ImageInfo
+	imagesErr error
 }
 
 func newFakeRunner() *fakeRunner {
@@ -728,4 +735,133 @@ func (r fakeResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr
 		return nil, r.err
 	}
 	return r.addrs[host], nil
+}
+
+// -------- rollback and durations (fake) --------
+
+// CreateRollbackDeployment follows state.Store's order on the in-memory
+// rows: request key, ClassifyRollback, a pending rollback to the same image,
+// then deploy_in_progress. Tests that need the exact transaction use the real
+// store (rollback_test.go).
+func (f *fakeStore) CreateRollbackDeployment(_ context.Context, req state.RollbackRequest) (state.RollbackResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.apps[req.App]
+	if !ok {
+		return state.RollbackResult{}, state.ErrNotFound
+	}
+	if req.ToSeq < 0 {
+		return state.RollbackResult{}, state.ErrInvalid
+	}
+	var deps []state.Deployment
+	for _, id := range f.order {
+		if d := f.deployments[id]; d.App == req.App {
+			deps = append(deps, *d)
+		}
+	}
+	if req.RequestKey != "" {
+		for _, d := range deps {
+			if d.RequestKey == req.RequestKey && (state.IsPending(d.Status) || d.Status == state.StatusLive) {
+				return state.RollbackResult{Deployment: d, TargetSeq: d.BasedOnSeq}, nil
+			}
+		}
+	}
+	plan := state.ClassifyRollback(deps, a.CurrentDeployment, req.Present)
+	liveSeq := 0
+	var alts []int
+	var pending *state.Deployment
+	bySeq := map[int]state.Deployment{}
+	for i, d := range deps {
+		bySeq[d.Seq] = d
+		if d.ID == a.CurrentDeployment {
+			liveSeq = d.Seq
+		}
+		if plan.ByID[d.ID].CanRollback {
+			alts = append([]int{d.Seq}, alts...)
+		}
+		if state.IsPending(d.Status) {
+			pending = &deps[i]
+		}
+	}
+	refuse := func(code string, seq int) error {
+		return &state.RollbackError{Code: code, Seq: seq, LiveSeq: liveSeq, Alternatives: alts}
+	}
+	to := req.ToSeq
+	if to == 0 {
+		if plan.TargetSeq == 0 {
+			return state.RollbackResult{}, refuse(state.RollbackNoTarget, 0)
+		}
+		to = plan.TargetSeq
+	}
+	target, ok := bySeq[to]
+	if !ok {
+		return state.RollbackResult{}, refuse(state.RollbackVersionNotFound, to)
+	}
+	switch plan.ByID[target.ID].Blocked {
+	case "", state.BlockedOlderDuplicate:
+	case state.BlockedLive:
+		return state.RollbackResult{}, refuse(state.RollbackVersionIsLive, to)
+	case state.BlockedSameAsLive:
+		return state.RollbackResult{}, refuse(state.RollbackVersionSameAsLive, to)
+	case state.BlockedImageGone:
+		return state.RollbackResult{}, refuse(state.RollbackVersionImageGone, to)
+	default:
+		return state.RollbackResult{}, refuse(state.RollbackVersionNotRollbackable, to)
+	}
+	res := state.RollbackResult{TargetSeq: target.Seq}
+	if pending != nil {
+		if pending.SourceDigest == target.ImageID {
+			return state.RollbackResult{Deployment: *pending, TargetSeq: pending.BasedOnSeq}, nil
+		}
+		if !req.CancelPending {
+			return state.RollbackResult{}, refuse(state.RollbackDeployInProgress, pending.Seq)
+		}
+		res.SupersededSeq = pending.Seq
+	}
+	origin := target.OriginKind
+	if origin == "" {
+		origin = target.SourceKind
+	}
+	f.seq[req.App]++
+	now := time.Now().UTC()
+	d := &state.Deployment{
+		ID: randID(), App: req.App, Seq: f.seq[req.App],
+		SourceKind: state.SourceImage, SourceRef: target.ImageID, SourceDigest: target.ImageID,
+		RequestKey: req.RequestKey, Status: state.StatusQueued, CreatedAt: now, UpdatedAt: now,
+		BasedOnSeq: target.Seq, OriginKind: origin, Reason: state.ReasonRollback,
+	}
+	f.deployments[d.ID] = d
+	f.order = append(f.order, d.ID)
+	res.Deployment, res.Created = *d, true
+	return res, nil
+}
+
+// LiveTimes returns the first "已上线" deploy event of each deployment.
+func (f *fakeStore) LiveTimes(_ context.Context, ids []string) (map[string]time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]time.Time{}
+	for _, id := range ids {
+		for _, e := range f.events[id] {
+			if e.Stage != "deploy" || !strings.HasPrefix(e.Message, "已上线") {
+				continue
+			}
+			if at, ok := out[id]; !ok || e.At.Before(at) {
+				out[id] = e.At
+			}
+		}
+	}
+	return out, nil
+}
+
+// ListImages returns the images set for app, or imagesErr (errRunnerDown
+// while no images map is set).
+func (r *fakeRunner) ListImages(_ context.Context, app string) ([]runner.ImageInfo, error) {
+	if r.imagesErr != nil {
+		return nil, r.imagesErr
+	}
+	if r.images == nil {
+		return nil, errRunnerDown
+	}
+	return r.images[app], nil
 }

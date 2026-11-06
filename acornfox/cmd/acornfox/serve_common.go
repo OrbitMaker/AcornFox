@@ -17,10 +17,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/acornfox/acornfox/internal/apiserver"
 	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/publicconsole"
 	"github.com/acornfox/acornfox/internal/reconcile"
 	"github.com/acornfox/acornfox/internal/runner"
@@ -66,6 +68,12 @@ type serverOptions struct {
 	LANHost         func() string          // nil => PublicHost
 	HostMetrics     apiserver.HostProvider // nil => /proc (Linux)
 	LANConsolePort  int                    // 0 => publicconsole.DefaultLANPort
+
+	// Setup wires the runtime setup (setup_wiring.go); nil => no /v1/setup.
+	Setup *setupDeps
+	// LANRelay lets acornfox serve relay <LAN>:P to the edge when Docker
+	// cannot bind the LAN address (lanforward.go). Desktop only.
+	LANRelay bool
 }
 
 // readOrCreateToken returns the hex token stored at path, creating it (0600)
@@ -151,8 +159,17 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		router = publicconsole.WrapRouter(router, pcStore, o.PublicListen)
 	}
 
+	// Old-version logs are a convenience: when the directory cannot be
+	// opened the server still runs, it just keeps no history.
+	deployLogs, err := deploylog.Open(filepath.Join(o.DataDir, "logs", "deployments"))
+	if err != nil {
+		fmt.Fprintln(stderr, "deployment logs disabled:", err)
+		deployLogs = nil
+	}
+
 	rec := reconcile.New(reconcile.Config{
 		Store:           st,
+		DeployLogs:      deployLogs,
 		Runner:          runnerAPI,
 		Router:          router,
 		UploadDir:       uploadDir,
@@ -175,11 +192,30 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		UploadDir:       uploadDir,
 		PublicHost:      o.PublicHost,
 		DataDir:         o.DataDir,
+		DeployLogs:      deployLogs,
 		HostMetrics:     o.HostMetrics,
 		DefaultExposure: o.DefaultExposure,
 	}
+	var relay *lanForwarder
+	if o.LANRelay && o.LANHost != nil && edge != nil && o.EdgeMode == runner.EdgeModeBridge {
+		relay = &lanForwarder{lanHost: o.LANHost, active: rec.LANUnbindable,
+			portMin: o.PublicPortMin, portMax: o.PublicPortMax, offset: reconcile.LANPortOffset,
+			logf: func(f string, a ...any) {
+				fmt.Fprintf(stdout, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(f, a...))
+			}}
+		go relay.Run(ctx)
+	}
 	if o.LANHost != nil {
-		apiCfg.LANHost = o.LANHost
+		// When Docker could not bind the LAN address, apps have a LAN address
+		// only while the relay listens on it.
+		raw := o.LANHost
+		apiCfg.LANHost = func() string {
+			h := raw()
+			if rec.LANUnbindable(h) && (relay == nil || !relay.Serving(h)) {
+				return ""
+			}
+			return h
+		}
 	}
 	if edge != nil {
 		apiCfg.EdgeStatus = rec.EdgeStatus
@@ -203,6 +239,23 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		apiCfg.PublicConsole = pcManager
 	}
 
+	var lanRef atomic.Pointer[publicconsole.LANManager]
+	if o.Setup != nil {
+		deps := *o.Setup
+		deps.Options = o
+		deps.Relay = relay
+		deps.LANEnabled = func() bool {
+			lan := lanRef.Load()
+			if lan == nil {
+				return false
+			}
+			st, err := lan.Status(context.Background())
+			return err == nil && st.Enabled
+		}
+		mgr := newSetupManager(deps, rec)
+		apiCfg.Setup = mgr
+		go mgr.Boot()
+	}
 	// The console handler shares the same dependencies plus the embedded
 	// assets; the LAN console gateway wraps it.
 	consoleCfg := apiCfg
@@ -217,6 +270,7 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		Host:     lanHost,
 	})
 	apiCfg.LANConsole = lan
+	lanRef.Store(lan)
 	trustedHandler := apiserver.New(apiCfg)
 	defer lan.Close()
 	if err := lan.Apply(); err != nil {
