@@ -1178,9 +1178,17 @@ install_caddy() {
         github_download "${official}/${name}" "${AFX_WORK}/${name}" \
             || error_exit "下载 Caddy 失败；可设置 ACORNFOX_GITHUB_PROXY 指定可用的 GitHub 加速地址后重试"
     fi
-    # 校验文件只有几 KB，优先取 Caddy 官方的，与镜像上的安装包互相独立；取不到再用镜像副本
+    # 校验值：当前版本 Caddy 官方发布的 SHA-512 直接写在脚本里（来自官方 caddy_${CADDY_VERSION}_checksums.txt，
+    # 与安装包的下载来源无关），不用联网取校验文件，国内也就不用连 GitHub。换 Caddy 版本时要一起更新。
     name="caddy_${CADDY_VERSION}_checksums.txt"
-    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${AFX_WORK}/${name}" "${official}/${name}"; then
+    case "${CADDY_VERSION}_${ARCH}" in
+        2.8.4_amd64) printf '%s  caddy_2.8.4_linux_amd64.tar.gz\n' "b8bec15d14fb033562af9f207850027bcbaa1f891edc9efe00d38bf39e1bf9944f8b6b8eba041ddd4c171cd70c905174c704d705be2f23bc678fe1eaf37a2485" > "${AFX_WORK}/${name}" ;;
+        2.8.4_arm64) printf '%s  caddy_2.8.4_linux_arm64.tar.gz\n' "5466234be3e988071cef937aedbdd94c15b6f75cf7307397e67c2641219ac9bfe2c2bb3b31fc05bc68d3b6398bbe50abfa16ccf3b127318ccac31115ad26507c" > "${AFX_WORK}/${name}" ;;
+    esac
+    # 没有写死的版本：校验文件只有几 KB，优先取 Caddy 官方的，与镜像上的安装包互相独立；取不到再用镜像副本
+    if [ -s "${AFX_WORK}/${name}" ]; then
+        :
+    elif ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${AFX_WORK}/${name}" "${official}/${name}"; then
         if [ -n "$caddy_tag" ] && curl -fsSL --connect-timeout 10 --max-time 60 -o "${AFX_WORK}/${name}" "${mirror}/${name}"; then
             log_warn "Caddy 官方校验文件取不到，改用 Gitee 镜像上的副本"
         else

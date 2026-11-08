@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"strings"
 	"time"
 
@@ -509,16 +511,33 @@ func (a *app) cmdRestart(ctx context.Context, args []string) int {
 	return exitOK
 }
 
-// cmdDelete implements `delete [--volumes]`.
+const deleteUsage = `用法：acornfox delete [应用名] [--volumes]
+
+用途：删除一个应用：停掉并删掉它的容器、网络和记录。不写应用名时，用 --app 或当前目录对应的应用。
+  默认保留数据卷；加 --volumes 连数据一起删，不能恢复。
+副作用：会删数据，执行前必须得到用户明确同意。
+例子：
+  acornfox delete web
+  acornfox delete web --volumes
+  acornfox --json delete web`
+
+// cmdDelete implements `delete [app] [--volumes]`.
 func (a *app) cmdDelete(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
 	fs.SetOutput(a.out.stderr)
+	fs.Usage = func() { fmt.Fprintln(a.out.stdout, deleteUsage) }
 	deleteVolumes := fs.Bool("volumes", false, "同时删除数据卷（默认保留）")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
 		return exitUsage
 	}
-
-	res, err := a.resolveTargetAndApp()
+	// The app named on the command line wins; without one it is --app or the
+	// current directory's app. A name used to be ignored here, so
+	// "delete web" in a directory called "api" deleted api.
+	res, err := a.resolveAppArg("delete", pos)
 	if err != nil {
 		return a.out.usageError("%s", err.Error())
 	}
