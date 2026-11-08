@@ -764,6 +764,9 @@ func (r *Reconciler) doStart(ctx context.Context, app state.App, d *state.Deploy
 		Mounts:       mounts,
 		MemoryMB:     memMB,
 		CPUMilli:     cpu,
+		Command:      app.Command,
+		PidsLimit:    app.PidsLimit,
+		Links:        app.Links,
 	})
 	if err != nil {
 		name := runner.ContainerName(app.Name, d.ID)
@@ -1079,6 +1082,9 @@ func (r *Reconciler) recreateLive(ctx context.Context, app state.App) {
 		Mounts:       mounts,
 		MemoryMB:     memMB,
 		CPUMilli:     cpu,
+		Command:      app.Command,
+		PidsLimit:    app.PidsLimit,
+		Links:        app.Links,
 	}); err != nil {
 		r.log.Error("recreate live", "app", app.Name, "err", err)
 		return

@@ -8,24 +8,30 @@
 # 确认规则: 在终端里直接运行（sudo bash upgrade.sh）会问一次“确认升级”；通过管道运行
 # （curl … | sudo bash，包括 AI 工作台代为执行）时没法问，运行这条命令就视为同意，
 # 开头先打印将要做的事。-y 在两种方式下都跳过询问。已是最新版本时，管道运行直接退出
-# 不重装，要重装同一版本加 -y；目标版本比当前旧时，管道运行不降级（v0.4.0 及以后的
-# 版本之间要降级加 -y）。已是 v0.4.0 或更新的版本时，不论有没有 -y 都不降级到 v0.4.0
-# 以前的版本（旧版本读不了新数据库）；刚升级完想回去用 --rollback。
-# 升级前自动备份，可用 --rollback 回滚（管道写法: … | sudo bash -s -- --rollback）；
-# 最近一次备份的位置记在 /var/lib/acornfox/backups/.last，重启后也能回滚。
-# --rollback 只回到比当前版本旧的备份；最近一次备份就是当前版本时（例如上次升级或降级
-# 没成功、已自动回到原版本），跳过它再往前找，找不到就报错退出，不会报“回滚完成”。
+# 不重装，要重装同一版本加 -y。
 #
-# 应用会不会断：升级、回滚都不停应用容器。从 v0.3.x 升级（以及回滚到 v0.3.x）时，网关
-# Caddy 在宿主机和容器之间切换，应用网址会断几秒（实测 2.5～3 秒）；v0.4.0 起的版本之间
-# 升级一般不断，新版本换了网关镜像或设置、要重建网关容器时也会断几秒。
+# 只能升级，不能回到旧版本：要装的版本比当前旧时一律拒绝（加 -y 也一样），--rollback 也拒绝，
+# 都在停服务之前，什么都不改。应用自己的版本回退（acornfox rollback 应用名）和这里无关，照常可用。
+# 升级前自动备份程序和数据库到 /var/lib/acornfox/backups（保留最近 5 份）。数据库迁移失败、
+# 新版本的服务起不来、或者升级中途意外出错时，脚本用这份备份自动恢复到升级前：程序和数据库
+# 都换回原来的，等于没升上。
+#
+# 应用会不会断：升级不停应用容器。从 v0.3.x 升级时，网关 Caddy 从宿主机换到容器，应用网址
+# 会断几秒（实测 2.5～3 秒；升级没成功、恢复到升级前时换回宿主机，也会断几秒）；v0.4.0 起的
+# 版本之间升级一般不断，新版本换了网关镜像或设置、要重建网关容器时也会断几秒。
 #
 # 故障编号（与 install.sh 共用，脚本停下时打印“故障编号: XXX”）:
 #   INSTALL-PORT-01  AcornFox 自己要用的本机端口（18800、18801、18808）被别的程序占用
 #   INSTALL-CLOUD-01 ACORNFOX_CLOUD_OVERRIDE 的值不认识
-#   UPGRADE-DOWN-01  要装的版本读不了当前数据库（降级到 v0.4.0 以前，或试跑迁移失败），
-#                    没停服务、没改动任何东西；要回到升级前的版本用 --rollback
-#   UPGRADE-ROLLBACK-01 --rollback 找不到比当前版本旧的备份，没有回滚，什么都没改
+#   UPGRADE-DOWN-01  要装的版本比当前旧（降级），不支持；没停服务、没改动任何东西
+#   UPGRADE-ROLLBACK-01 用了 --rollback：不支持回到旧版本；没停服务、没改动任何东西
+#   UPGRADE-BACKUP-01 停服务后备份程序或数据库失败，没有升级；已重新启动原来的服务
+#   UPGRADE-FAIL-01  新版本的数据库迁移失败，已自动恢复到升级前
+#   UPGRADE-FAIL-02  新版本的服务起不来，已自动恢复到升级前
+#   UPGRADE-FAIL-03  升级中途意外出错（或被中断），已自动恢复到升级前
+#   UPGRADE-RESTORE-01 恢复到升级前时文件没能换回去，或换回去之后服务还是起不来，要人看日志处理
+#
+# 兜底和恢复的过程另记一份到 /var/log/acornfox-upgrade.log（SSH 断开时只写在这里）。
 
 set -euo pipefail
 
@@ -33,8 +39,87 @@ set -euo pipefail
 # 同名文件时，root 也写不进去（fs.protected_regular）。目录设成 0755，迁移时 acornfox 用户要能运行它。
 AFX_WORK=$(mktemp -d /tmp/acornfox-upgrade.XXXXXX)
 chmod 0755 "$AFX_WORK"
-trap 'rm -rf "$AFX_WORK"' EXIT
 NEW_BIN="$AFX_WORK/acornfox.new"
+
+# 升级进行到哪一步，退出时据此兜底（见 on_exit）：
+#   空        还没停服务，或者已经处理完（成功，或已恢复到升级前）
+#   stopped   服务已停、备份还没做完：意外退出时重新启动原来的服务
+#   changing  备份已做完、新版本还没确认起来：意外退出时用备份恢复到升级前
+UPGRADE_PHASE=""
+
+# 兜底和恢复的输出另记一份到这个文件（只追加）。SSH 断开、输出接给的程序先退出时终端写不进去，
+# 那时只写这个文件；事后用 sudo tail -n 40 /var/log/acornfox-upgrade.log 看自动处理的结果。
+UPGRADE_LOG="/var/log/acornfox-upgrade.log"
+UPGRADE_HUP=false
+RESTORE_LOGGING=false
+RESTORE_TEE_PID=""
+
+# restore_log_start：开始兜底或恢复时调用一次（重复调用不再处理）。关掉 set -e、屏蔽 Ctrl+C、
+# kill、SSH 断开和写管道失败的信号，保证恢复不会被打断、也不会因为一句提示写不出去就停下；
+# 屏蔽的信号会传给之后启动的 cp、systemctl 等，它们也不会被打断。
+# 输出：终端还写得进去时同时写终端和 UPGRADE_LOG（tee -p：一边写不进去不影响另一边）；
+# 收到过 SSH 断开（HUP）或终端已写不进去时只写 UPGRADE_LOG。日志文件建不了时照常输出到终端。
+restore_log_start() {
+    set +e
+    trap '' INT TERM HUP PIPE
+    $RESTORE_LOGGING && return 0
+    RESTORE_LOGGING=true
+    if ( : >>"$UPGRADE_LOG" ) 2>/dev/null; then
+        chmod 600 "$UPGRADE_LOG" 2>/dev/null
+        if ! $UPGRADE_HUP && { echo ""; } 2>/dev/null && command -v tee >/dev/null 2>&1; then
+            exec > >(tee -p -a "$UPGRADE_LOG") 2>&1
+            RESTORE_TEE_PID=$!
+        else
+            exec >>"$UPGRADE_LOG" 2>&1
+        fi
+    fi
+    echo "==== $(date '+%F %T') AcornFox 升级没完成，开始自动处理（这一步不响应 Ctrl+C，请等它结束）===="
+}
+
+# restore_log_finish：退出前等日志写完（tee 在后台写，脚本先退出时最后几行可能还没进文件）
+restore_log_finish() {
+    [ -n "$RESTORE_TEE_PID" ] || return 0
+    exec >&- 2>&-
+    wait "$RESTORE_TEE_PID" 2>/dev/null
+    return 0
+}
+
+# on_exit：删临时目录；升级中途意外退出（set -e 碰到的错误、Ctrl+C、kill、SSH 断开、输出写不进去）
+# 时兜底，不让服务停在半路。明确处理过的失败（迁移失败、服务起不来）会先把 UPGRADE_PHASE 清空。
+on_exit() {
+    local code=$? phase="$UPGRADE_PHASE"
+    # 第一句就关掉 set -e：陷阱里任何一条命令失败（例如往已断开的终端写提示）都不能让兜底停在半路
+    set +e
+    UPGRADE_PHASE=""
+    # 先删临时目录：下面的 fault_exit 会直接退出
+    rm -rf "$AFX_WORK"
+    if [ "$code" != 0 ] && [ -n "$phase" ]; then
+        restore_log_start
+        case "$phase" in
+            stopped)
+                log_error "备份时中途出错或被中断（退出码 ${code}），没有升级，重新启动原来的服务..."
+                systemctl start acornfox-runner
+                sleep 2
+                systemctl start acornfox-server
+                fault_exit UPGRADE-BACKUP-01 "备份没做完，没有升级（程序和数据库都没改）" \
+                    "原来的服务已重新启动：现在 acornfox-server $(systemctl is-active acornfox-server)，acornfox-runner $(systemctl is-active acornfox-runner)。" \
+                    "上面几行是出错原因，常见的是磁盘满了（df -h /var/lib/acornfox）或备份目录 /var/lib/acornfox/backups 写不进去。处理后重新运行升级命令。"
+                ;;
+            changing)
+                log_error "升级中途出错或被中断（退出码 ${code}），开始恢复到升级前..."
+                restore_backup "$BACKUP_PATH"
+                upgrade_failed UPGRADE-FAIL-03 "升级中途出错或被中断"
+                ;;
+        esac
+    fi
+}
+trap on_exit EXIT
+# Ctrl+C、kill、SSH 断开时也走 on_exit。输出接给的程序先退出（写管道失败）时也一样：
+# 不设这一条，bash 会被 SIGPIPE 直接杀掉，EXIT 陷阱不跑
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'UPGRADE_HUP=true; exit 129' HUP
+trap 'exit 141' PIPE
 
 # 用 $'...' 存真实的转义字符，摘要里的 cat << EOF 才不会原样打印 \033；
 # 输出不是终端（管道、日志文件）时不加颜色。
@@ -63,6 +148,10 @@ fault_exit() {
         echo "    $line"
     done
     echo "故障编号: ${code}"
+    if $RESTORE_LOGGING && [ -f "$UPGRADE_LOG" ]; then
+        echo "这段记录也写在 ${UPGRADE_LOG}（终端断开时只写在这里）"
+    fi
+    restore_log_finish
     exit 1
 }
 
@@ -89,15 +178,14 @@ curl_get() {
 
 # 与 server --data-dir 默认值一致
 DB_PATH="/var/lib/acornfox/acornfox.db"
-# 升级备份目录；最近一次备份的路径同时记在 /tmp/acornfox_last_backup（手动指定备份时写这里，
-# 优先用）和备份目录下的 .last（重启后 /tmp 被清掉也还在）。.last 是隐藏文件，不算进“保留 5 份”
+# 升级备份目录：升级没成功时用本次的备份自动恢复到升级前。最近一次备份的路径记在备份目录下的
+# .last（隐藏文件，不算进“保留 5 份”），结束提示里显示
 BACKUP_DIR="/var/lib/acornfox/backups"
-LAST_BACKUP_TMP="/tmp/acornfox_last_backup"
 LAST_BACKUP_FILE="${BACKUP_DIR}/.last"
 ASSUME_YES=false
 TARGET_VERSION="latest"
 LOCAL_BINARY=""
-DO_ROLLBACK=false
+WANT_ROLLBACK=false
 
 show_help() {
     cat << EOF
@@ -109,29 +197,38 @@ AcornFox 升级脚本（Linux 服务器）
     curl -fsSL <上面任一地址> | sudo bash -s -- [选项]
     sudo bash upgrade.sh [选项]
 
+用途:
+    把这台服务器上的 AcornFox 服务端升级到新版本。
+
 确认:
     在终端里直接运行时会问一次“确认升级”。通过管道运行（curl … | sudo bash，
     包括 AI 工作台代为执行）时没法询问，运行这条命令就视为同意，开头先打印将要做的事。
     已是最新版本时，管道运行直接退出不重装；要重装同一版本加 -y。
-    刚升级完想回到升级前的版本，用 --rollback（不要用 --version 指定旧版本）。
-    目标版本比当前版本旧时，管道运行不会降级；v0.4.0 及以后的版本之间要降级加 -y，
-    降级前会先在数据库副本上试跑旧程序的迁移，不通过就停下，不停服务。
-    当前已是 v0.4.0 或更新的版本时，不论有没有 -y 都不会降级到 v0.4.0 以前的版本：
-    旧版本读不了新数据库，降级一定失败。
 
-升级做的事:
-    下载并校验新版本 → 停服务 → 备份程序和数据库到 /var/lib/acornfox/backups →
-    数据库迁移 → 换程序 → 启动服务（失败自动回滚）。运行中的应用容器不停。
-    从 v0.3.x 升级（或回滚到 v0.3.x）时，网关 Caddy 在宿主机和容器之间切换，应用网址
-    会断几秒；v0.4.0 起的版本之间升级一般不断，要重建网关容器时也会断几秒。
+只能升级:
+    AcornFox 只能升级，不能回到旧版本。--version 指定比当前旧的版本会被拒绝（加 -y 也一样），
+    也没有 --rollback；这两种情况都在停服务之前停下，什么都不改。
+    升级没成功时脚本会自动恢复到升级前（见下面“升级做的事”），不需要手动处理。
+    应用自己的版本可以用 acornfox rollback 应用名 回退，和这里无关。
+
+升级做的事（副作用）:
+    下载并校验新版本 → 停 AcornFox 服务 → 备份程序和数据库到 /var/lib/acornfox/backups
+    （保留最近 5 份）→ 数据库迁移 → 换上新程序 /usr/local/bin/acornfox → 启动服务。
+    数据库迁移失败、新版本的服务起不来、或者中途出错时，用这份备份自动恢复到升级前：
+    程序和数据库都换回原来的，等于没升上。运行中的应用容器不停。升级期间命令行和控制台
+    暂时连不上。从 v0.3.x 升级时，网关 Caddy 从宿主机换到容器，应用网址会断几秒；
+    v0.4.0 起的版本之间升级一般不断，要重建网关容器时也会断几秒。
+
+例子:
+    curl -fsSL ${SCRIPT_URL_GITEE}/upgrade.sh | sudo bash -s -- --version v0.5.0
+        升级到指定版本（必须比现在的版本新）
+    sudo bash upgrade.sh --binary ./acornfox -y
+        用本地的程序升级，不下载（测试候选版本用）
 
 选项:
     -y, --yes          不询问，直接升级（同一版本也重装）
-    --version V        升级到指定版本（默认 latest）
+    --version V        升级到指定版本（默认 latest）；比当前旧的版本会被拒绝
     --binary PATH      使用本地 acornfox 二进制文件，不下载（用于测试候选版本）
-    --rollback         回滚到最近一次升级前的备份（依次看 /tmp/acornfox_last_backup、
-                       /var/lib/acornfox/backups/.last、从新到旧的备份目录，跳过不比
-                       当前版本旧的备份；一份都没有就报错退出）
     -h, --help         显示此帮助信息
 
 环境变量:
@@ -150,7 +247,7 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             -y|--yes) ASSUME_YES=true; shift ;;
-            --rollback) DO_ROLLBACK=true; shift ;;
+            --rollback) WANT_ROLLBACK=true; shift ;;
             --version)
                 [[ $# -ge 2 ]] || error_exit "--version 需要一个版本号"
                 TARGET_VERSION="$2"; shift 2 ;;
@@ -158,7 +255,7 @@ parse_args() {
                 [[ $# -ge 2 ]] || error_exit "--binary 需要一个本地文件路径"
                 LOCAL_BINARY="$2"; shift 2 ;;
             -h|--help) show_help; exit 0 ;;
-            *) error_exit "未知参数: $1（可用：-y、--version V、--binary PATH、--rollback、--help）" ;;
+            *) error_exit "未知参数: $1（可用：-y、--version V、--binary PATH、--help）" ;;
         esac
     done
 }
@@ -474,64 +571,42 @@ version_older() {
     fi
 }
 
-# downgrade_unsupported 目标版本：当前版本不早于 SCRIPT_MIN_VERSION、目标早于它时返回 0。
-# 这时数据库里已有 v0.4.0 起新增的迁移（例如 0008_resource_limits），更早的程序打开数据库时
-# 报 unknown applied migration，降级一定失败；交给旧版本的 upgrade.sh 去做，它失败后还会把
-# 当前版本的备份记进 /tmp/acornfox_last_backup。所以不论终端、管道、有没有 -y 都拒绝。
-# 0.4.0-dev.N 这类预发布版按 version_lt 算作不早于 v0.4.0（它们已经带了新迁移）。
-downgrade_unsupported() {
-    local t="$1" c="${CURRENT_VERSION:-}"
-    case "$c" in ""|unknown) return 1 ;; esac
-    case "$t" in ""|unknown|latest) return 1 ;; esac
-    version_lt "$c" "$SCRIPT_MIN_VERSION" && return 1
-    version_lt "$t" "$SCRIPT_MIN_VERSION"
+# current_version_now：现在装着的程序的版本号；读不出来时输出“未知”
+current_version_now() {
+    local v
+    v=$(/usr/local/bin/acornfox version 2>/dev/null | awk '{print $2}' || true)
+    echo "${v:-未知}"
 }
 
-# refuse_downgrade 目标版本 [原因]：降级做不了，带故障编号停下（还没停服务、没改动任何东西）
+# refuse_rollback：只能升级，不支持 --rollback。在停服务、改动任何东西之前停下
+refuse_rollback() {
+    fault_exit UPGRADE-ROLLBACK-01 "AcornFox 只能升级，不能回到旧版本，没有 --rollback。服务没有停，什么都没改。" \
+        "现在的版本: $(current_version_now)" \
+        "升级没成功时（数据库迁移失败、新版本的服务起不来），脚本当时已经自动恢复到升级前，不需要再做什么。" \
+        "升级后发现问题：等有更新的版本时重新运行升级命令；或者把问题和 acornfox doctor 的输出反馈给维护者。" \
+        "应用自己的版本可以回退，不受影响：acornfox versions 应用名 看有哪些版本，acornfox rollback 应用名 回到上一版。"
+}
+
+# refuse_downgrade 目标版本：只能升级，要装的版本比当前旧时带故障编号停下（还没停服务、没改动任何东西）
 refuse_downgrade() {
-    local t="$1" why="${2:-数据库已经按新版本升级过，${1} 读不了（它的数据库迁移一定失败）}"
-    rm -f "$NEW_BIN"
-    fault_exit UPGRADE-DOWN-01 "当前是 ${CURRENT_VERSION}，不能降级到 ${t}：${why}" \
-        "刚升级完想回到升级前的版本，用 --rollback（恢复升级前备份的程序和数据库）：" \
-        "  把刚才这条命令末尾的 | sudo bash（或 | sudo bash -s -- …）改成 | sudo bash -s -- --rollback" \
-        "  文件方式运行时: sudo bash upgrade.sh --rollback" \
-        "加 -y 也不会降级到 ${SCRIPT_MIN_VERSION} 以前的版本。服务没有停，什么都没改。"
-}
-
-# migrate_dry_run：在数据库副本上试跑新程序的迁移，不动正在用的数据库。
-# 降级时在停服务之前用：要装的程序不认识数据库里的迁移时，这里就会失败。失败时返回 1，
-# 并把最后几行报错打印出来
-migrate_dry_run() {
-    local d rc=0 out f
-    d=$(mktemp -d)
-    for f in "$DB_PATH" "$DB_PATH-wal"; do
-        if [ -f "$f" ]; then
-            cp -p "$f" "$d/" || { rm -rf "$d"; return 1; }
-        fi
-    done
-    out=$("$NEW_BIN" migrate --data-dir "$d" 2>&1) || rc=$?
-    rm -rf "$d"
-    [ "$rc" = 0 ] && return 0
-    printf '%s\n' "$out" | tail -n 3 | sed 's/^/    /'
-    return 1
-}
-
-# check_downgrade 新版本：在下载（或 --binary）之后、停服务之前检查降级能不能做。
-# 降级到 v0.4.0 以前一律拒绝；v0.4.0 起的版本之间降级，先在数据库副本上试跑迁移，不通过就拒绝
-check_downgrade() {
     local t="$1"
-    version_older "$t" "$CURRENT_VERSION" || return 0
-    downgrade_unsupported "$t" && refuse_downgrade "$t"
-    log_info "要装的 ${t} 比当前 ${CURRENT_VERSION} 旧，先在数据库副本上试跑它的迁移..."
-    if ! migrate_dry_run; then
-        refuse_downgrade "$t" "${t} 读不了当前的数据库（在数据库副本上试跑迁移失败，见上面的报错）"
+    rm -f "$NEW_BIN"
+    fault_exit UPGRADE-DOWN-01 "当前是 ${CURRENT_VERSION}，要装的 ${t} 比它旧。AcornFox 只能升级，不能降级（加 -y 也一样）。服务没有停，什么都没改。" \
+        "要升级到最新版：去掉 --version 重新运行升级命令。指定版本时，要写比 ${CURRENT_VERSION} 新的版本。" \
+        "应用自己的版本可以回退，不受影响：acornfox rollback 应用名。"
+}
+
+# check_downgrade 新版本：在下载（或 --binary）之后、停服务之前，按程序自己报的版本号再查一次：
+# 比当前旧就拒绝（--binary 只能在这里查）
+check_downgrade() {
+    if version_older "$1" "$CURRENT_VERSION"; then
+        refuse_downgrade "$1"
     fi
-    log_success "${t} 能读当前的数据库，继续降级"
+    return 0
 }
 
 # pipe_version_gate 目标版本：管道运行、没带 -y 时，在下载和停服务之前先比版本号。
-# 版本相同直接退出（不白停一次服务）；目标更旧时不在管道里不经询问就降级。
-# 当前版本是同一版本号的预发布版（如 0.4.0-dev.3）时，正式版 0.4.0 算更新。
+# 版本相同直接退出（不白停一次服务）。比当前旧的情况在 main 里已经处理。
 pipe_version_gate() {
     local t="${1#v}" c="${CURRENT_VERSION#v}"
     case "$c" in ""|unknown) return 0 ;; esac
@@ -539,15 +614,7 @@ pipe_version_gate() {
         log_success "已是最新版本 ${CURRENT_VERSION}，不用升级（要重装同一版本，加 -y 重新运行）"
         exit 0
     fi
-    version_older "$1" "$CURRENT_VERSION" || return 0
-    if $TARGET_IS_LATEST; then
-        log_success "当前版本 ${CURRENT_VERSION} 不比最新发行版 ${1} 旧，不用升级"
-        exit 0
-    fi
-    log_error "要装的 ${1} 早于当前版本 ${CURRENT_VERSION}，通过管道运行时不会自动降级"
-    echo "    刚升级完想回到升级前的版本，用 --rollback：把刚才这条命令末尾改成 | sudo bash -s -- --rollback"
-    echo "    确实要装更旧的 ${1}，加 -y 重新运行（降级前会先在数据库副本上试跑它的迁移，不通过就停下，不停服务）"
-    exit 1
+    return 0
 }
 
 # show_plan：开头说明升级会做什么
@@ -558,7 +625,7 @@ show_plan() {
   2. 停止 acornfox-server、acornfox-runner（应用容器不停。从 v0.3.x 升级时网关 Caddy 从宿主机
      换到容器，应用网址会断几秒；v0.4.0 起的版本之间一般不断，要重建网关容器时也会断几秒）
   3. 备份程序和数据库到 /var/lib/acornfox/backups，执行数据库迁移，换上新程序
-  4. 启动服务；启动失败自动回滚到升级前的版本
+  4. 启动服务；数据库迁移失败或新版本的服务起不来时，自动恢复到升级前（等于没升上）
 EOF
     if $PIPE_CONSENT; then
         echo "通过管道运行，没法询问，视为已同意升级（在终端里直接运行 sudo bash upgrade.sh 会先询问）。"
@@ -751,6 +818,7 @@ backup_current() {
     log_info "创建备份..."
     mkdir -p "$BACKUP_PATH"
 
+    # 备份失败时程序和数据库都还没动：由 on_exit（UPGRADE_PHASE=stopped）重新启动原来的服务
     # 备份二进制文件
     cp /usr/local/bin/acornfox "${BACKUP_PATH}/acornfox.bin" || error_exit "备份二进制文件失败"
 
@@ -768,20 +836,17 @@ backup_current() {
     echo "$CURRENT_VERSION" > "${BACKUP_PATH}/version.txt"
 
     log_success "备份完成: $BACKUP_PATH"
-    echo "$BACKUP_PATH" > "$LAST_BACKUP_TMP"
     echo "$BACKUP_PATH" > "$LAST_BACKUP_FILE"
 }
 
-# last_backup：最近一次升级备份的目录；依次看 /tmp 记录、备份目录下的 .last、最新的备份目录。
-# 都没有时输出空
+# last_backup：最近一次升级备份的目录；先看备份目录下的 .last，再看最新的备份目录。都没有时输出空
 last_backup() {
     local b
-    for b in "$(cat "$LAST_BACKUP_TMP" 2>/dev/null || true)" "$(cat "$LAST_BACKUP_FILE" 2>/dev/null || true)"; do
-        if [ -n "$b" ] && [ -d "$b" ]; then
-            echo "$b"
-            return 0
-        fi
-    done
+    b=$(cat "$LAST_BACKUP_FILE" 2>/dev/null || true)
+    if [ -n "$b" ] && [ -d "$b" ]; then
+        echo "$b"
+        return 0
+    fi
     b=$(ls -1td "$BACKUP_DIR"/*/ 2>/dev/null | head -1 || true)
     [ -n "$b" ] && echo "${b%/}"
     return 0
@@ -971,7 +1036,7 @@ build_caddy_image() {
 
 # migrate_host_caddy：把 v0.3.x 装在宿主机上的 Caddy 换成容器。证书和 ACME 账号复制到
 # 数据卷 acornfox-caddy-data（宿主机上的原文件保留），停用并禁止 caddy.service 开机启动，
-# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated 供 upgrade.sh --rollback 恢复。
+# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated；升级没成功、恢复到升级前时据此换回宿主机 Caddy。
 migrate_host_caddy() {
     [ -f /etc/systemd/system/caddy.service ] || [ -f /lib/systemd/system/caddy.service ] || return 0
     systemctl is-enabled --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy 2>/dev/null || return 0
@@ -987,7 +1052,7 @@ migrate_host_caddy() {
     systemctl disable --now caddy >/dev/null 2>&1 || true
     mkdir -p /var/lib/acornfox
     date -u +%FT%TZ > /var/lib/acornfox/.caddy-host-migrated
-    log_success "宿主机 Caddy 已停用（回滚时会恢复），之后由容器 acornfox-caddy 接管 80、443 和应用端口"
+    log_success "宿主机 Caddy 已停用（升级没成功时会换回来），之后由容器 acornfox-caddy 接管 80、443 和应用端口"
 }
 
 # wait_caddy_container：等 acornfox 建好 Caddy 容器、管理网关应答（没有令牌时返回 403）
@@ -1006,7 +1071,7 @@ wait_caddy_container() {
 }
 
 # prepare_caddy_container：升级前准备 Caddy 容器要用的镜像，并迁移宿主机 Caddy。
-# 迁移标记同时写进本次备份目录，--rollback 据此恢复宿主机 Caddy。
+# 迁移标记同时写进本次备份目录，升级没成功、恢复到升级前时据此换回宿主机 Caddy。
 prepare_caddy_container() {
     if ! docker image inspect "acornfox/caddy:${CADDY_VERSION}" >/dev/null 2>&1; then
         if [ -x /usr/bin/caddy ] && /usr/bin/caddy version 2>/dev/null | grep -q "^v${CADDY_VERSION}"; then
@@ -1026,7 +1091,7 @@ prepare_caddy_container() {
     fi
 }
 
-# restore_host_caddy BACKUP：回滚到 v0.3.x 时删掉 Caddy 容器、恢复宿主机 Caddy
+# restore_host_caddy BACKUP：从 v0.3.x 升级没成功、恢复到升级前时，删掉 Caddy 容器、换回宿主机 Caddy
 restore_host_caddy() {
     local backup="$1"
     [ -f "$backup/caddy-host-migrated" ] || return 0
@@ -1042,113 +1107,121 @@ restore_host_caddy() {
     log_success "宿主机 Caddy 已恢复（数据卷 acornfox-caddy-data 保留，可手动删除）"
 }
 
+# 数据目录里记下这份数据库最后是哪个版本的程序迁移过的（与 install.sh 中的同名变量和函数一致）。
+# 只在升级成功后写：升级没成功、恢复到升级前时数据库是原来的，文件里也还是原来的版本。
+# 卸载保留数据后 install.sh 据此拒绝装更旧的版本
+INSTALLED_VERSION_FILE="/var/lib/acornfox/installed-version"
+record_installed_version() {
+    local v
+    v=$({ /usr/local/bin/acornfox version 2>/dev/null || true; } | awk '{print $2}')
+    [ -n "$v" ] || return 0
+    if echo "$v" > "${INSTALLED_VERSION_FILE}.tmp" && mv -f "${INSTALLED_VERSION_FILE}.tmp" "$INSTALLED_VERSION_FILE"; then
+        chmod 644 "$INSTALLED_VERSION_FILE" || true
+    else
+        log_warn "没能写入 ${INSTALLED_VERSION_FILE}（不影响使用）"
+    fi
+    return 0
+}
+
 # backup_version 目录：备份时记下的版本（version.txt 第一行）；没有记录时输出空
 backup_version() {
     head -n 1 "$1/version.txt" 2>/dev/null || true
 }
 
-# pick_rollback_backup 当前版本：选 --rollback 要回到的备份，输出目录；一份都选不出时输出空。
-# 候选依次是 /tmp/acornfox_last_backup、备份目录下的 .last、从新到旧的备份目录。
-# 跳过不比当前版本旧的备份：它们是当前版本（或更新版本）时做的，例如一次没成功、已自动回到
-# 原版本的升级或降级留下的（v0.3.x 的 upgrade.sh 降级失败时也会把这种备份写进 /tmp 的记录）；
-# 用它“回滚”只会停一次服务、把数据库倒回去，版本不变。当前版本或备份版本判断不了时不跳过。
-pick_rollback_backup() {
-    local cur="$1" b v seen=" "
-    while IFS= read -r b; do
-        b="${b%/}"
-        if [ -z "$b" ] || [ ! -d "$b" ]; then
-            continue
-        fi
-        case "$seen" in *" ${b} "*) continue ;; esac
-        seen="${seen}${b} "
-        v=$(backup_version "$b")
-        case "${cur}|${v}" in
-            "|"*|unknown"|"*|*"|"|*"|unknown") echo "$b"; return 0 ;;
-        esac
-        if version_older "$v" "$cur"; then
-            echo "$b"
-            return 0
-        fi
-        log_info "跳过备份 ${b}：它是 ${v} 时做的，不比当前版本 ${cur} 旧" >&2
-    done < <(
-        cat "$LAST_BACKUP_TMP" 2>/dev/null || true
-        echo
-        cat "$LAST_BACKUP_FILE" 2>/dev/null || true
-        echo
-        ls -1td "$BACKUP_DIR"/*/ 2>/dev/null || true
-    )
-    return 0
+# restore_file 源 目标 属主 权限：先拷到目标旁边的临时文件、设好属主和权限，再一步换上（mv 是原子的），
+# 拷到一半出问题时目标还是原来的完整文件，不会留下只拷了一半的程序或数据库。失败返回 1
+restore_file() {
+    local src="$1" dst="$2" owner="$3" mode="$4" tmp="${2}.restore-tmp"
+    rm -f "$tmp"
+    if cp -p "$src" "$tmp" && chown "$owner" "$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$dst"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    log_error "没能把 ${src} 换回 ${dst}"
+    return 1
 }
 
-# 回滚
-# rollback [备份目录]：升级失败时传入本次刚做的备份；--rollback 不传，按 pick_rollback_backup 选
-rollback() {
-    local cur d v list=()
-    log_warn "开始回滚..."
+# restore_backup 备份目录：升级没成功时，用本次升级前刚做的备份恢复到升级前（程序、数据库，以及
+# 从 v0.3.x 升级时换掉的宿主机 Caddy），再启动服务。只在本脚本自己的升级失败时调用，不对外提供
+# （没有 --rollback）。恢复后服务起不来、或者文件没能换回去时报 UPGRADE-RESTORE-01。
+# 恢复过程不能被打断（restore_log_start 屏蔽 Ctrl+C、kill、SSH 断开），每个文件原子替换；
+# 结束时一定以 upgrade_failed 或 fault_exit 退出，所以不用再恢复原来的信号处理。
+restore_backup() {
+    local backup="$1" v f failed=""
+    restore_log_start
+    UPGRADE_PHASE=""
+    if [ -z "$backup" ] || [ ! -d "$backup" ]; then
+        fault_exit UPGRADE-RESTORE-01 "找不到本次升级前的备份（${backup:-没有记录}），没法自动恢复到升级前" \
+            "应用容器没有停，已有的应用一般还能打开；AcornFox 服务可能停着，控制台和命令行暂时用不了。" \
+            "先看日志：journalctl -u acornfox-server -n 50 --no-pager；journalctl -u acornfox-runner -n 50 --no-pager" \
+            "把这段输出和日志反馈给维护者；不要自己删 /var/lib/acornfox 下的任何文件。"
+    fi
+    v=$(backup_version "$backup")
+    log_warn "开始恢复到升级前（${v:-版本未知}），用本次升级前的备份: ${backup}"
 
-    BACKUP_PATH="${1:-}"
-    if [ -z "$BACKUP_PATH" ]; then
-        cur=$(/usr/local/bin/acornfox version 2>/dev/null | awk '{print $2}' || true)
-        BACKUP_PATH=$(pick_rollback_backup "$cur")
-        if [ -z "$BACKUP_PATH" ]; then
-            for d in "$BACKUP_DIR"/*/; do
-                if [ -d "$d" ]; then
-                    v=$(backup_version "$d")
-                    list+=("  ${d%/}（${v:-版本未知}）")
-                fi
-            done
-            [ ${#list[@]} -gt 0 ] || error_exit "找不到备份（${BACKUP_DIR} 下没有备份），无法回滚"
-            fault_exit UPGRADE-ROLLBACK-01 "没有比当前版本 ${cur} 旧的备份，没有回滚（服务没停，什么都没改）" \
-                "现有的备份都是 ${cur} 或更新的版本时做的。常见原因：上次升级或降级没成功、已自动回到原版本；" \
-                "或者已经回滚过一次。这两种情况都已经在原来的版本上，不需要再回滚。" \
-                "刚用 -y 降级过、想回到降级前的版本：不用 --rollback，重新运行升级命令即可。" \
-                "备份目录里有:" "${list[@]}" \
-                "如果确实要把数据库倒回其中某一份的状态（会丢掉之后的改动），先停下来问清楚用户，不要自己动手。"
+    systemctl stop acornfox-server acornfox-runner
+
+    # 恢复程序
+    if [ -f "${backup}/acornfox.bin" ]; then
+        if restore_file "${backup}/acornfox.bin" /usr/local/bin/acornfox root:root 755; then
+            log_success "程序已换回升级前的"
+        else
+            failed="${failed} 程序"
         fi
     fi
-    if [ ! -d "$BACKUP_PATH" ]; then
-        error_exit "备份目录不存在: ${BACKUP_PATH}，无法回滚"
-    fi
-    v=$(backup_version "$BACKUP_PATH")
-    log_info "使用备份: ${BACKUP_PATH}（升级前版本 ${v:-未知}）"
 
-    # 停止服务
-    systemctl stop acornfox-server acornfox-runner || true
-
-    # 恢复二进制文件
-    if [ -f "${BACKUP_PATH}/acornfox.bin" ]; then
-        cp "${BACKUP_PATH}/acornfox.bin" /usr/local/bin/acornfox
-        chmod 755 /usr/local/bin/acornfox
-        log_success "二进制文件已恢复"
-    fi
-
-    # 恢复数据库：先删掉迁移后留下的 WAL，避免旧库叠上新 WAL
-    if [ -f "${BACKUP_PATH}/acornfox.db" ]; then
+    # 恢复数据库：先删掉迁移后留下的 WAL，避免旧库叠上新 WAL；每个文件原子替换
+    if [ -f "${backup}/acornfox.db" ]; then
         rm -f "$DB_PATH-wal" "$DB_PATH-shm"
-        local f
         for f in acornfox.db acornfox.db-wal acornfox.db-shm; do
-            if [ -f "${BACKUP_PATH}/$f" ]; then
-                cp -p "${BACKUP_PATH}/$f" "/var/lib/acornfox/$f"
-                chown acornfox:acornfox "/var/lib/acornfox/$f"
-                chmod 600 "/var/lib/acornfox/$f"
+            if [ -f "${backup}/$f" ]; then
+                restore_file "${backup}/$f" "/var/lib/acornfox/$f" acornfox:acornfox 600 || failed="${failed} $f"
             fi
         done
-        log_success "数据库已恢复"
+        [ -n "$failed" ] || log_success "数据库已换回升级前的"
     fi
 
-    restore_host_caddy "$BACKUP_PATH"
+    if [ -n "$failed" ]; then
+        fault_exit UPGRADE-RESTORE-01 "恢复到升级前时，这些文件没能换回去:${failed}；为了不让新旧文件混着运行，没有启动服务" \
+            "应用容器没有停，已有的应用一般还能打开；控制台和命令行暂时用不了。" \
+            "上面几行是出错原因，常见的是磁盘满了（df -h /var/lib/acornfox /usr/local/bin）。" \
+            "升级前的备份在 ${backup}，不要删。处理好磁盘后把这段输出反馈给维护者；不要自己往回拷贝备份里的文件，也不要重装。"
+    fi
 
-    # 启动服务
+    restore_host_caddy "$backup"
+
     systemctl start acornfox-runner
     sleep 2
     systemctl start acornfox-server
     sleep 3
 
     if systemctl is-active --quiet acornfox-server && systemctl is-active --quiet acornfox-runner; then
-        log_success "回滚完成，服务已恢复，现在的版本: $(/usr/local/bin/acornfox version 2>/dev/null | awk '{print $2}' || echo 未知)"
-    else
-        error_exit "回滚后服务启动失败，请检查日志"
+        log_success "已恢复到升级前，服务照常运行，现在的版本: $(current_version_now)"
+        return 0
     fi
+    fault_exit UPGRADE-RESTORE-01 "已把程序和数据库换回升级前的，但服务还是起不来" \
+        "应用容器没有停，已有的应用一般还能打开；控制台和命令行暂时用不了。" \
+        "先看日志：journalctl -u acornfox-server -n 50 --no-pager；journalctl -u acornfox-runner -n 50 --no-pager" \
+        "升级前的备份在 ${backup}，不要删。" \
+        "把这段输出和日志反馈给维护者；不要自己往回拷贝备份里的文件，也不要重装。"
+}
+
+# show_unit_logs：新版本服务起不来时，先把两个服务最近的日志打出来（恢复之后再看就混在一起了）
+show_unit_logs() {
+    command -v journalctl >/dev/null 2>&1 || return 0
+    local u
+    for u in acornfox-server acornfox-runner; do
+        echo "    ---- ${u} 最近的日志 ----"
+        journalctl -u "$u" -n 8 --no-pager 2>/dev/null | sed 's/^/    /' || true
+    done
+}
+
+# upgrade_failed 编号 原因：已经恢复到升级前之后，带故障编号说明这次没升上
+upgrade_failed() {
+    fault_exit "$1" "${2}，没有升上：已自动恢复到升级前的 ${CURRENT_VERSION}，程序和数据库都是原来的，服务照常运行。" \
+        "应用容器一直在运行，没有受影响。" \
+        "上面几行是失败原因。可以稍后重新运行升级命令再试一次。" \
+        "再次失败时，把这段输出和 journalctl -u acornfox-server -n 50 --no-pager 的结果反馈给维护者。"
 }
 
 # 清理旧备份（保留最近 5 个）
@@ -1180,32 +1253,12 @@ check_apps() {
 # 显示升级摘要
 show_summary() {
     NEW_VERSION=$(/usr/local/bin/acornfox version 2>/dev/null | awk '{print $2}' || echo "unknown")
-    # 回滚命令给照抄用：国内服务器给 Gitee 地址，其他给 GitHub 地址
-    local script_url="$SCRIPT_URL_GITHUB"
-    if ${IN_CHINA:-false} || grep -qx 'ACORNFOX_IN_CHINA=true' /etc/acornfox/install.env 2>/dev/null; then
-        script_url="$SCRIPT_URL_GITEE"
-    fi
 
-    # 标题按实际写：比原版本旧是降级，版本号相同是重装（-y），其余算升级。
-    # --rollback 只回到比当前版本旧的备份，所以降级、重装之后不能用它回到原来的版本
-    local act="升级" back
-    if version_older "$NEW_VERSION" "$CURRENT_VERSION"; then
-        act="降级"
-    elif [ -n "${CURRENT_VERSION#v}" ] && [ "${NEW_VERSION#v}" = "${CURRENT_VERSION#v}" ]; then
+    # 标题按实际写：版本号相同是重装（-y），其余算升级（比当前旧的版本在停服务之前就拒绝了）
+    local act="升级"
+    if [ -n "${CURRENT_VERSION#v}" ] && [ "${NEW_VERSION#v}" = "${CURRENT_VERSION#v}" ]; then
         act="重装"
     fi
-    case "$act" in
-        升级)
-            back="${BLUE}如需回滚（回到升级前的版本）:${NC}
-  ${YELLOW}curl -fsSL ${script_url}/upgrade.sh | sudo bash -s -- --rollback${NC}" ;;
-        降级)
-            back="${BLUE}如需回到降级前的版本:${NC}
-  不要用 --rollback（它只回到比当前版本旧的备份）；重新运行升级命令即可:
-  ${YELLOW}curl -fsSL ${script_url}/upgrade.sh | sudo bash${NC}" ;;
-        *)
-            back="${BLUE}回滚:${NC}
-  版本没有变，不需要回滚。" ;;
-    esac
 
     cat << EOF
 
@@ -1222,10 +1275,11 @@ ${BLUE}服务状态:${NC}
   • acornfox-runner: $(systemctl is-active acornfox-runner)
   • Caddy 容器 acornfox-caddy: $(docker inspect -f '{{.State.Status}}' acornfox-caddy 2>/dev/null || echo 未创建)
 
-${BLUE}备份位置:${NC}
+${BLUE}升级前的备份（升级没成功时自动恢复用，保留最近 5 份）:${NC}
   $(last_backup)
 
-${back}
+${BLUE}说明:${NC}
+  AcornFox 只能升级，不能回到旧版本。应用自己的版本可以用 acornfox rollback 应用名 回退。
 
 ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
 
@@ -1240,10 +1294,9 @@ main() {
 
     parse_args "$@"
 
-    if $DO_ROLLBACK; then
-        check_root
-        rollback
-        exit 0
+    # 只能升级：--rollback 在做任何事之前就拒绝
+    if $WANT_ROLLBACK; then
+        refuse_rollback
     fi
 
     check_root
@@ -1259,8 +1312,13 @@ main() {
             TARGET_VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 使用本地文件"
             log_info "最新版本: $TARGET_VERSION"
         fi
-        # 降级到 v0.4.0 以前一定失败：不论有没有 -y，都在交给旧版本脚本之前拒绝
-        if downgrade_unsupported "$TARGET_VERSION"; then
+        # 只能升级：要装的版本比当前旧时，不论有没有 -y，都在交给旧版本脚本、下载之前停下。
+        # 最新发行版比当前旧（例如装的是还没发布的预发布版）时不算降级请求，直接说不用升级
+        if version_older "$TARGET_VERSION" "$CURRENT_VERSION"; then
+            if $TARGET_IS_LATEST; then
+                log_success "当前版本 ${CURRENT_VERSION} 不比最新发行版 ${TARGET_VERSION} 旧，不用升级"
+                exit 0
+            fi
             refuse_downgrade "$TARGET_VERSION"
         fi
         if $PIPE_CONSENT; then
@@ -1284,15 +1342,18 @@ main() {
     # 停服务前检查端口：本机端口被别的程序占着时新版本起不来，现在停下不影响运行中的服务
     check_ports upgrade
     refresh_install_env_cloud
+    UPGRADE_PHASE=stopped
     stop_services
     backup_current
+    # 从这里起程序、数据库、目录权限、网关都可能被改：意外退出时 on_exit 用备份恢复到升级前
+    UPGRADE_PHASE=changing
     fix_layout
 
     # 尝试执行迁移
     if ! run_migrations; then
-        log_error "迁移失败，开始回滚..."
-        rollback "$BACKUP_PATH"
-        error_exit "升级失败，已回滚到原版本"
+        log_error "新版本的数据库迁移失败，开始恢复到升级前..."
+        restore_backup "$BACKUP_PATH"
+        upgrade_failed UPGRADE-FAIL-01 "新版本 ${NEW_VERSION} 的数据库迁移失败"
     fi
 
     replace_binary
@@ -1300,10 +1361,14 @@ main() {
 
     # 尝试启动服务
     if ! start_services; then
-        log_error "服务启动失败，开始回滚..."
-        rollback "$BACKUP_PATH"
-        error_exit "升级失败，已回滚到原版本"
+        log_error "新版本的服务起不来，开始恢复到升级前..."
+        show_unit_logs
+        restore_backup "$BACKUP_PATH"
+        upgrade_failed UPGRADE-FAIL-02 "新版本 ${NEW_VERSION} 的服务起不来"
     fi
+    # 新版本已经起来：之后的问题（网关容器没就绪等）只提示，不再恢复到升级前
+    UPGRADE_PHASE=""
+    record_installed_version
 
     wait_caddy_container
 

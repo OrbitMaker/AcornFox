@@ -15,8 +15,12 @@ single license expression for mixed material.
   platforms) and the Go standard library;
 - Caddy, attached unmodified to each release (version from
   `scripts/install/install.sh`);
-- the IBM Plex fonts bundled with the web console and the website.
+- the IBM Plex fonts bundled with the website;
+- the npm packages bundled into the new web console (`npm:` entries, including
+  the Geist fonts), listed by its build in
+  `acornfox/web/console/third-party-licenses.json`, and the shadcn/ui components
+  adapted into its source (`src:shadcn/ui`).
 
-Rerun the script whenever `go.mod`, the Caddy version or the bundled fonts
-change. An inventory entry is not an assertion that every source file in that
+Rerun the script whenever `go.mod`, the Caddy version, the bundled fonts or the
+web console's dependencies change. An inventory entry is not an assertion that every source file in that
 module is present in the compiled output.

@@ -4,7 +4,10 @@
 收录范围就是发布产物里实际带的第三方内容：
   - 编进 acornfox 的 Go 模块（各发布平台 go list -deps 的并集）与 Go 标准库；
   - 随发行版附带的 Caddy（版本取自 scripts/install/install.sh）；
-  - 控制台与官网自带的 IBM Plex 字体（OFL.txt）。
+  - 官网自带的 IBM Plex 字体（OFL.txt）；
+  - 新版网页控制台打进产物的 npm 包（含 Geist 字体），清单由构建时生成的
+    acornfox/web/console/third-party-licenses.json 给出（见 web/console/README.md）；
+  - 拷进控制台源码的 shadcn/ui 组件（acornfox/web/console/src/components/ui/LICENSE）。
 
 用法：在仓库根目录执行 python3 scripts/gen-licenses.py
 需要能执行 go，且模块已下载到本地缓存（go build 过即可）；Caddy 许可从 GitHub 读取。
@@ -23,9 +26,12 @@ MODULE_DIR = os.path.join(ROOT, "acornfox")
 OUT_DIR = os.path.join(ROOT, "docs", "licenses")
 TARGETS = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64", "windows/amd64", "windows/arm64"]
 NOTICE_RE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|PATENTS)([._-].*)?$", re.IGNORECASE)
-FONT_DIRS = ["acornfox/internal/console/static/fonts", "website/assets/fonts"]
+FONT_DIRS = ["website/assets/fonts"]
 # IBM Plex 的上游版本，与 THIRD_PARTY_NOTICES 和字体目录的说明一致。
 PLEX_VERSION = "IBM/plex@763c36e"
+WEB_CONSOLE = os.path.join(MODULE_DIR, "web", "console")
+# 拷进 src/components/ui/ 的 shadcn/ui 组件取自的上游版本（MIT）。
+SHADCN_VERSION = "shadcn-ui/ui@main"
 
 
 def go(*args, env=None):
@@ -100,9 +106,17 @@ def main():
         with open(os.path.join(ROOT, d, "OFL.txt"), encoding="utf-8") as f:
             font_notices.add(f.read())
     if len(font_notices) != 1:
-        sys.exit("控制台与官网的 OFL.txt 内容不一致")
+        sys.exit("各字体目录的 OFL.txt 内容不一致")
     components.append(component("font:IBM Plex Sans / IBM Plex Mono", PLEX_VERSION,
                                 "https://github.com/IBM/plex", "OFL.txt\n" + font_notices.pop()))
+
+    # 新版网页控制台：构建时列出的 npm 包（只含真正打进产物的）和拷进来的 shadcn/ui 组件。
+    with open(os.path.join(WEB_CONSOLE, "third-party-licenses.json"), encoding="utf-8") as f:
+        for p in json.load(f):
+            components.append(component("npm:" + p["name"], p["version"], p["source"], p["notice"]))
+    with open(os.path.join(WEB_CONSOLE, "src", "components", "ui", "LICENSE"), encoding="utf-8") as f:
+        components.append(component("src:shadcn/ui", SHADCN_VERSION, "https://github.com/shadcn-ui/ui",
+                                    "LICENSE\n" + f.read()))
 
     manifest = {"schema_version": 1, "product": "acornfox", "license": "AGPL-3.0-only",
                 "copyright": "Copyright (C) 2026 AcornFox contributors",
@@ -120,8 +134,12 @@ def main():
     lines += ["",
               "`go:` entries are compiled into the `acornfox` binary. `bin:` entries are shipped",
               "unmodified next to each release. The IBM Plex fonts (OFL-1.1, Reserved Font Name",
-              "\"Plex\") are bundled in `" + FONT_DIRS[0] + "/` and `" + FONT_DIRS[1] + "/`,",
-              "with the full license text in `OFL.txt` next to the font files.", ""]
+              "\"Plex\") are bundled in " + " and ".join("`" + d + "/`" for d in FONT_DIRS) + ",",
+              "with the full license text in `OFL.txt` next to the font files.",
+              "`npm:` entries are bundled into the web console embedded in the binary",
+              "(`acornfox/internal/console/ui/`, built from `acornfox/web/console/`), including the",
+              "Geist fonts (OFL-1.1). `src:shadcn/ui` covers the components adapted into",
+              "`acornfox/web/console/src/components/ui/`.", ""]
     with open(os.path.join(OUT_DIR, "THIRD_PARTY_NOTICES.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print(f"已生成 {len(components)} 条组件记录")

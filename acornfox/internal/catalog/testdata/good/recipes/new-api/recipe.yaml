@@ -1,0 +1,13 @@
+id: new-api
+schema: 1
+title: New API 模型网关
+summary: 一个接口接多家大模型，统一发令牌、看用量
+keywords: [newapi, 模型网关, 大模型接口]
+apps:
+  - app: new-api
+delivery:
+  tier: auto
+  minutes: 1
+  memory_mb: 512
+  user_steps:
+    - 登录后新建一个渠道，填上游的 Key 和模型，点“测试”

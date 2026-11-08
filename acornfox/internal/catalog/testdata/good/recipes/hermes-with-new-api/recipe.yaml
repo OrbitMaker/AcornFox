@@ -1,0 +1,18 @@
+id: hermes-with-new-api
+schema: 1
+title: Hermes 智能体 + New API
+summary: 装好智能体和模型网关并连起来，只要在网关里加一次上游 Key
+keywords: [hermes, 爱马仕, newapi, 智能体]
+apps:
+  - app: new-api
+  - app: hermes-agent
+links:
+  - { from: new-api, to: hermes-agent, uses: llm_gateway }
+delivery:
+  tier: auto
+  minutes: 4
+  memory_mb: 2560
+  user_steps:
+    - 在 New API 里新建一个渠道，填上游的 Key 和模型（上下文要不少于 64K）
+    - 打开 Hermes 控制台，用应用详情里的密码登录
+    - 要接飞书、企业微信等机器人时，在 Hermes 控制台里填机器人凭据

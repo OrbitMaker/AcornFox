@@ -3,7 +3,7 @@
 # AcornFox 安装脚本
 # 用途: 在干净的 Linux 系统上一键安装 AcornFox
 # 支持: Ubuntu 22.04/24.04, Debian 12/13，x86_64（这四个版本都实测过安装、自检、部署；
-#       升级和回滚在 Ubuntu 24.04 上实测；推荐 Ubuntu 24.04 或 Debian 13；
+#       升级在 Ubuntu 24.04 上实测；推荐 Ubuntu 24.04 或 Debian 13；
 #       其他 Ubuntu/Debian 版本要加 --force-os）
 # 许可: AGPL-3.0
 #
@@ -27,6 +27,8 @@
 #   INSTALL-PORT-02  80 或 443 被别的程序占用（加 --allow-busy-80-443 可继续，但绑定域名、HTTPS、公网控制台不能用）
 #   INSTALL-PORT-03  应用端口段 18810-18899 中有端口被别的程序占用，不能继续
 #   INSTALL-CLOUD-01 ACORNFOX_CLOUD_OVERRIDE / --cloud 的值不认识
+#   INSTALL-DOWN-01  这台服务器上已经装着更新的 AcornFox（或留着卸载时保留的更新版本的数据），要装的版本比它旧
+#                    （只能升级，不能降级），什么都没改
 
 set -euo pipefail
 
@@ -197,6 +199,69 @@ SCRIPT_MIN_VERSION="v0.4.0"
 version_lt() {
     [ "$1" = "$2" ] && return 1
     [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | head -1)" = "${1#v}" ]
+}
+
+# version_older T C：T 比 C 旧时返回 0（与 upgrade.sh 中的同名函数一致）。去掉开头的 v 再比；
+# 同一版本号时正式版比预发布版新，两个都是预发布版时按 sort -V 比。任一个为空或 unknown 时返回 1
+version_older() {
+    local t="${1#v}" c="${2#v}"
+    case "$t" in ""|unknown) return 1 ;; esac
+    case "$c" in ""|unknown) return 1 ;; esac
+    [ "$t" = "$c" ] && return 1
+    if [ "${t%%-*}" = "${c%%-*}" ]; then
+        [ "$t" != "${t%%-*}" ] || return 1
+        [ "$c" = "${c%%-*}" ] && return 0
+        version_lt "$t" "$c"
+    else
+        version_lt "${t%%-*}" "${c%%-*}"
+    fi
+}
+
+# 数据目录里记下这份数据库最后是哪个版本的程序迁移过的（安装、升级成功后写；卸载保留数据时也写）。
+# 程序已经卸掉、数据还在时，check_install_downgrade 靠它判断要装的版本是不是比数据旧
+INSTALLED_VERSION_FILE="/var/lib/acornfox/installed-version"
+
+# record_installed_version：把 /usr/local/bin/acornfox 的版本号写进 INSTALLED_VERSION_FILE（先写临时文件再换上）。
+# 读不出版本号或写不进去时只提示，不影响安装
+record_installed_version() {
+    local v
+    v=$({ /usr/local/bin/acornfox version 2>/dev/null || true; } | awk '{print $2}')
+    [ -n "$v" ] || return 0
+    if echo "$v" > "${INSTALLED_VERSION_FILE}.tmp" && mv -f "${INSTALLED_VERSION_FILE}.tmp" "$INSTALLED_VERSION_FILE"; then
+        chmod 644 "$INSTALLED_VERSION_FILE" || true
+    else
+        log_warn "没能写入 ${INSTALLED_VERSION_FILE}（不影响使用）"
+    fi
+    return 0
+}
+
+# check_install_downgrade 要装的版本：这台服务器上已经装着 AcornFox，或者留着卸载时保留的数据，
+# 而且比要装的新时停下。AcornFox 只能升级，不能降级（旧程序读不了新数据库）。在改动系统之前检查；
+# 程序不在时按 INSTALLED_VERSION_FILE 判断；程序和这个文件都没有时不查（没装过，或者是很早的版本留下的数据）。
+check_install_downgrade() {
+    local t="$1" cur="" from=bin
+    if [ -x /usr/local/bin/acornfox ]; then
+        cur=$({ /usr/local/bin/acornfox version 2>/dev/null || true; } | awk '{print $2}')
+    fi
+    if [ -z "$cur" ] && [ -f "$INSTALLED_VERSION_FILE" ]; then
+        cur=$(head -n 1 "$INSTALLED_VERSION_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+        from=data
+    fi
+    if [ -z "$cur" ]; then
+        if [ -f /var/lib/acornfox/acornfox.db ]; then
+            log_warn "这台服务器上留着以前的 AcornFox 数据（/var/lib/acornfox），但没有记下是哪个版本的；要装的版本比它旧时，后面初始化数据库会失败"
+        fi
+        return 0
+    fi
+    version_older "$t" "$cur" || return 0
+    if [ "$from" = bin ]; then
+        fault_exit INSTALL-DOWN-01 "这台服务器上已经装着 AcornFox ${cur}，要装的 ${t} 比它旧。AcornFox 只能升级，不能降级。什么都没改。" \
+            "要换到更新的版本，用升级命令（upgrade.sh），不用重新安装。" \
+            "确实要装旧版本，只能先卸载并连数据一起删除（uninstall.sh --purge，应用和数据都会删掉、不可恢复）再装。"
+    fi
+    fault_exit INSTALL-DOWN-01 "这台服务器上留着 AcornFox ${cur} 的数据（卸载时保留的 /var/lib/acornfox），要装的 ${t} 比它旧，旧程序读不了新数据库。AcornFox 只能升级，不能降级。什么都没改。" \
+        "要接着用这份数据：装 ${cur} 或更新的版本（去掉 --version 就是装最新版）。" \
+        "确实要装旧版本，只能先删掉这份数据（uninstall.sh --purge，应用和数据都会删掉、不可恢复）再装。"
 }
 
 # follow_release_script 脚本名 版本 参数...：版本早于 SCRIPT_MIN_VERSION 时下载该版本的同名脚本并交给它执行
@@ -1233,7 +1298,7 @@ build_caddy_image() {
 
 # migrate_host_caddy：把 v0.3.x 装在宿主机上的 Caddy 换成容器。证书和 ACME 账号复制到
 # 数据卷 acornfox-caddy-data（宿主机上的原文件保留），停用并禁止 caddy.service 开机启动，
-# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated 供 upgrade.sh --rollback 恢复。
+# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated（升级脚本据此知道已经迁移过）。
 migrate_host_caddy() {
     [ -f /etc/systemd/system/caddy.service ] || [ -f /lib/systemd/system/caddy.service ] || return 0
     systemctl is-enabled --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy 2>/dev/null || return 0
@@ -1249,7 +1314,7 @@ migrate_host_caddy() {
     systemctl disable --now caddy >/dev/null 2>&1 || true
     mkdir -p /var/lib/acornfox
     date -u +%FT%TZ > /var/lib/acornfox/.caddy-host-migrated
-    log_success "宿主机 Caddy 已停用（回滚时会恢复），之后由容器 acornfox-caddy 接管 80、443 和应用端口"
+    log_success "宿主机 Caddy 已停用，之后由容器 acornfox-caddy 接管 80、443 和应用端口"
 }
 
 # wait_caddy_container：等 acornfox 建好 Caddy 容器、管理网关应答（没有令牌时返回 403）
@@ -1694,7 +1759,10 @@ main() {
             ACORNFOX_VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 安装本地文件"
             log_info "最新版本: $ACORNFOX_VERSION"
         fi
+        check_install_downgrade "$ACORNFOX_VERSION"
         follow_release_script install.sh "$ACORNFOX_VERSION" "$@"
+    elif [ -f "$LOCAL_BINARY" ]; then
+        check_install_downgrade "$({ "$LOCAL_BINARY" version 2>/dev/null || true; } | awk '{print $2}')"
     fi
     # 记下网络环境判断，upgrade.sh 直接沿用，不必再依赖外部 IP 查询
     mkdir -p /etc/acornfox
@@ -1716,6 +1784,7 @@ main() {
     create_directories
     download_acornfox
     initialize_database
+    record_installed_version
     generate_admin_token
     detect_public_host
     create_systemd_services

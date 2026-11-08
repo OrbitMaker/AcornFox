@@ -1,0 +1,111 @@
+/* 字体自托管：Geist / Geist Mono（OFL-1.1，来自 @fontsource），只带拉丁字符；中文落到系统字体。 */
+@import '@fontsource/geist-sans/latin-400.css';
+@import '@fontsource/geist-sans/latin-500.css';
+@import '@fontsource/geist-sans/latin-600.css';
+@import '@fontsource/geist-mono/latin-400.css';
+@import '@fontsource/geist-mono/latin-500.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 颜色变量照控制台样稿：shadcn zinc，主色“中性”。深色有三种来源：跟随系统、手动选深色。 */
+:root {
+  --background: 0 0% 100%; --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%; --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%; --popover-foreground: 240 10% 3.9%;
+  --primary: 240 5.9% 10%; --primary-foreground: 0 0% 98%;
+  --secondary: 240 4.8% 95.9%; --secondary-foreground: 240 5.9% 10%;
+  --muted: 240 4.8% 95.9%; --muted-foreground: 240 3.8% 46.1%;
+  --accent: 240 4.8% 95.9%; --accent-foreground: 240 5.9% 10%;
+  --destructive: 0 72% 51%; --destructive-foreground: 0 0% 98%;
+  --border: 240 5.9% 91%; --input: 240 5.9% 89%; --ring: 240 5.9% 10%;
+  --sidebar: 0 0% 98.5%;
+  --success: 142 72% 32%; --warning: 32 95% 40%; --danger: 0 72% 48%;
+  --logo: 204 61% 15%; --tile-l: 36%;
+  /* 图表的系列颜色（首页看板），照控制台样稿 */
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --s-other: #a1a1aa;
+  --radius: 0.5rem;
+  --font-sans: 'Geist Sans', 'Geist', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --background: 240 10% 3.9%; --foreground: 0 0% 98%;
+    --card: 240 8% 6%; --card-foreground: 0 0% 98%;
+    --popover: 240 8% 7%; --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%; --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 14%; --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%; --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 45%; --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.5%; --input: 240 3.7% 18%; --ring: 240 4.9% 83.9%;
+    --sidebar: 240 6% 6%;
+    --success: 142 60% 52%; --warning: 38 92% 58%; --danger: 0 85% 66%;
+    --logo: 0 0% 100%; --tile-l: 72%;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --s-other: #52525b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme='dark'] {
+  --background: 240 10% 3.9%; --foreground: 0 0% 98%;
+  --card: 240 8% 6%; --card-foreground: 0 0% 98%;
+  --popover: 240 8% 7%; --popover-foreground: 0 0% 98%;
+  --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%;
+  --secondary: 240 3.7% 15.9%; --secondary-foreground: 0 0% 98%;
+  --muted: 240 3.7% 14%; --muted-foreground: 240 5% 64.9%;
+  --accent: 240 3.7% 15.9%; --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 45%; --destructive-foreground: 0 0% 98%;
+  --border: 240 3.7% 15.5%; --input: 240 3.7% 18%; --ring: 240 4.9% 83.9%;
+  --sidebar: 240 6% 6%;
+  --success: 142 60% 52%; --warning: 38 92% 58%; --danger: 0 85% 66%;
+  --logo: 0 0% 100%; --tile-l: 72%;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --s-other: #52525b;
+  color-scheme: dark;
+}
+
+@layer base {
+  * { @apply border-border; }
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  code, pre, kbd { font-family: var(--font-mono); }
+}
+
+@layer utilities {
+  .gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  @media (min-width: 768px) { .gutter { padding-left: 24px; padding-right: max(24px, env(safe-area-inset-right, 0px)); } }
+  .mono { font-family: var(--font-mono); }
+  .tnum { font-variant-numeric: tabular-nums; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  .pb-safe { padding-bottom: max(20px, env(safe-area-inset-bottom, 0px)); }
+  /* 应用图块：颜色由 --tile-h（色相）决定，见 components/tile.tsx */
+  .tile { background: hsl(var(--tile-h) 70% 50% / .1); color: hsl(var(--tile-h) 62% var(--tile-l)); border-color: hsl(var(--tile-h) 60% 50% / .2); }
+}
+
+/* 首页看板的网格：12 列，每行 112px；手机宽度一张一行，平板两张一行。照控制台样稿。 */
+.dash { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-auto-rows: 112px; gap: 12px; grid-auto-flow: row dense; }
+.wd { grid-column: span 12; }
+.dash.pv { grid-template-columns: 1fr; }
+.dash.pv .wd { grid-column: 1 / -1 !important; }
+.wd[data-h='2'] { grid-row: span 2; }
+.wd[data-h='3'] { grid-row: span 3; }
+@media (min-width: 640px) and (max-width: 1023px) { .wd[data-w='3'], .wd[data-w='4'], .wd[data-w='6'] { grid-column: span 6; } }
+@media (min-width: 1024px) {
+  .wd[data-w='3'] { grid-column: span 3; }
+  .wd[data-w='4'] { grid-column: span 4; }
+  .wd[data-w='6'] { grid-column: span 6; }
+  .wd[data-w='8'] { grid-column: span 8; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

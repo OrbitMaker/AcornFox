@@ -56,17 +56,20 @@ func (o *outputWriter) emitJSON(fields map[string]any) {
 
 // emitDiagnosisJSON writes a failure JSON object with the diagnosis to stdout.
 func (o *outputWriter) emitDiagnosisJSON(d client.Diagnosis) {
-	obj := map[string]any{
-		"ok": false,
-		"diagnosis": map[string]any{
-			"stage":       d.Stage,
-			"code":        d.Code,
-			"message":     o.redact(d.Message),
-			"log_excerpt": o.redact(d.LogExcerpt),
-			"hint":        o.redact(d.Hint),
-		},
+	diag := map[string]any{
+		"stage":       d.Stage,
+		"code":        d.Code,
+		"message":     o.redact(d.Message),
+		"log_excerpt": o.redact(d.LogExcerpt),
+		"hint":        o.redact(d.Hint),
 	}
-	o.encodeRedacted(o.stdout, obj)
+	if d.GatewayCode != "" {
+		diag["gateway_code"] = d.GatewayCode
+	}
+	if d.RetryAfter > 0 {
+		diag["retry_after"] = d.RetryAfter
+	}
+	o.encodeRedacted(o.stdout, map[string]any{"ok": false, "diagnosis": diag})
 }
 
 // encodeRedacted marshals v, redacts secrets from the serialized form and

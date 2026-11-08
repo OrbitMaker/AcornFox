@@ -33,7 +33,7 @@ func TestMacLocalStop(t *testing.T) {
 			t.Fatalf("%v: %v\n%s", args, err, out.String())
 		}
 		if code != macLocalExit || m.OK || m.Diagnosis.Code != "SETUP-MAC-01" || m.Diagnosis.Stage != "local" ||
-			!strings.Contains(m.Diagnosis.Message, "Mac 本机运行即将支持") || !strings.Contains(m.Diagnosis.Hint, "acornfox target add") || errBuf.Len() != 0 {
+			!strings.Contains(m.Diagnosis.Message, "Mac 版只有命令行客户端") || !strings.Contains(m.Diagnosis.Hint, "acornfox target add") || errBuf.Len() != 0 {
 			t.Fatalf("%v: exit %d %+v stderr %q", args, code, m, errBuf.String())
 		}
 	}

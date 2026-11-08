@@ -22,7 +22,9 @@ import (
 
 	"github.com/acornfox/acornfox/internal/apiserver"
 	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/cli"
 	"github.com/acornfox/acornfox/internal/deploylog"
+	"github.com/acornfox/acornfox/internal/hostcheck"
 	"github.com/acornfox/acornfox/internal/publicconsole"
 	"github.com/acornfox/acornfox/internal/reconcile"
 	"github.com/acornfox/acornfox/internal/runner"
@@ -65,12 +67,18 @@ type serverOptions struct {
 	CaddyAdmin    string
 
 	DefaultExposure string
-	LANHost         func() string          // nil => PublicHost
-	HostMetrics     apiserver.HostProvider // nil => /proc (Linux)
-	LANConsolePort  int                    // 0 => publicconsole.DefaultLANPort
+	LANHost         func() string // nil => PublicHost
+	// ServerLAN is a Linux server's address on the user's LAN for the open
+	// hint of local-only apps ("" on cloud servers); nil => none.
+	ServerLAN      func() string
+	HostMetrics    apiserver.HostProvider // nil => /proc (Linux)
+	LANConsolePort int                    // 0 => publicconsole.DefaultLANPort
 
 	// Setup wires the runtime setup (setup_wiring.go); nil => no /v1/setup.
 	Setup *setupDeps
+	// CheckPorts turns on the port check of the console's runtime page
+	// (the Linux server; GET /v1/runtime/checks).
+	CheckPorts bool
 	// LANRelay lets acornfox serve relay <LAN>:P to the edge when Docker
 	// cannot bind the LAN address (lanforward.go). Desktop only.
 	LANRelay bool
@@ -195,7 +203,32 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		DeployLogs:      deployLogs,
 		HostMetrics:     o.HostMetrics,
 		DefaultExposure: o.DefaultExposure,
+		Version:         cli.Version,
+		Sources:         func() apiserver.DownloadSources { return downloadSources(o.DataDir) },
+		ServerLAN:       o.ServerLAN,
 	}
+	// The home dashboard's host history samples with its own provider (the
+	// /proc one computes CPU from its previous call).
+	histSrc := o.HostMetrics
+	if histSrc == nil {
+		histSrc = apiserver.NewHostProvider(o.DataDir)
+	}
+	hist := apiserver.NewHostHistory(histSrc)
+	go hist.Run(ctx)
+	apiCfg.HostHistory = hist
+	if o.CheckPorts {
+		admin, lan := o.EdgeAdminPort, o.LANConsolePort
+		if admin == 0 {
+			admin = defaultEdgeAdminPort
+		}
+		if lan == 0 {
+			lan = publicconsole.DefaultLANPort
+		}
+		apiCfg.CheckPorts = hostcheck.Ports{Admin: admin, LAN: lan, AppMin: o.PublicPortMin, AppMax: o.PublicPortMax}
+	}
+	appCenter := newAppCenter(st, o.DataDir, uploadDir, runnerAPI)
+	defer appCenter.Close()
+	apiCfg.AppCenter = appCenter
 	var relay *lanForwarder
 	if o.LANRelay && o.LANHost != nil && edge != nil && o.EdgeMode == runner.EdgeModeBridge {
 		relay = &lanForwarder{lanHost: o.LANHost, active: rec.LANUnbindable,
@@ -272,6 +305,9 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	apiCfg.LANConsole = lan
 	lanRef.Store(lan)
 	trustedHandler := apiserver.New(apiCfg)
+	// Hooks are set by apiserver.New: now fail tasks a previous run left
+	// running and start the catalog's daily sync.
+	go appCenter.Start(ctx)
 	defer lan.Close()
 	if err := lan.Apply(); err != nil {
 		fmt.Fprintln(stderr, "lan console:", err)

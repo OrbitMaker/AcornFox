@@ -1,6 +1,6 @@
 # 快速开始
 
-全新服务器约 2 分钟完成安装与首次部署（实测安装约 90 秒，示例项目首次上线 30 秒以内）。
+在一台全新的 Linux 服务器上安装 AcornFox，部署第一个项目，再从应用中心装一个应用。安装在云服务器上通常 3～10 分钟，家用宽带或网络差时可能要 15～40 分钟。
 
 ## 推荐：把一句话发给 AI 工作台
 
@@ -45,23 +45,24 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.
 
 **国内服务器**会自动使用镜像加速，无需额外配置。
 
-安装过程约 2-3 分钟，完成后会显示：
+安装过程在云服务器上通常 3～10 分钟（家用宽带或网络差时可能要 15～40 分钟），完成后会显示（节选）：
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✓ AcornFox 安装完成！
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+服务状态:
+  • acornfox-server: active
+  • acornfox-runner: active
+  • Caddy 容器 acornfox-caddy: running
 
 管理员令牌:
 acf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-下一步:
-  1. 在本地电脑安装 CLI
-  2. 配置服务器连接
-  3. 打开网页控制台
+下一步（看你或 AI 工作台在哪台机器上操作，二选一）:
+  …
 ```
 
-**⚠️ 重要**: 复制并保存管理员令牌，后续需要使用。
+**重要**：复制并保存管理员令牌，后续需要使用。
 
 ### 2. 安装客户端 CLI
 
@@ -103,8 +104,8 @@ acornfox target add my-server --ssh user@your-server-ip --identity ~/.ssh/id_rsa
 **配置成功**会显示：
 
 ```
-✓ 连接测试成功
-✓ my-server 已添加为默认目标
+已添加服务器 my-server，连接测试通过。
+已设为默认服务器。
 ```
 
 ## 部署第一个应用
@@ -156,8 +157,8 @@ acornfox deploy --image nginx:latest --app my-app
 | `starting` | 启动容器 |
 | `checking` | 健康检查，通常 10-30 秒 |
 | `routing` | 配置访问地址 |
-| `live` | 运行中 ✅ |
-| `failed` | 失败 ❌，见诊断 |
+| `live` | 运行中 |
+| `failed` | 失败，见诊断 |
 | `superseded` | 被更新的提交取代 |
 
 ### 成功部署
@@ -177,7 +178,26 @@ acornfox diagnose          # 本机最近一次部署
 acornfox diagnose 部署ID    # 指定部署
 ```
 
-常见错误和修复方法：[故障排查](troubleshooting.md)
+常见错误和修复方法：[使用手册的常见问题](user-guide.md#常见问题)
+
+## 从应用中心装一个应用
+
+应用中心里是预先配好的应用，不用写 Dockerfile。下面装 New API（大模型接口网关）：
+
+```bash
+acornfox catalog list        # 看目录里有哪些应用和配方
+acornfox install new-api     # 约 1 分钟，装好后显示首次登录的账号，密码默认遮住
+```
+
+要显示密码，用输出里的任务编号运行 `acornfox install status 任务编号 --show-secrets`，或在控制台“我的应用”里点开应用查看。
+
+从应用中心装的应用默认只有服务器本机能打开。在你自己的电脑上运行下面的命令打开它（经 SSH 隧道，不用放行安全组），看完按 Ctrl+C 关闭：
+
+```bash
+acornfox open new-api
+```
+
+也可以在控制台（`acornfox open`）左侧的“应用中心”里点“安装”。Hermes 智能体、配方、局域网访问和令牌额度见 [使用手册的“应用中心”](user-guide.md#应用中心)。
 
 ## Dockerfile 模板
 
@@ -247,12 +267,12 @@ CMD ["./main"]
 
 ## 下一步
 
-✅ 完成首次部署后，你可以：
+完成首次部署后，你可以：
 
 1. **管理应用生命周期**
    - 停止/启动/重启应用
    - 查看日志和资源使用
-   - 回滚到上一版本
+   - 应用回退到上一版本（`acornfox rollback 应用名`）
 
 2. **添加数据库**
    - PostgreSQL
@@ -267,23 +287,27 @@ CMD ["./main"]
    - 安装 Skill
    - 通过自然语言部署
 
+5. **从应用中心装应用**
+   - New API、Hermes 智能体
+   - 见上面“从应用中心装一个应用”
+
 详细文档：
-- [完整命令参考](commands.md)
-- [AI 工作台集成](ai-integration.md)
-- [故障排查](troubleshooting.md)
+- [命令参考](acornfox/cli.md)
+- [使用手册](user-guide.md)
+- [AI 工作台 Skill](../skills/acornfox/SKILL.md)
 
 ## 常见问题
 
-### 端口被占用
+### 端口没监听
 
-如果看到 `port_conflict` 错误：
+部署失败、诊断显示 `port_not_listening`（健康检查超时，应用没在声明的端口上监听）时，确认应用在容器里监听 `0.0.0.0` 和哪个端口，然后改成实际端口：
 
 ```bash
-# 查看已使用的端口
+# 查看各应用的地址和端口
 acornfox apps
 
-# 为应用指定端口
-acornfox app set PORT=8081 --app my-app
+# 改成应用实际监听的容器端口，再重新部署
+acornfox app set --app my-app --port 8081
 acornfox redeploy --app my-app
 ```
 
@@ -310,5 +334,5 @@ sudo cat /etc/docker/daemon.json
 ### 需要帮助？
 
 - 查看命令帮助: `acornfox --help`
-- 故障排查: [troubleshooting.md](troubleshooting.md)
+- 常见问题: [使用手册](user-guide.md#常见问题)
 - GitHub Issues: https://github.com/OrbitMaker/AcornFox/issues

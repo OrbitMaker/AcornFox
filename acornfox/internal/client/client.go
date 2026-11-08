@@ -185,8 +185,12 @@ func (c *Client) classifyTransport(err error) error {
 func (c *Client) serverError(resp *http.Response) error {
 	var wire struct {
 		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Code        string `json:"code"`
+			Message     string `json:"message"`
+			Hint        string `json:"hint"`
+			TaskID      string `json:"task_id"`
+			GatewayCode string `json:"gateway_code"`
+			RetryAfter  int    `json:"retry_after"`
 		} `json:"error"`
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -205,10 +209,14 @@ func (c *Client) serverError(resp *http.Response) error {
 	return &Error{
 		Status: resp.StatusCode,
 		Diag: Diagnosis{
-			Stage:   "server",
-			Code:    code,
-			Message: msg,
+			Stage:       "server",
+			Code:        code,
+			Message:     msg,
+			Hint:        wire.Error.Hint,
+			GatewayCode: wire.Error.GatewayCode,
+			RetryAfter:  wire.Error.RetryAfter,
 		},
+		TaskID: wire.Error.TaskID,
 	}
 }
 
@@ -589,6 +597,21 @@ func (c *Client) DeleteApp(ctx context.Context, app string, deleteVolumes bool) 
 	}
 	_, err := c.do(ctx, http.MethodDelete, path, nil, -1, "", nil)
 	return err
+}
+
+// DeleteAppWarnings is DeleteApp that also returns the server's warnings
+// (for example a model-gateway token it could not revoke). It is not part of
+// API, so test fakes need not implement it; callers type-assert for it.
+func (c *Client) DeleteAppWarnings(ctx context.Context, app string, deleteVolumes bool) ([]string, error) {
+	path := "/v1/apps/" + url.PathEscape(app)
+	if deleteVolumes {
+		path += "?volumes=true"
+	}
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	_, err := c.do(ctx, http.MethodDelete, path, nil, -1, "", &out)
+	return out.Warnings, err
 }
 
 // ---- N3 API methods ----

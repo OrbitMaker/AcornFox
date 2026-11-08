@@ -360,6 +360,55 @@ func TestConsoleStaticIndexServedAtRoot(t *testing.T) {
 	}
 }
 
+// The console is served at "/" with the console security headers, and an
+// unknown path falls back to its index.html. The previous console was
+// removed: "/legacy" and anything under it redirect to "/".
+func TestConsoleRoutesAndLegacyRedirect(t *testing.T) {
+	cfg, _, _ := newTestConfig(t)
+	cfg.ConsoleFS = fstest.MapFS{
+		"index.html":      {Data: []byte("<!doctype html><title>new</title>")},
+		"assets/index.js": {Data: []byte("new-bundle")},
+		"theme-init.js":   {Data: []byte("theme")},
+		"build-info.json": {Data: []byte("{}")},
+	}
+	console := NewConsole(cfg)
+	get := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "127.0.0.1:18800"
+		rec := httptest.NewRecorder()
+		console.ServeHTTP(rec, req)
+		return rec
+	}
+	for path, want := range map[string]string{
+		"/":                "<title>new</title>",
+		"/assets/index.js": "new-bundle",
+		"/theme-init.js":   "theme",
+		"/no/such/page":    "<title>new</title>",
+	} {
+		rec := get(path)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("GET %s = %d %q, want %q", path, rec.Code, rec.Body.String(), want)
+			continue
+		}
+		h := rec.Header()
+		if h.Get("Content-Security-Policy") != contentSecurityPolicy || !strings.Contains(h.Get("Content-Security-Policy"), "script-src 'self'") {
+			t.Errorf("GET %s: CSP = %q", path, h.Get("Content-Security-Policy"))
+		}
+		if h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Cache-Control") != "no-store" {
+			t.Errorf("GET %s: missing security headers %v", path, h)
+		}
+	}
+	for _, path := range []string{"/legacy", "/legacy/", "/legacy/app.js", "/legacy/index.html"} {
+		rec := get(path)
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+			t.Errorf("GET %s = %d Location %q, want 302 to /", path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	if rec := get("/v1/apps"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /v1/apps without session = %d, want 401", rec.Code)
+	}
+}
+
 func TestDeploymentsLimitValidation(t *testing.T) {
 	cfg, store, _ := newTestConfig(t)
 	if _, _, err := store.EnsureApp(context.Background(), "web"); err != nil {

@@ -1,5 +1,6 @@
 // Package hostcheck holds the Linux server checks "acornfox doctor" runs
-// besides Docker: free disk space and the ports AcornFox needs.
+// besides Docker: free disk space, the ports AcornFox needs and the clock
+// (clock.go).
 //
 // Disk: the data directory and Docker's data root are checked separately
 // (they are often, but not always, the same partition). Below WarnFreeBytes

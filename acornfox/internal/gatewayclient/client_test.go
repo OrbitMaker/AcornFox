@@ -30,6 +30,8 @@ type fakeGateway struct {
 	// next errors to return from /v1/issue (code, status, retry_after); popped in order
 	issueErrs []fakeErr
 	sha       string
+	// catalog answers /v1/catalog/* after the signature checked out
+	catalog func(path string, body []byte) (int, any)
 }
 
 type fakeErr struct {
@@ -95,7 +97,7 @@ func (g *fakeGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		pubB64 = req.PubKey
 		g.lastClient = req.Client
-	case "/v1/issue":
+	case "/v1/issue", "/v1/catalog/connect", "/v1/catalog/index":
 		pubB64 = g.keys[iid]
 		if pubB64 == "" {
 			gwErr(w, 401, "GW-AUTH-02", 0)
@@ -114,6 +116,14 @@ func (g *fakeGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.keys[iid] = pubB64
 		g.registers++
 		writeJSON(w, 200, map[string]any{"ok": true, "install_id": iid, "limits": map[string]any{"per_day": 20}})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/catalog/") {
+		status, v := 404, any(map[string]any{"ok": false, "code": "GW-REQ-01", "message": "没有"})
+		if g.catalog != nil {
+			status, v = g.catalog(r.URL.Path, body)
+		}
+		writeJSON(w, status, v)
 		return
 	}
 	g.issues++
@@ -216,14 +226,92 @@ func TestLim02ShortWaitRetriesOnce(t *testing.T) {
 	}
 }
 
-func TestBadClockGivesAuth01(t *testing.T) {
+// A clock an hour behind: the gateway refuses (GW-AUTH-01), its Date header
+// gives its time, and the request signed again with the corrected timestamp
+// goes through; the correction is kept for the next requests.
+func TestBadClockCorrectedFromDate(t *testing.T) {
 	g := newFake()
 	srv := httptest.NewServer(g)
 	defer srv.Close()
 	c := newClient(t, srv.URL)
 	c.now = func() time.Time { return time.Now().Add(-time.Hour) }
-	if _, err := c.Issue(context.Background(), "x", "runtime"); CodeOf(err) != "GW-AUTH-01" {
+	if _, err := c.Issue(context.Background(), "x", "runtime"); err != nil {
+		t.Fatalf("should be corrected: %v", err)
+	}
+	if off := c.ClockOffset(); off < 59*time.Minute || off > 61*time.Minute {
+		t.Fatalf("offset %v", off)
+	}
+	g.mu.Lock()
+	n := len(g.nonces)
+	g.mu.Unlock()
+	if _, err := c.Issue(context.Background(), "x", "runtime"); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.nonces)-n != 1 {
+		t.Fatalf("the second issue took %d requests; the correction should be kept", len(g.nonces)-n)
+	}
+}
+
+// Without a Date header the client cannot know the gateway's time: the
+// GW-AUTH-01 is returned as it is, without a retry.
+func TestBadClockWithoutDateNotRetried(t *testing.T) {
+	g := newFake()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Date"] = nil // net/http adds one otherwise
+		g.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+	c.now = func() time.Time { return time.Now().Add(-time.Hour) }
+	_, err := c.Issue(context.Background(), "x", "runtime")
+	var ge *Error
+	if !errors.As(err, &ge) || ge.Code != "GW-AUTH-01" || ge.ClockSkew != 0 || c.ClockOffset() != 0 {
+		t.Fatalf("got %v (offset %v)", err, c.ClockOffset())
+	}
+}
+
+// A gateway that still refuses after the correction: the error says how far
+// the clocks are apart and how to fix it.
+func TestBadClockStillRefusedSaysSkew(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Date", time.Now().UTC().Format(http.TimeFormat))
+		gwErr(w, 401, "GW-AUTH-01", 0)
+	}))
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+	c.now = func() time.Time { return time.Now().Add(-1000 * time.Second) }
+	_, err := c.Register(context.Background(), c.Info)
+	var ge *Error
+	if !errors.As(err, &ge) || ge.Code != "GW-AUTH-01" {
 		t.Fatalf("got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("%d requests, want the first and one corrected retry", calls)
+	}
+	if ge.ClockSkew < 998*time.Second || ge.ClockSkew > 1002*time.Second ||
+		!(strings.Contains(ge.Message, "时钟和网关差了约 999 秒") || strings.Contains(ge.Message, "时钟和网关差了约 1000 秒")) ||
+		!strings.Contains(ge.Message, "timedatectl set-ntp true") {
+		t.Fatalf("skew %v message %q", ge.ClockSkew, ge.Message)
+	}
+}
+
+// A small difference is not what made the gateway refuse (it allows 300
+// seconds): no retry, no clock hint.
+func TestAuth01WithGoodClockNotRetried(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gwErr(w, 401, "GW-AUTH-01", 0)
+	}))
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+	_, err := c.Register(context.Background(), c.Info)
+	if CodeOf(err) != "GW-AUTH-01" || calls != 1 || strings.Contains(err.Error(), "时钟") {
+		t.Fatalf("calls %d err %v", calls, err)
 	}
 }
 

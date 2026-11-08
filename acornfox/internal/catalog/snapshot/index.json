@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "serial": 3,
+  "apps": [
+    {
+      "id": "hermes-agent",
+      "version": "v0.23.0",
+      "name": "Hermes 智能体",
+      "summary": "常驻的 AI 智能体，可以接飞书、钉钉、企业微信、微信等做机器人",
+      "category": "ai-agent",
+      "keywords": [
+        "hermes",
+        "hermes agent",
+        "爱马仕",
+        "爱马仕智能体"
+      ],
+      "tags": [
+        "ai",
+        "agent"
+      ],
+      "min_platform": "0.5.0",
+      "status": "active",
+      "memory_mb": {
+        "min": 1024,
+        "recommended": 2048
+      },
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "size_mb": 1150,
+      "delivery": {
+        "tier": "auto",
+        "minutes": 3,
+        "user_steps": [
+          "打开控制台，用应用详情里的密码登录",
+          "要接飞书、企业微信等机器人时，在控制台里填机器人凭据"
+        ]
+      },
+      "uses": [
+        {
+          "name": "llm_gateway",
+          "kind": "llm_gateway",
+          "for_param": "llm",
+          "optional": true
+        }
+      ],
+      "provides": [],
+      "package": {
+        "path": "apps/hermes-agent/v0.23.0.tar.gz",
+        "sha256": "5e0a19ccecff394d213511b6b7d345c682bfa6191524fe9c311789a7af0431cd",
+        "size": 2484
+      }
+    },
+    {
+      "id": "new-api",
+      "version": "v1.0.0-rc.48",
+      "name": "New API",
+      "summary": "把多家大模型合成一个 OpenAI 兼容的接口，统一管理 Key、令牌和额度",
+      "category": "ai-gateway",
+      "keywords": [],
+      "tags": [
+        "ai",
+        "llm",
+        "gateway"
+      ],
+      "min_platform": "0.5.0",
+      "status": "active",
+      "memory_mb": {
+        "min": 256,
+        "recommended": 512
+      },
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "size_mb": 78,
+      "delivery": {
+        "tier": "auto",
+        "minutes": 1,
+        "user_steps": [
+          "登录后在“渠道”里新建一个渠道，填上游的 Key 和模型，点“测试”",
+          "在“令牌”里新建一把令牌，客户端的接口地址填 http://服务器:端口/v1"
+        ]
+      },
+      "uses": [],
+      "provides": [
+        "llm_gateway"
+      ],
+      "package": {
+        "path": "apps/new-api/v1.0.0-rc.48.tar.gz",
+        "sha256": "f6c3df4d1b2a764246cadd2f465d2c27cd6e8060383072055dad658e6e3ef04f",
+        "size": 2400
+      }
+    }
+  ],
+  "recipes": [
+    {
+      "id": "hermes-agent",
+      "schema": 1,
+      "title": "Hermes 智能体",
+      "summary": "常驻的 AI 智能体，可以接飞书、钉钉、企业微信做机器人",
+      "keywords": [
+        "hermes",
+        "爱马仕",
+        "爱马仕智能体",
+        "智能体",
+        "agent"
+      ],
+      "apps": [
+        {
+          "app": "hermes-agent"
+        }
+      ],
+      "delivery": {
+        "tier": "auto",
+        "minutes": 3,
+        "memory_mb": 2048,
+        "user_steps": [
+          "打开控制台，用应用详情里的密码登录",
+          "要接飞书、企业微信等机器人时，在控制台里填机器人凭据"
+        ]
+      }
+    },
+    {
+      "id": "hermes-with-new-api",
+      "schema": 1,
+      "title": "Hermes 智能体 + New API",
+      "summary": "装好智能体和模型网关并连起来，只要在网关里加一次上游 Key",
+      "keywords": [
+        "hermes",
+        "爱马仕",
+        "newapi",
+        "智能体"
+      ],
+      "apps": [
+        {
+          "app": "new-api"
+        },
+        {
+          "app": "hermes-agent"
+        }
+      ],
+      "links": [
+        {
+          "from": "new-api",
+          "to": "hermes-agent",
+          "uses": "llm_gateway"
+        }
+      ],
+      "delivery": {
+        "tier": "auto",
+        "minutes": 4,
+        "memory_mb": 2560,
+        "user_steps": [
+          "在 New API 里新建一个渠道，填上游的 Key 和模型（上下文要不少于 64K）",
+          "打开 Hermes 控制台，用应用详情里的密码登录",
+          "要接飞书、企业微信等机器人时，在 Hermes 控制台里填机器人凭据"
+        ]
+      }
+    },
+    {
+      "id": "new-api",
+      "schema": 1,
+      "title": "New API 模型网关",
+      "summary": "一个接口接多家大模型，统一发令牌、看用量",
+      "keywords": [
+        "newapi",
+        "模型网关",
+        "大模型接口"
+      ],
+      "apps": [
+        {
+          "app": "new-api"
+        }
+      ],
+      "delivery": {
+        "tier": "auto",
+        "minutes": 1,
+        "memory_mb": 512,
+        "user_steps": [
+          "登录后新建一个渠道，填上游的 Key 和模型，点“测试”"
+        ]
+      }
+    }
+  ]
+}

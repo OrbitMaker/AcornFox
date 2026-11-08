@@ -80,17 +80,25 @@ const (
 
 // App is the desired state of one app.
 type App struct {
-	Name              string    `json:"name"`
-	Desired           string    `json:"desired"`            // DesiredRunning | DesiredStopped
-	Port              int       `json:"port"`               // container port; 0 = detect from image EXPOSE, else 8080
-	HealthPath        string    `json:"health_path"`        // default "/"
-	PublicPort        int       `json:"public_port"`        // host port Caddy listens on for this app; unique per host
-	CurrentDeployment string    `json:"current_deployment"` // ID of the live deployment, "" if none
-	MemoryMB          int       `json:"memory_mb"`          // default DefaultMemoryMB
-	CPUMilli          int       `json:"cpu_milli"`          // default DefaultCPUMilli (1000 = 1 CPU)
-	Exposure          string    `json:"exposure"`           // "" (platform default) | Exposure* below
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	Name              string `json:"name"`
+	Desired           string `json:"desired"`            // DesiredRunning | DesiredStopped
+	Port              int    `json:"port"`               // container port; 0 = detect from image EXPOSE, else 8080
+	HealthPath        string `json:"health_path"`        // default "/"
+	PublicPort        int    `json:"public_port"`        // host port Caddy listens on for this app; unique per host
+	CurrentDeployment string `json:"current_deployment"` // ID of the live deployment, "" if none
+	MemoryMB          int    `json:"memory_mb"`          // default DefaultMemoryMB
+	CPUMilli          int    `json:"cpu_milli"`          // default DefaultCPUMilli (1000 = 1 CPU)
+	Exposure          string `json:"exposure"`           // "" (platform default) | Exposure* below
+	// Set for apps installed from the app catalog (all empty otherwise).
+	Command        []string  `json:"command,omitempty"`         // container start command; empty = the image's default
+	PidsLimit      int       `json:"pids_limit,omitempty"`      // 0 = the runner default (512)
+	Links          []string  `json:"links,omitempty"`           // other apps whose network the container joins
+	CatalogID      string    `json:"catalog_id,omitempty"`      // app id in the catalog
+	CatalogVersion string    `json:"catalog_version,omitempty"` // release.version installed
+	CatalogSource  string    `json:"catalog_source,omitempty"`  // "catalog" or "recipe:<id>"
+	CatalogOrigin  string    `json:"catalog_origin,omitempty"`  // "" = public catalog, else the private catalog id
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // How an app is reachable. AFX Cloud ("afx_cloud": a public address under

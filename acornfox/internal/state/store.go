@@ -247,12 +247,34 @@ func (s *Store) UpdateApp(ctx context.Context, name string, fn func(*App) error)
 		if !ValidExposure(draft.Exposure) {
 			return fmt.Errorf("%w: exposure %q", ErrInvalid, draft.Exposure)
 		}
+		if draft.PidsLimit < 0 {
+			return fmt.Errorf("%w: pids_limit %d", ErrInvalid, draft.PidsLimit)
+		}
+		if draft.CatalogOrigin != "" && !catalogOriginRe.MatchString(draft.CatalogOrigin) {
+			return fmt.Errorf("%w: catalog_origin %q", ErrInvalid, draft.CatalogOrigin)
+		}
+		for _, l := range draft.Links {
+			if !ValidAppName(l) || l == name {
+				return fmt.Errorf("%w: link %q", ErrInvalid, l)
+			}
+		}
+		commandText, err := encodeStringList(draft.Command)
+		if err != nil {
+			return err
+		}
+		linksText, err := encodeStringList(draft.Links)
+		if err != nil {
+			return err
+		}
 		draft.UpdatedAt = time.Now().UTC()
 		_, err = tx.ExecContext(ctx, `UPDATE apps SET
-			desired=?, port=?, health_path=?, current_deployment=?, memory_mb=?, cpu_milli=?, exposure=?, updated_at=?
+			desired=?, port=?, health_path=?, current_deployment=?, memory_mb=?, cpu_milli=?, exposure=?,
+			command=?, pids_limit=?, links=?, catalog_id=?, catalog_version=?, catalog_source=?, catalog_origin=?, updated_at=?
 			WHERE name=?`,
 			draft.Desired, draft.Port, draft.HealthPath, draft.CurrentDeployment,
-			draft.MemoryMB, draft.CPUMilli, draft.Exposure, formatTime(draft.UpdatedAt), name)
+			draft.MemoryMB, draft.CPUMilli, draft.Exposure,
+			commandText, draft.PidsLimit, linksText, draft.CatalogID, draft.CatalogVersion, draft.CatalogSource, draft.CatalogOrigin,
+			formatTime(draft.UpdatedAt), name)
 		if err != nil {
 			return fmt.Errorf("update app: %w", err)
 		}
@@ -289,6 +311,21 @@ func (s *Store) DeleteApp(ctx context.Context, name string, keepVolumes bool) er
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM deployments WHERE app=?`, name); err != nil {
 			return fmt.Errorf("delete deployments: %w", err)
+		}
+		// An app-center app deleted with its data kept: keep its parameters
+		// for a later reuse_data install; deleted with its data: nothing to
+		// reuse any more.
+		if keepVolumes {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO kept_catalog_secrets(app, catalog_id, catalog_origin, params_enc, kept_at)
+				SELECT a.name, a.catalog_id, a.catalog_origin, s.params_enc, ? FROM apps a JOIN app_catalog_secrets s ON s.app = a.name
+				WHERE a.name=? AND a.catalog_id != ''`, formatTime(time.Now().UTC()), name); err != nil {
+				return fmt.Errorf("keep catalog secrets: %w", err)
+			}
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM kept_catalog_secrets WHERE app=?`, name); err != nil {
+			return fmt.Errorf("delete kept catalog secrets: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM app_catalog_secrets WHERE app=?`, name); err != nil {
+			return fmt.Errorf("delete catalog secrets: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE name=?`, name); err != nil {
 			return fmt.Errorf("delete app: %w", err)
@@ -917,7 +954,10 @@ func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
-const appSelect = `SELECT name, desired, port, health_path, public_port, current_deployment, memory_mb, cpu_milli, exposure, created_at, updated_at`
+// catalogOriginRe is a private catalog id (the gateway's format).
+var catalogOriginRe = regexp.MustCompile(`^cat-[A-Za-z0-9_-]{1,64}$`)
+
+const appSelect = `SELECT name, desired, port, health_path, public_port, current_deployment, memory_mb, cpu_milli, exposure, command, pids_limit, links, catalog_id, catalog_version, catalog_source, catalog_origin, created_at, updated_at`
 
 // rowScanner abstracts *sql.Row and *sql.Rows for shared scanning.
 type rowScanner interface {
@@ -926,12 +966,20 @@ type rowScanner interface {
 
 func scanAppFrom(sc rowScanner) (App, error) {
 	var a App
-	var createdText, updatedText string
+	var createdText, updatedText, commandText, linksText string
 	if err := sc.Scan(&a.Name, &a.Desired, &a.Port, &a.HealthPath, &a.PublicPort,
-		&a.CurrentDeployment, &a.MemoryMB, &a.CPUMilli, &a.Exposure, &createdText, &updatedText); err != nil {
+		&a.CurrentDeployment, &a.MemoryMB, &a.CPUMilli, &a.Exposure,
+		&commandText, &a.PidsLimit, &linksText, &a.CatalogID, &a.CatalogVersion, &a.CatalogSource, &a.CatalogOrigin,
+		&createdText, &updatedText); err != nil {
 		return App{}, err
 	}
 	var err error
+	if a.Command, err = decodeStringList(commandText); err != nil {
+		return App{}, fmt.Errorf("app %s command: %w", a.Name, err)
+	}
+	if a.Links, err = decodeStringList(linksText); err != nil {
+		return App{}, fmt.Errorf("app %s links: %w", a.Name, err)
+	}
 	if a.CreatedAt, err = parseTime(createdText); err != nil {
 		return App{}, err
 	}

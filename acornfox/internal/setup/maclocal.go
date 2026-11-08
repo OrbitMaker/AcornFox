@@ -20,7 +20,7 @@ import "github.com/acornfox/acornfox/internal/platform"
 const MacLocalCode = "SETUP-MAC-01"
 
 // MacLocalMessage is what the blocked commands print.
-const MacLocalMessage = "Mac 本机运行即将支持；现在请把 AcornFox 装在一台 Linux 服务器上，用这台 Mac 上的命令行管理（acornfox target add …）"
+const MacLocalMessage = "Mac 版只有命令行客户端，不能在 Mac 本机运行 AcornFox 服务；请把 AcornFox 装在一台 Linux 服务器上，用这台 Mac 上的命令行管理（acornfox target add …）"
 
 // MacLocalHint is the next step shown with MacLocalMessage.
 const MacLocalHint = "1. 在一台 Linux 服务器（amd64 或 arm64）上按使用文档用 install.sh 安装 AcornFox；" +

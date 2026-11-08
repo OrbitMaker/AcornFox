@@ -56,7 +56,7 @@ func parseDashLLocal(args []string) string {
 }
 
 func TestTunnelArgs(t *testing.T) {
-	got := tunnelArgs(Target{SSH: "ubuntu@1.2.3.4", Port: 2222, Identity: "/k/id"}, 54321)
+	got := tunnelArgs(Target{SSH: "ubuntu@1.2.3.4", Port: 2222, Identity: "/k/id"}, 54321, consoleRemotePort)
 	want := []string{
 		"-N", "-T",
 		"-o", "BatchMode=yes",
@@ -67,6 +67,17 @@ func TestTunnelArgs(t *testing.T) {
 	}
 	if !equalStrings(got, want) {
 		t.Errorf("argv = %v\nwant %v", got, want)
+	}
+}
+
+// An app tunnel forwards to the app's port on the server's loopback.
+func TestTunnelArgsAppPort(t *testing.T) {
+	got := tunnelArgs(Target{SSH: "ubuntu@1.2.3.4"}, 40001, 18810)
+	if !equalStrings(got[len(got)-3:], []string{"-L", "127.0.0.1:40001:127.0.0.1:18810", "ubuntu@1.2.3.4"}) {
+		t.Errorf("argv = %v", got)
+	}
+	if _, err := OpenTunnelTo(context.Background(), Target{SSH: "u@h"}, 40001, 0); err == nil {
+		t.Error("port 0 accepted")
 	}
 }
 

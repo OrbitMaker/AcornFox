@@ -131,6 +131,8 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		CaddyAdmin:      *caddyAdmin,
 		DefaultExposure: *exposure,
 		LANConsolePort:  *lanPort,
+		CheckPorts:      true,
+		ServerLAN:       serverLANAddress(*publicHost, platform.LinuxInstallCloud("/etc/acornfox/install.env")),
 		Setup: &setupDeps{
 			DataDir: *dataDir,
 			Console: "http://" + *consoleListen,
@@ -210,4 +212,17 @@ func runRunner(args ...string) int {
 	defer cancel()
 	_ = srv.Shutdown(shCtx)
 	return 0
+}
+
+// serverLANAddress returns the Linux server's address on the user's local
+// network for the console's open hints, or "" on a cloud or other public
+// server (platform.ServerLANAddress decides; the address is looked up at
+// most every 30 seconds). Besides the vendor install.sh recorded, the cloud
+// metadata address is asked in the background: until it is known not to
+// answer, the server counts as a cloud server.
+func serverLANAddress(publicHost, cloud string) func() string {
+	lan := cachedLANAddress()
+	probe := platform.NewCloudProbe()
+	probe.Start()
+	return func() string { return platform.ServerLANAddress(lan(), publicHost, cloud, probe.OnCloud()) }
 }

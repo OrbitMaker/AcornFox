@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/acornfox/acornfox/internal/client"
 	"github.com/acornfox/acornfox/internal/identity"
 	"github.com/acornfox/acornfox/internal/platform"
 )
@@ -48,6 +49,28 @@ type identityOut struct {
 // ID-KEY-01 the key file cannot be read or is not a P-256 key;
 // ID-KEY-02 a new key cannot be saved (permissions, disk).
 func runIdentity(args []string, stdout, stderr io.Writer) int {
+	// --json may come before the subcommand ("identity --json show", or
+	// "acornfox --json identity show" whose --json main moves to the end).
+	// Without a subcommand a JSON request gets a JSON usage error.
+	var jsonFirst bool
+	for len(args) > 0 && (args[0] == "--json" || args[0] == "-json") {
+		jsonFirst = true
+		args = args[1:]
+	}
+	if jsonFirst {
+		if len(args) == 0 {
+			b, _ := json.Marshal(map[string]any{"ok": false, "diagnosis": client.Diagnosis{
+				Stage: "usage", Code: "usage",
+				Message: "identity 要带子命令：show（只读）或 reset（默认试跑）",
+				Hint:    "acornfox identity show --json",
+			}})
+			fmt.Fprintln(stdout, string(b))
+			return 2
+		}
+		if args[0] != "-h" && args[0] != "--help" && args[0] != "help" {
+			args = append(append([]string{}, args...), "--json")
+		}
+	}
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		fmt.Fprint(stdout, identityHelp)
 		if len(args) == 0 {

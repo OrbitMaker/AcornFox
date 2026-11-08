@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/netip"
 	"os"
 	"path"
@@ -62,7 +63,21 @@ type Docker struct {
 	// mu guards inflight, the concurrent-build dedupe map.
 	mu       sync.Mutex
 	inflight map[string]*buildCall
+
+	// root caches Docker's data root for Ping (see dockerRoot).
+	root atomic.Pointer[rootCache]
 }
+
+// rootCache is Docker's data root as last read from one client.
+type rootCache struct {
+	cli *client.Client
+	dir string
+	at  time.Time
+}
+
+// rootCacheTTL bounds how long a cached data root is trusted: moving it
+// needs a Docker restart, and Ping runs on every status request.
+const rootCacheTTL = time.Minute
 
 // buildCall is one shared, in-flight build keyed by image tag (singleflight).
 type buildCall struct {
@@ -101,7 +116,24 @@ func (d *Docker) Ping(ctx context.Context) (PingResponse, error) {
 			resp.DockerAPIVersion = ver.APIVersion
 		}
 	}
+	resp.DockerRootDir = d.dockerRoot(ctx)
 	return resp, nil
+}
+
+// dockerRoot returns Docker's data root, read with Info at most once a
+// minute per client, or "" when Docker does not answer.
+func (d *Docker) dockerRoot(ctx context.Context) string {
+	cli := d.c()
+	if rc := d.root.Load(); rc != nil && rc.cli == cli && time.Since(rc.at) < rootCacheTTL {
+		return rc.dir
+	}
+	info, err := cli.Info(ctx, client.InfoOptions{})
+	if err != nil {
+		return ""
+	}
+	dir := info.Info.DockerRootDir
+	d.root.Store(&rootCache{cli: cli, dir: dir, at: time.Now()})
+	return dir
 }
 
 // Build builds ImageTag(App, DeploymentID) from a tar or tar.gz on disk. If the
@@ -815,6 +847,9 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 		LabelRole:       role,
 	}
 	pids := int64(DefaultPidsLimit)
+	if addon == nil && req.PidsLimit > 0 && req.PidsLimit <= MaxPidsLimit {
+		pids = int64(req.PidsLimit)
+	}
 	memory := int64(req.MemoryMB) * (1 << 20)
 	nanoCPUs := int64(req.CPUMilli) * 1e6
 
@@ -828,11 +863,24 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 	// Add-ons publish nothing: they are reachable only by name inside
 	// NetworkName(app).
 	var bindings network.PortMap
+	var netCfg *network.NetworkingConfig
+	var links []string
 	if addon == nil {
 		bindings = network.PortMap{containerPort: {{
 			HostIP:   netip.MustParseAddr("127.0.0.1"),
 			HostPort: "0",
 		}}}
+		if len(req.Command) > 0 {
+			cfg.Cmd = append([]string(nil), req.Command...)
+		}
+		// Other apps on this network (and apps linked to it) reach the
+		// container by the app name, which survives redeploys.
+		netCfg = &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
+			NetworkName(req.App): {Aliases: []string{req.App}},
+		}}
+		if links, err = d.linkNetworks(ctx, req.App, req.Links); err != nil {
+			return ContainerInfo{}, err
+		}
 	} else {
 		if err := d.ensureAddonImage(ctx, addon.Image); err != nil {
 			return ContainerInfo{}, err
@@ -852,8 +900,9 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 	}
 
 	created, err := d.c().ContainerCreate(ctx, client.ContainerCreateOptions{
-		Name:   name,
-		Config: cfg,
+		Name:             name,
+		Config:           cfg,
+		NetworkingConfig: netCfg,
 		HostConfig: &container.HostConfig{
 			NetworkMode:   container.NetworkMode(NetworkName(req.App)),
 			PortBindings:  bindings,
@@ -886,10 +935,41 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 		return ContainerInfo{}, err
 	}
 
+	for _, n := range links {
+		if _, err := d.c().NetworkConnect(ctx, n, client.NetworkConnectOptions{Container: created.ID}); err != nil && !cerrdefs.IsConflict(err) {
+			return ContainerInfo{}, fmt.Errorf("connect %s to %s: %w", name, n, err)
+		}
+	}
 	if _, err := d.c().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return ContainerInfo{}, err
 	}
 	return d.containerInfo(ctx, name)
+}
+
+// linkNetworks returns the networks of the linked apps that exist and are
+// managed for them. A missing network is skipped (the other app is not
+// deployed yet: the link comes back once both containers are recreated); a
+// network that exists but is not ours is refused.
+func (d *Docker) linkNetworks(ctx context.Context, app string, links []string) ([]string, error) {
+	var out []string
+	for _, l := range links {
+		if !ValidApp(l) || l == app {
+			return nil, &RemoteError{Status: http.StatusBadRequest, ErrorResponse: ErrorResponse{Code: "refused", Message: "invalid link " + l}}
+		}
+		n := NetworkName(l)
+		res, err := d.c().NetworkInspect(ctx, n, client.NetworkInspectOptions{})
+		if err != nil {
+			if cerrdefs.IsNotFound(err) {
+				continue
+			}
+			return nil, err
+		}
+		if err := checkNetworkOwner(l, res.Network); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // ensureAddonImage pulls a pinned add-on image if it is not present locally.

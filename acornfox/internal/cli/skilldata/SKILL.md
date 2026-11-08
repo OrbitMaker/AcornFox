@@ -33,7 +33,7 @@ Mac、Windows 用户现在的做法：准备一台 Linux 服务器，把 AcornFo
 **输出规则：**
 
 - 管理员令牌、登录密码、`password_file` 里的内容，不要在对话里复述。
-- 大多数命令加 `--json`，按输出里的 `ok` 判断成败。两个例外写法要照抄：版本用 `acornfox --json version`；自检用 `acornfox doctor --json`（`--json` 放在 doctor 后面）。
+- 大多数命令加 `--json`，按输出里的 `ok` 判断成败。`--json` 放在命令前后都可以。版本照抄 `acornfox --json version`，自检照抄 `acornfox doctor --json`：这两种写法新旧版本都认。
 - 同一个问题按表格处理两次还失败，停下来，把原始输出交给用户。
 
 ## 最低路径：第一次安装到第一个应用上线
@@ -147,13 +147,13 @@ chmod 600 ~/.ssh/config
 
 - 第 3～6 步和情况乙一样，在“在服务器上执行”的命令开头加 `ssh 用户@地址`。
 - 第 7 步起，本 Skill 里的每一条 `acornfox …` 命令都写成 `ssh 用户@地址 '命令'`，整条命令放在一对单引号里，例如 `ssh 用户@地址 'acornfox --json status'`。每条 ssh 都是新连接，不用包 `sg`。
-- 经 ssh 执行时，当前目录是服务器上的家目录。要在应用目录里执行的命令（目录里的 `.acornfox` 记着应用名）先 `cd`，例如 `ssh 用户@地址 'cd ~/acornfox-apps/myapp && acornfox status --json'`；或者加 `--app 应用名`。
+- 经 ssh 执行时，当前目录是服务器上的家目录。管某个应用的命令加 `--app 应用名`，例如 `ssh 用户@地址 'acornfox --json --app myapp status'`；或者先 `cd` 到应用目录（目录里的 `.acornfox` 记着应用名）。这两种写法新旧版本都认。v0.5 起也可以把应用名直接写在命令后面（`acornfox --json status myapp`），旧版本会把它当成部署编号，报 `not_found` 或“不接受参数”时改用 `--app`。
 - 不要在 Windows 上运行 install-cli 命令：本版本没有 Windows 版 CLI，脚本只会说明情况并退出。
 - 端口、私钥照第 2 步加在命令名紧后面：`ssh -p 端口 -i 私钥路径 用户@地址 '…'`；`scp` 也一样写在 `scp` 紧后面，但端口参数是大写的 `-P 端口`（`scp -P 端口 -i 私钥路径 -r …`）。
 
 ### 第 3 步：检查服务器
 
-在服务器上执行（只读，不改任何东西）。**整段原样复制执行，不要删减**：每一行后面都会用到，其中云厂商那一行决定后面用不用厂商内网源。
+在服务器上执行（只读，不改任何东西）。**整段原样复制执行，不要删减**：每一行后面都会用到，其中云厂商那一行决定后面用不用厂商内网源。输出第一行是 `sudo=`、最后一行是 `github=`；少了哪行，说明没有整段执行，重跑一次。
 
 ```bash
 bash -s <<'EOF'
@@ -163,7 +163,7 @@ echo "arch=$(uname -m)"
 echo "user=$(id -un)"
 echo "mem_mb=$(free -m | awk '/^Mem:/{print $2}')"
 echo "disk_free_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
-command -v ufw >/dev/null && $S ufw status 2>/dev/null | head -1 | sed 's/^/ufw=/'
+if command -v ufw >/dev/null; then echo "ufw=$($S ufw status 2>/dev/null | head -1)"; else echo "ufw=none"; fi
 if command -v acornfox >/dev/null; then echo "acornfox=$(acornfox version 2>/dev/null)"; else echo "acornfox=none"; fi
 echo "service=$(systemctl is-active acornfox-server 2>/dev/null)"
 echo "init=$(ps -p 1 -o comm= 2>/dev/null)"
@@ -203,7 +203,7 @@ EOF
 | `mem_mb=` | 小于 1800 | 提醒用户：内存小于 2 GB，只适合跑一两个小应用。用户同意再继续 |
 | `disk_free_gb=` | 小于 10 | 提醒用户空间偏小，部署几个应用后可能不够；小于 3 时先请用户清理或扩容 |
 | `acornfox=` / `service=` | 有版本号且 `service=active` | **已经装过**，跳过第 4、5 步，直接做第 6 步自检 |
-| `ufw=` | `Status: active` | 记下来，第 9 步要用 |
+| `ufw=` | `Status: active` | 记下来，第 9 步要用（`ufw=none` 或 `Status: inactive` 不用管） |
 
 ### 第 4 步：判断国内还是海外
 
@@ -423,6 +423,8 @@ EOF
 全部正常的样子：`doctor` 输出 `"ok":true`、`doctor_exit=0`；`services=active active active`；`caddy=running`；`gateway=403`（403 是对的，表示网关在运行且拒绝了没带令牌的请求）。
 
 - `doctor` 里 `"ok":false` 的项目：按它的 `code` 查下文“自检故障编号”；`warn` 项转述给用户即可，不挡路。
+- 输出结构：`{"ok":…,"items":[…]}`，每项有 `ok`、`level`（`ok`、`warn`、`fail`）、`text`、`check`，要处理的项另有 `code`；没有 `status` 字段。
+- 要看某一项的结果（例如时钟），按 `check` 找，不要按文字找：每一项都带 `check`，是这项检查的编号，通过的项也有（时钟一项是 `SETUP-CLOCK-01`，端口一项是 `SETUP-PORT-01`）。`code` 只出现在要处理的项上。
 - 不是 root 的用户（已在 `acornfox-users` 组里）直接运行 `acornfox doctor` 时，下面两条是正常的，不是故障：Docker 一项写“由后台服务访问 Docker……当前用户不需要 Docker 权限”（Docker 由后台服务访问，普通用户本来就不用连 Docker）；`SETUP-PORT-05` 警告“不是 root，看不到是谁占用”（AcornFox 自己的端口已经认出来了，剩下的端口要确认就用 `sudo acornfox doctor --json`）。
 - `services` 里有不是 `active` 的：执行 `sudo journalctl -u acornfox-server -n 50 --no-pager`（以及 `-u acornfox-runner`），把报错转述给用户。
 - `caddy=` 不是 `running` 或 `gateway=` 不是 `403`：执行 `sudo docker logs --tail 50 acornfox-caddy`，多半是端口被占，按 `SETUP-PORT-01`、`SETUP-PORT-02` 处理。
@@ -534,10 +536,10 @@ ssh 用户@地址 'mkdir -p ~/acornfox-hello && cd ~/acornfox-hello && acornfox 
 ssh 用户@地址 'acornfox --json status DEPLOYMENT_ID'
 ```
 
-第二条每隔 5 秒执行一次，直到 `status` 是 `live` 或 `failed`（和上面一样）。`live` 之后取网址：这一条输出里没有 `url`，要在部署时的目录里查应用状态（经 ssh 不 `cd` 会报 `not_found`），用输出里的 `url`：
+第二条每隔 5 秒执行一次，直到 `status` 是 `live` 或 `failed`（和上面一样）。`live` 之后取网址：这一条输出里没有 `url`，按应用名查应用状态，用输出里的 `url`：
 
 ```bash
-ssh 用户@地址 'cd ~/acornfox-hello && acornfox --json status'
+ssh 用户@地址 'acornfox --json --app hello status'
 ```
 
 现成镜像、公开 Git 仓库不用传文件，在服务器上建一个目录直接部署，例如 `ssh 用户@地址 'mkdir -p ~/acornfox-apps/myapp && cd ~/acornfox-apps/myapp && acornfox deploy --json --no-wait --git 仓库地址 --app myapp'`。
@@ -550,9 +552,9 @@ scp -r 项目文件夹 用户@地址:acornfox-apps/
 ssh 用户@地址 'cd ~/acornfox-apps/myapp && acornfox deploy --json --no-wait'
 ```
 
-之后同上：`ssh 用户@地址 'acornfox --json status DEPLOYMENT_ID'` 查到 `live`，再用 `ssh 用户@地址 'cd ~/acornfox-apps/myapp && acornfox --json status'` 取 `url`。
+之后同上：`ssh 用户@地址 'acornfox --json status DEPLOYMENT_ID'` 查到 `live`，再用 `ssh 用户@地址 'acornfox --json --app myapp status'` 取 `url`。
 
-- 容器监听的端口不是 Dockerfile 里 `EXPOSE` 的那个，或者没写 `EXPOSE` 时，在 `deploy` 后面加 `--port 端口`。
+- 容器监听的端口不是 Dockerfile 里 `EXPOSE` 的那个，或者没写 `EXPOSE` 时，在 `deploy` 后面加 `--port 端口`。端口怎么定：nginx、httpd 镜像是 80；Node 看代码里 `listen(` 的端口；Python 看启动命令里的 `--port`；判断不了就问用户，不要猜。
 - 文件夹很大（有 `node_modules`、`.git`、构建产物）时，`scp` 会很慢，改用这一条代替上面的 `scp`（`--exclude` 按项目增减）：
 
 ```bash
@@ -592,7 +594,7 @@ tar -czf - --exclude=node_modules --exclude=.git -C 项目文件夹 . | ssh 用�
 
 ## 安装故障编号
 
-安装脚本在改动系统之前先检查，不满足时打印 `故障编号: 编号` 并停下，什么都没改。升级脚本也用这些编号，另外有两个 `UPGRADE-` 开头的编号，只在升级、回滚时出现，同样是停下、什么都没改（服务也没停）。
+安装脚本在改动系统之前先检查，不满足时打印 `故障编号: 编号` 并停下，什么都没改。升级脚本也用这些编号；`UPGRADE-` 开头的编号只在升级时出现，见“升级、卸载”一节。
 
 | 编号 | 意思 | 处理 |
 | --- | --- | --- |
@@ -605,8 +607,7 @@ tar -czf - --exclude=node_modules --exclude=.git -C 项目文件夹 . | ssh 用�
 | `INSTALL-PORT-02` | 80 或 443 被别的程序占了（常见：宝塔、1Panel、nginx） | 问用户二选一：①停掉原来的程序（用户同意后才停）再重跑；②共存：加 `-s -- --allow-busy-80-443` 重跑，应用照常用 `IP:端口` 访问，但不能在 AcornFox 里绑域名、开 HTTPS 和公网控制台，域名继续在原来的面板里反向代理到 `127.0.0.1:应用端口` |
 | `INSTALL-PORT-03` | 应用端口段 18810-18899 里有端口被占 | 转述占用的程序，**问用户**能不能停掉或改端口；处理后重跑 |
 | `INSTALL-CLOUD-01` | `--cloud` 或 `ACORNFOX_CLOUD_OVERRIDE` 的值不认识 | 这是测试参数，去掉后重跑 |
-| `UPGRADE-DOWN-01` | 升级时要装的版本比现在旧，且读不了现在的数据库：不支持降级到 v0.3.x（v0.4.0 以前）；v0.4.0 起的版本之间加 `-y` 降级时，在数据库副本上试跑旧版本的迁移没通过 | 不要加 `-y` 或换 `--version` 重试。告诉用户这个版本降不回去；用户是想回到升级前的版本，改用 `--rollback`，按“升级、卸载”里的“回滚”做（先说明副作用，用户同意后执行） |
-| `UPGRADE-ROLLBACK-01` | `--rollback` 找不到比现在版本旧的备份，没有回滚 | 现在已经在原来的版本上（上次升级没成功、已自动回到原版本，或者已经回滚过一次），不用再回滚，告诉用户现在的版本（`acornfox --json version`）。输出里列的备份目录**不要自己去恢复**：用户要把数据库倒回某一份备份的状态（会丢掉那之后的改动），先停下问清楚用户 |
+| `INSTALL-DOWN-01` | 服务器上已经装着更新的 AcornFox，或者留着卸载时保留的、更新版本的数据，要装的版本比它旧。AcornFox 只能升级，不能降级 | 什么都没改。不要换参数重试。要换新版本按“升级、卸载”做升级；用户坚持要装旧版本，只能先卸载并删除数据（`--purge`，不可恢复），这一步必须用户明确同意 |
 
 ### 安装时其他报错
 
@@ -663,6 +664,7 @@ EOF
 | `SETUP-PORT-05`（warn） | 不是 root，看不到端口是谁占的（root 运行时：分不清是不是 AcornFox 自己的） | 普通用户运行时出现是正常的，不挡路；要确认就用 `sudo acornfox doctor --json` 再查一次 |
 | `SETUP-EDGE-01` | 网关组件（Caddy）没准备好 | `sudo docker logs --tail 50 acornfox-caddy`；`sudo systemctl restart acornfox-server` 后再自检 |
 | `SETUP-CHK-02` | Docker 不能创建和删除容器 | 多半是磁盘满了，按 `SETUP-DISK-01` 处理 |
+| `SETUP-CLOCK-01` | 本机时钟不准，或者没开网络对时 | **先问用户**，再运行 `sudo timedatectl set-ntp true`；过一两分钟 `timedatectl` 看 `System clock synchronized: yes`，再 `acornfox doctor`。时钟差太多时下载网关会拒绝这台机器（`GW-AUTH-01`），应用中心的大镜像会改从公共源拉、慢很多 |
 
 表里没有的编号：把那一项的 `text` 原样转述给用户，照里面的建议做；涉及删除、停程序、花钱的先问用户。
 
@@ -738,6 +740,7 @@ acornfox deploy --json --image nginx:1.27-alpine --port 80 --app my-app
 
 ```bash
 acornfox status --json                 # 应用状态：url、observed_state、current_deployment
+acornfox --app 应用名 status --json    # 指定应用（v0.5 起也可写 status 应用名；写 12 位部署编号时看那一次部署的进度）
 acornfox apps --json                   # 这台服务器上的所有应用
 acornfox diagnose --json               # 本机最近一次部署的状态、事件和诊断
 acornfox diagnose DEPLOYMENT_ID --json # 指定部署
@@ -810,19 +813,105 @@ acornfox remove postgres --json [--volumes]
 
 添加后会自动重新部署并注入连接变量：postgres、mysql 为 `DATABASE_URL`，redis 为 `REDIS_URL`。代码里从环境变量读取连接串，不要写死。`remove … --volumes` 会删数据，先问用户。
 
+## 从应用中心装应用
+
+应用中心的目录里是预先配好的应用（现在有 New API 模型网关、Hermes 智能体）和配方（几个应用一起装好并连起来）。从目录装不用写 Dockerfile，也不用填密码：密码和密钥由 AcornFox 生成，装好后给出首次登录信息。情况丙照样经 ssh 在服务器上运行这些命令。
+
+**最低路径（照着做）：**
+
+1. 看目录：`acornfox --json catalog list`。`apps[].id` 是应用名，`recipes[].id` 是配方名，`apps[].installed` 不为空表示这台服务器已经装过。同步结果是 `CAT-SYNC-08`（在线目录都取不到）时，用的是程序自带的目录，照样能装，不用处理。
+2. 看要填什么：`acornfox --json catalog info 应用`。`params` 里每一项是能填的参数；`generated: true` 的留空会自动生成；`llm` 这一项说明三种大模型来源现在能不能用。`platform` 是平台按这台机器自动填的（时区、下载源、默认模型等），**不用填**。
+3. 提交安装，不等：
+
+   ```bash
+   acornfox --json install new-api --no-wait                  # 记下输出里的 task_id
+   acornfox --json install hermes-agent --llm local --no-wait  # Hermes 接本机 New API（先装好 New API）
+   acornfox --json install --recipe hermes-with-new-api --no-wait   # 两个一起装并连起来
+   ```
+
+4. 每隔 5 秒查一次：`acornfox --json install status TASK_ID`，直到 `status` 是 `succeeded` 或 `failed`。`steps` 里是每一步的进度。
+5. 成功：把 `first_login` 告诉用户，再按下面“装好后怎么打开”告诉用户怎么打开。密码默认是 `******`，**不要在对话里复述密码**；告诉用户自己在服务器上运行 `acornfox install status TASK_ID --show-secrets` 查看，或在控制台的应用详情里看。再把 `user_steps`（还要用户做的几步）逐条告诉用户。任务的 `apps[]` 里带 `gateway_token` 的应用（例如接了本机 New API 的 Hermes）用的是 New API 里一把**不限额、不过期**的令牌，要告诉用户：要控制花费，可在 New API 后台的“令牌”页给它设上限。`gateway_token` 里只有编号和 `provider`，令牌名不在输出里，固定是 `acornfox-应用名`（例如 `acornfox-hermes-agent`）。
+6. 失败：看 `fault.code`，按下表处理。失败时这次建出来的应用和数据卷已经自动清理（只清理这次新建的，以前留下的数据不会动），处理好原因后重新安装即可。加了 `--keep-data-on-failure` 时数据卷会留着，任务的 `apps[].volumes` 列出卷名。
+
+### 装好后怎么打开（只本机的应用）
+
+从应用中心装的应用默认只本机能打开（`exposure: local`）：`apps[].url` 是 `http://127.0.0.1:端口`，只在服务器自己身上能用，用户在自己电脑上点不开。**不要**让用户去安全组或防火墙放行端口（应用只听本机地址，放行了也打不开）。
+
+**最低路径（照着做）：**
+
+1. 看对外方式：`acornfox --json apps`。找到这个应用：`local_only: true`（`exposure: local`）才需要往下做；`lan`、`public` 的直接把 `url` 告诉用户。
+2. 看 `open_hint`：
+   - `recommend` 是 `lan`（服务器在用户的局域网里，应用有自己的登录）：**先问用户**“要不要让同一局域网里的电脑都能打开它？这会在服务器的所有网卡上开放这个端口，服务器如果还有公网地址、安全组又放行了这个端口，公网也能访问到；打开后要用应用自己的账号密码登录”。用户事先已经同意过，执行前也要把这段提醒原样说一遍。用户同意才运行 `acornfox --json app set --app 应用名 --expose lan`，然后把 `open_hint.lan_url` 告诉用户（就是局域网地址加端口）。用户不同意就做第 3 条。
+   - `recommend` 是 `tunnel`（公网云服务器，或应用没有自己的登录）：做第 3 条，不提改对外方式。
+3. 让用户在**他自己的电脑**上运行 `acornfox open 应用名`（`open_hint.command` 就是这条命令）。它像 `acornfox open` 打开控制台一样开一条 SSH 隧道，自动打开浏览器，看完按 Ctrl+C 关闭。这要求用户电脑上装了 CLI 并按第 7 步用 `--ssh` 登记了服务器（情况乙）。
+   - 情况甲、丙（用户电脑上没有 CLI）：请用户在自己电脑的终端运行 `ssh -N -L 端口:127.0.0.1:端口 用户@地址`（端口是 `url` 里的端口）并保持不关，然后在浏览器打开 `http://127.0.0.1:端口`。
+
+`acornfox open 应用名` 出错时：
+
+| 编号 | 怎么办 |
+| --- | --- |
+| `OPEN-APP-01` | 应用还没有访问端口：`acornfox --json status 应用名` 看部署状态，部署成功后再打开 |
+| `OPEN-APP-02` | 这台服务器是用网址（局域网或公网控制台）登记的，开不了隧道：按第 7 步用 `--ssh` 再登记一次；或者先问用户，同意后改成局域网 |
+| `diagnosis.stage` 是 `connect` | SSH 连不上或不让转发，按“连接故障”处理 |
+
+**必须先停下问用户的：**
+
+- 用自己的大模型 Key（`--llm own`）：要用户给 `base_url`、`api_key`、`model`，用 `--set llm.base_url=… --set llm.api_key=… --set llm.model=…` 传。Key 由用户在自己的终端里输入，你不要替他编或保存。
+- 对外开放：应用默认只本机能打开（`exposure: local`）。New API 管着上游 Key，Hermes 的控制台能执行命令，要开放到局域网或公网（`acornfox app set --expose …`、绑定域名）必须用户明确同意，并提醒走 HTTPS、用强密码。用户只是想自己看一眼时，优先用 `acornfox open 应用名`，不用改对外方式。New API 装好时平台已替用户关掉自助注册（只有管理员账号能登录）；如果安装任务 `init` 步骤的说明里写着“没能关闭自助注册”，开放前先请用户登录 New API，在“系统设置”里关掉“允许新用户注册”。
+- 花钱：在 New API 里加上游渠道会产生模型费用，由用户自己在 New API 页面里加。
+- 内存不够（`CAT-INST-05`）：调小别的应用或调大整机上限都要用户同意。
+- 删掉同名的旧应用（`CAT-INST-03`）：会删数据，先问。
+- 以前同名应用留下的数据卷（`CAT-INST-24`）：先问用户旧数据还要不要。要接着用旧数据，就在同一条安装命令后面加 `--reuse-data` 重装（账号密码和以前一样；少数情况平台没留下以前的记录，首次登录会写“沿用旧数据里的”，让用户用自己记得的旧密码）；不要旧数据就用 `--name 新名字` 装，或者确定不要了由用户自己运行 `message` 里卷名对应的 `docker volume rm` 后再装。你不要替用户删。`--reuse-data` 只接上数据和账号，**对外方式会回到只本机**：以前开放过局域网的，装好后先告诉用户，问要不要照旧开放（提醒照“装好后怎么打开”第 2 条说），同意后再改。
+- 用户要改平台自动填的值（例如时区、下载源）：先 `acornfox --json catalog platform-vars` 看 `user_can_set` 是不是 `true`，是才加 `--set platform.名字=值`（只对这次装的应用生效）。`false` 的（网络区域、访问地址、平台 Key）不能改，不要试。
+- 删掉用了本机 New API 的应用（例如 Hermes）时，AcornFox 会顺带吊销给它发的令牌；返回里有 `warnings`（New API 没在跑，没吊销成）时，告诉用户去 New API 的“令牌”页删掉 `acornfox-应用名`。
+
+**常见故障编号（完整列表和含义以 `acornfox/internal/appinstall/faults.go` 为准，服务器回的 `hint` 就是处理方法）：**
+
+| 编号 | 意思 | 怎么办 |
+| --- | --- | --- |
+| `CAT-INST-01` | 目录里没有这个应用、配方或版本 | `acornfox --json catalog list` 看有哪些 |
+| `CAT-INST-02` | 参数不对 | 按 `message` 改 `--set`；`acornfox --json catalog info 应用` 看参数 |
+| `CAT-INST-03` | 已有同名应用 | `--name 新名字`；要重装先问用户再删旧的 |
+| `CAT-INST-04` | 同一个应用正在装 | 不要重复提交；用错误里的 `task_id` 查进度 |
+| `CAT-INST-05` | 内存不够 | 问用户：调小别的应用或调大整机上限 |
+| `CAT-INST-08` | AcornFox 版本太旧 | 问用户是否升级 AcornFox |
+| `CAT-INST-09` | 平台 Key 即将开放 | 改用 `--llm local`（本机 New API）或 `--llm own`（问用户要 Key） |
+| `CAT-INST-10` | 本机没有在运行的 New API | 先 `acornfox --json install new-api`，或装配方 `hermes-with-new-api` |
+| `CAT-INST-11` | 本机 New API 发不出令牌 | `acornfox --json status new-api` 看它在不在跑；管理员密码改过就改用 `--llm own` |
+| `CAT-INST-12` | 镜像拉不到 | 稍后重试；国内网络看 `acornfox doctor --json` |
+| `CAT-INST-13` | 下载网关给的镜像包和目录里的校验值对不上（没导入） | 会自动换公共源；不要手动绕过 |
+| `CAT-INST-15` | 没能上线 | 看 `fault.diagnosis`，按“部署诊断码”处理；`acornfox logs 应用` |
+| `CAT-INST-16` | 健康检查不过 | `acornfox logs 应用` 看日志；内存太小时问用户调大 |
+| `CAT-INST-17` | 初始化失败 | 看 `message`；这次的应用已清理，重新安装 |
+| `CAT-INST-18` | 安装途中服务重启 | 重新安装 |
+| `CAT-INST-24` | 以前同名应用的数据卷还在 | 停下问用户（见上面“必须先停下问用户的”） |
+| `CAT-INST-25`、`CAT-INST-26` | 和私有目录有关（这一版私有目录还没开放） | 不要自己想办法绕过，把原始输出交给用户 |
+| `CAT-INST-27` | 磁盘不够（`message` 里有要多少、剩多少） | 停下问用户：删掉不用的应用或镜像、或扩容磁盘，都由用户确认后做；你不要替用户删 |
+| `CAT-INST-28` | 改平台变量不对（没有这个变量、不能改、格式不对） | 去掉那个 `--set platform.…`；`acornfox --json catalog platform-vars` 看哪些能改 |
+
+**可以发挥的地方：** 用户只说“想要一个能接飞书的 AI 助手”时，可以推荐配方 `hermes-with-new-api` 并解释两步（装好后在 New API 里加上游渠道）。这个配方固定让 Hermes 用本机 New API，要用自己的 Key 就单独装 `hermes-agent --llm own`（配方里给 `--llm own` 会报 `CAT-INST-02`）。New API 没加渠道时，Hermes 调模型会返回 503“没有可用渠道”，这是正常的，提醒用户去加渠道。
+
+### 私有目录
+
+这一版还没开放。用户问起私有目录或给了连接码，就告诉他“私有目录暂未开放”，不要运行 `catalog connect`。
+
 ## 生命周期
 
 ```bash
-acornfox stop --json
-acornfox start --json
-acornfox restart --json
+acornfox --app 应用名 stop --json      # 等到容器真的停下才返回
+acornfox --app 应用名 start --json     # 等到观察状态是 running 才返回
+acornfox --app 应用名 restart --json   # 同上
 acornfox rollback --json --app APP [--to N]   # 回到上一个可回退的版本，或第 N 版（只换程序，不动数据）
 acornfox stats APP --json       # 该应用的 CPU、内存、网络（不带应用名则是整台服务器）
 acornfox domain add example.com --json
 acornfox domain list --json
 ```
 
-`acornfox delete --json [--volumes]` 和 `remove … --volumes` 会删除应用或数据，执行前必须得到用户明确同意。
+`start`、`restart` 返回 `"ok":true` 并且带 `"running":true` 时，应用已经在运行，不用再用 `apps` 确认。输出里没有 `running` 字段（v0.4.x 不等就返回）时，隔几秒用 `acornfox --json apps` 确认状态是 `running`。失败时看 `diagnosis.code`：`start_timeout` 是等了 60 秒还没起来，按 `hint` 运行 `acornfox logs 应用名` 找原因；`no_deployment` 是应用还没有上线过的版本，先部署；`cancelled` 是等待被打断，请求已经提交，用 `status` 看状态，不用再提交一次。不写 `--app` 时管的是当前目录对应的应用。v0.5 起应用名也可以直接写在命令后面（`acornfox stop 应用名 --json`），旧版本报“不接受参数”时改用 `--app`。
+
+`acornfox --json delete 应用名 [--volumes]` 和 `remove … --volumes` 会删除应用或数据，执行前必须得到用户明确同意。一定写上应用名（不写时删的是当前目录对应的应用）；不加 `--volumes` 时数据卷保留，以后同名重装会被 `CAT-INST-24` 拦下，用户要接着用旧数据时加 `--reuse-data`。
+
+删除被拒、`diagnosis.code` 是 `app_in_use`：别的应用连在它上面（例如 Hermes 正在用本机的 New API）。不要硬删，也不要自己先删依赖它的应用；把 `message` 转述给用户，问要不要先删 `message` 里那个应用（删它会吊销给它发的令牌），用户同意后按顺序删。
 
 回退只换程序，不重新构建；数据库、数据目录和环境变量保持现在的样子，回退前把这一点告诉用户。如果后来的版本改过数据库结构，旧版本可能起不来，也要提醒。“重新部署那一版的代码”是用那一版的代码（Git 提交或本地目录）再 `deploy` 一次，会生成新的版本号。要回到哪一版，先 `acornfox versions --json` 看 `can_rollback` 为 true 的版本。回退出错时：
 
@@ -847,6 +936,8 @@ acornfox domain list --json
 - 情况乙：在用户电脑上执行 `acornfox open`，它经 SSH 转发并打开浏览器，用户看完按 Ctrl+C 关闭。
 - 情况甲：请用户在**他自己电脑**的终端运行 `ssh -L 18800:127.0.0.1:18800 用户@地址` 并保持不关；然后你在服务器上执行 `acornfox open --no-browser`（不加 `--json`），把输出的登录链接告诉用户在自己电脑的浏览器里打开。链接一次性、60 秒内有效，过期就再执行一次。用户电脑是 Linux、Mac 时，更省事的做法是在他电脑上装 CLI，按情况乙第 7 步登记后用 `acornfox open`。
 - 情况丙：同情况甲，请用户在 Windows 的终端（Git Bash 或 PowerShell）运行 `ssh -L 18800:127.0.0.1:18800 用户@地址` 并保持不关；你执行 `ssh 用户@地址 'acornfox open --no-browser'`，把输出的登录链接告诉用户在浏览器里打开。
+
+打开某个应用（不是控制台）：情况乙在用户电脑上运行 `acornfox open 应用名`，同样经 SSH 隧道、按 Ctrl+C 关闭；只本机的应用也能这样打开，不用改对外方式、不用放行安全组。完整步骤见“从应用中心装应用”里的“装好后怎么打开”。
 
 ### 公网访问控制台（可选）
 
@@ -909,37 +1000,24 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgra
 
 通过管道运行就算同意升级，不会再询问。已经是最新版本时，脚本打印“已是最新版本 …，不用升级”后直接退出，服务不会停，这是正常的，告诉用户“已是最新版”即可。不要为了“强制升级”加 `-y`：加了会把同一版本重装一遍，白停一次服务。第 3 步是 `sudo=need-password` 时，把命令交给用户运行。
 
-升级成功时最后打印 `升级完成！`（用 `-y` 装了更旧的版本时是 `降级完成！`，同一版本重装是 `重装完成！`）。升级后，情况乙还要重新运行一次第 7 步的 install-cli 命令，让电脑上的 CLI 和服务器同版本；情况丙不用（服务器上的命令行随升级一起换了）。
+升级成功时最后打印 `升级完成！`（同一版本重装是 `重装完成！`）。升级后，情况乙还要重新运行一次第 7 步的 install-cli 命令，让电脑上的 CLI 和服务器同版本；情况丙不用（服务器上的命令行随升级一起换了）。
+
+**AcornFox 本身只能升级，不能回到旧版本。** 没有 `--rollback`；`--version` 指定比现在旧的版本会被拒绝，加 `-y` 也一样。用户说“回滚 AcornFox”“退回上一版 AcornFox”时，告诉用户：平台不支持回到旧版本；升级没成功时脚本已经自动恢复到升级前；应用自己的版本可以回退（`acornfox rollback 应用名`，见“生命周期”）。不要去拷备份目录里的文件，也不要找旧版本的升级脚本来降级。
+
+升级时 SSH 断开、看不到结果：重新连上后运行 `sudo tail -n 40 /var/log/acornfox-upgrade.log`，脚本自动处理的过程和故障编号写在这里；再运行 `acornfox --json version` 看现在的版本。
 
 升级停下时：
 
 | 看到 | 下一步 |
 | --- | --- |
 | `故障编号: INSTALL-PORT-01` | 按“安装故障编号”处理 |
-| `故障编号: UPGRADE-DOWN-01`（`当前是 …，不能降级到 …`） | 要装的版本比现在旧，读不了现在的数据库：不支持降级到 v0.3.x；v0.4.0 起的版本之间降级，在数据库副本上试跑旧版本的迁移没通过。服务没停、什么都没改。不要加 `-y` 或换 `--version` 重试；用户想回到升级前的版本，按下面“回滚”做 |
-| `早于当前版本 …，通过管道运行时不会自动降级`（没有故障编号） | 指定的版本比现在旧，服务没停。用户想回到升级前的版本，按下面“回滚”做；用户明确要装那个更旧的版本（只限 v0.4.0 起的版本之间），先问用户，同意后在同一条命令里再加 `-y` 重跑（例如 `| sudo bash -s -- --version 版本 -y`），脚本会先在数据库副本上试跑，不通过就报 `UPGRADE-DOWN-01` |
+| `故障编号: UPGRADE-DOWN-01`（`当前是 …，要装的 … 比它旧`） | 服务没停、什么都没改。AcornFox 只能升级，告诉用户这个版本装不了；不要加 `-y` 或换旧版本号重试。要升级就去掉 `--version` 重新运行上面的命令 |
+| `故障编号: UPGRADE-ROLLBACK-01`（`只能升级，不能回到旧版本`） | 服务没停、什么都没改。按上面那段话告诉用户；用户其实是想回退某个应用，用 `acornfox rollback 应用名` |
+| `故障编号: UPGRADE-BACKUP-01` | 停服务后备份没做完（常见是磁盘满），没有升级，原来的服务已重新启动。`df -h /var/lib/acornfox` 看空间，转述给用户；用户腾出空间后再升级 |
+| `故障编号: UPGRADE-FAIL-01`（迁移失败）、`UPGRADE-FAIL-02`（新版本服务起不来）、`UPGRADE-FAIL-03`（中途出错或被打断，包括 SSH 断开） | 没有升上，脚本已自动恢复到升级前，服务照常运行。告诉用户现在仍是原来的版本（`acornfox --json version`）和输出里的失败原因。`FAIL-03` 可以再运行一次升级命令；`FAIL-01`、`FAIL-02` 先问用户要不要再试一次，再失败就停下，请用户把输出反馈给维护者 |
+| `故障编号: UPGRADE-RESTORE-01` | 恢复到升级前时文件没能换回去，或者换回去之后服务还是起不来。应用容器没停，一般还能打开，但控制台和命令行用不了。**停下**，把输出原样给用户，请用户把 `journalctl -u acornfox-server -n 50 --no-pager`、`journalctl -u acornfox-runner -n 50 --no-pager` 的结果反馈给维护者。不要删备份、不要重装、不要自己拷备份里的文件 |
 
-**回滚 AcornFox 本身**（回到升级前的版本）只在用户明确要求时做，先把下面几点告诉用户，得到同意再执行：
-
-- 回滚会把 AcornFox 的数据库恢复到升级前：升级之后新建的应用、设的环境变量、绑的域名都会从列表里消失，回到 v0.3.x 时这些应用的容器也会被删掉；它们的数据卷留在磁盘上，可以手工找回。升级前就有的应用和数据不受影响。
-- 从 v0.3.x 升级来的，回滚时应用网址会断几秒。
-- 只能回到升级前的那份备份；不要用 `--version` 指定旧版本去降级：降到 v0.3.x 脚本一定拒绝（`UPGRADE-DOWN-01`），v0.4.0 起的版本之间降级也要旧程序认得新数据库才行。
-
-命令（国内把地址换成 Gitee 的 `upgrade.sh` 地址；第 3 步是 `sudo=need-password` 时交给用户运行）：
-
-```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh -o upgrade.sh && sudo bash upgrade.sh --rollback
-```
-
-回滚的结果：
-
-| 看到 | 下一步 |
-| --- | --- |
-| `回滚完成` | 告诉用户回到了哪个版本（`acornfox --json version`）；情况乙重新运行一次第 7 步的 install-cli 命令（情况丙不用） |
-| `故障编号: UPGRADE-ROLLBACK-01`（`没有比当前版本 … 旧的备份，没有回滚`） | 服务没停、什么都没改。现在已经在原来的版本上（上次升级没成功、已自动回到原版本，或者已经回滚过一次），不用再回滚，告诉用户现在的版本。刚用 `-y` 降级过、想回到降级前的版本：不用 `--rollback`，重新运行上面的升级命令。输出里列的备份目录**不要自己去恢复**：用户要把数据库倒回某一份备份的状态（会丢掉那之后的改动），先停下问清楚用户 |
-| `找不到备份`（没有故障编号） | 这台服务器没升级过，或备份已被清理，没有可回的版本，告诉用户 |
-
-**卸载只在用户明确要求时做。** 默认保留数据；`--purge` 会连数据一起删除且不可恢复，必须用户明确说要删数据。卸载脚本要在终端里输入 `yes` 确认，请用户在自己的终端里运行：
+**卸载只在用户明确要求时做。** 默认保留数据；`--purge` 会连数据一起删除且不可恢复，必须用户明确说要删数据。卸载脚本要在终端里输入 `yes` 确认，请用户在自己的终端里运行。经 ssh 执行、没有终端时，脚本报 `UNINSTALL-TTY-01` 退出，什么都没改；只有用户明确要你代为卸载时才加 `-y`（`sudo bash uninstall.sh -y`）。
 
 ```bash
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/uninstall.sh -o uninstall.sh && sudo bash uninstall.sh

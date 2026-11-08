@@ -76,3 +76,36 @@ func lanCandidate(ip net.IP, name string) bool {
 	}
 	return true
 }
+
+// ServerLANAddress decides whether a Linux server's private address (lan,
+// from LANAddress) is an address other computers on the user's own local
+// network can open, for the console's "open a local-only app" hints:
+//
+//   - a cloud server (cloud is the vendor install.sh recorded, or onCloud:
+//     the metadata address answers or has not been asked yet, see
+//     CloudProbe) has a private address inside the vendor's network, not
+//     on the user's LAN: "";
+//   - the server's public host (the address app URLs use) is a public IP or
+//     a domain name: the private address is likely a cloud network one, and
+//     a public address is never offered as a LAN address: "";
+//   - otherwise (no public host, or it is itself a private IPv4) the private
+//     address, when it is one.
+//
+// When unsure it answers "" so the console recommends the SSH tunnel, which
+// works everywhere.
+func ServerLANAddress(lan, publicHost, cloud string, onCloud bool) string {
+	ip, err := netip.ParseAddr(lan)
+	if err != nil || !ip.Is4() || !ip.IsPrivate() {
+		return ""
+	}
+	if strings.TrimSpace(cloud) != "" || onCloud {
+		return ""
+	}
+	if h := strings.TrimSpace(publicHost); h != "" {
+		ph, err := netip.ParseAddr(h)
+		if err != nil || !ph.Is4() || !ph.IsPrivate() {
+			return ""
+		}
+	}
+	return ip.String()
+}

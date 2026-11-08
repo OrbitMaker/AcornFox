@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -244,3 +245,143 @@ func TestOpenTokenErrorExit3(t *testing.T) {
 		t.Fatalf("error not surfaced: %s", errOut)
 	}
 }
+
+func sshTarget(t *testing.T, h *harness) {
+	t.Helper()
+	tf, _ := loadTargets(h.configDir)
+	tf.Targets["dev"] = &client.Target{Name: "dev", SSH: "u@h"}
+	tf.Default = "dev"
+	if err := saveTargets(h.configDir, tf); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// open APP on an ssh target tunnels a free local port to the app's port on
+// the server and opens the browser there; Ctrl+C ends it with exit 0.
+func TestOpenAppTunnel(t *testing.T) {
+	h := newHarness(t)
+	sshTarget(t, h)
+	var asked string
+	h.api.appFn = func(ctx context.Context, app string) (client.App, error) {
+		asked = app
+		return client.App{Name: app, PublicPort: 18812, Exposure: "local", LocalOnly: true, URL: "http://127.0.0.1:18812"}, nil
+	}
+	h.api.consoleTokenFn = func(ctx context.Context) (string, error) {
+		t.Fatal("open APP must not mint a console token")
+		return "", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	var gotLocal, gotRemote int
+	var opened string
+	code, out, errOut := h.runOpen(ctx, func(a *app) {
+		a.freePort = func() (int, error) { return 45001, nil }
+		a.openURL = func(u string) error { opened = u; return nil }
+		a.openAppTunnel = func(ctx context.Context, tg client.Target, l, r int) (*client.Tunnel, error) {
+			gotLocal, gotRemote = l, r
+			return client.NewLiveTunnelForTest("http://127.0.0.1:45001"), nil
+		}
+		a.openTunnel = func(ctx context.Context, tg client.Target, p int) (*client.Tunnel, error) {
+			t.Fatal("console tunnel used for an app")
+			return nil, nil
+		}
+	}, "open", "new-api")
+	if code != exitOK {
+		t.Fatalf("exit %d out=%s err=%s", code, out, errOut)
+	}
+	if asked != "new-api" || gotLocal != 45001 || gotRemote != 18812 || opened != "http://127.0.0.1:45001" {
+		t.Fatalf("asked=%q tunnel %d->%d opened=%q", asked, gotLocal, gotRemote, opened)
+	}
+	if !strings.Contains(out, "Ctrl+C") || !strings.Contains(out, "new-api") {
+		t.Fatalf("output: %s", out)
+	}
+}
+
+// --port picks the local end; --json reports the address.
+func TestOpenAppPortJSON(t *testing.T) {
+	h := newHarness(t)
+	sshTarget(t, h)
+	h.api.appFn = func(ctx context.Context, app string) (client.App, error) {
+		return client.App{Name: app, PublicPort: 18810, Exposure: "lan"}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	var gotLocal int
+	code, out, _ := h.runOpen(ctx, func(a *app) {
+		a.openURL = func(u string) error { t.Fatal("--no-browser opened a browser"); return nil }
+		a.openAppTunnel = func(ctx context.Context, tg client.Target, l, r int) (*client.Tunnel, error) {
+			gotLocal = l
+			return client.NewLiveTunnelForTest("http://127.0.0.1:" + itoaTest(l)), nil
+		}
+	}, "--json", "open", "web", "--port", "9119", "--no-browser")
+	if code != exitOK || gotLocal != 9119 {
+		t.Fatalf("exit %d local %d out %s", code, gotLocal, out)
+	}
+	m := decodeJSON(t, out)
+	if m["url"] != "http://127.0.0.1:9119" || m["tunnel"] != true || m["app"] != "web" {
+		t.Fatalf("json %v", m)
+	}
+}
+
+// A target added by URL cannot tunnel: a local-only app is OPEN-APP-02; an
+// app on the LAN opens at the host the target already reaches.
+func TestOpenAppURLTarget(t *testing.T) {
+	h := newHarness(t)
+	h.addTarget("lan", "http://192.168.1.20:18802")
+	exposure := "local"
+	h.api.appFn = func(ctx context.Context, app string) (client.App, error) {
+		return client.App{Name: app, PublicPort: 18811, Exposure: exposure, LocalOnly: exposure == "local", URL: "http://127.0.0.1:18811"}, nil
+	}
+	code, out, _ := h.runOpen(context.Background(), func(a *app) {
+		a.openURL = func(u string) error { t.Fatal("opened"); return nil }
+	}, "--json", "open", "web")
+	if code != exitOpFailed {
+		t.Fatalf("exit %d", code)
+	}
+	m := decodeJSON(t, out)
+	d, _ := m["diagnosis"].(map[string]any)
+	if m["ok"] != false || d["code"] != "OPEN-APP-02" || !strings.Contains(d["hint"].(string), "--ssh") {
+		t.Fatalf("json %v", m)
+	}
+
+	exposure = "lan"
+	var opened string
+	code, out, _ = h.runOpen(context.Background(), func(a *app) {
+		a.openURL = func(u string) error { opened = u; return nil }
+		a.openAppTunnel = func(ctx context.Context, tg client.Target, l, r int) (*client.Tunnel, error) {
+			t.Fatal("tunnel on a URL target")
+			return nil, nil
+		}
+	}, "open", "web")
+	if code != exitOK || opened != "http://192.168.1.20:18811" {
+		t.Fatalf("exit %d opened %q out %s", code, opened, out)
+	}
+}
+
+// This computer's acornfox opens the loopback address directly; an app
+// without a port is OPEN-APP-01; two names are a usage error.
+func TestOpenAppLocalAndErrors(t *testing.T) {
+	h := newHarness(t)
+	h.addTarget("me", "unix:/run/acornfox/acornfox.sock")
+	port := 18815
+	h.api.appFn = func(ctx context.Context, app string) (client.App, error) {
+		return client.App{Name: app, PublicPort: port, Exposure: "local", LocalOnly: true}, nil
+	}
+	var opened string
+	code, _, _ := h.runOpen(context.Background(), func(a *app) {
+		a.openURL = func(u string) error { opened = u; return nil }
+	}, "open", "web")
+	if code != exitOK || opened != "http://127.0.0.1:18815" {
+		t.Fatalf("exit %d opened %q", code, opened)
+	}
+	port = 0
+	code, _, errOut := h.runOpen(context.Background(), nil, "open", "web")
+	if code != exitOpFailed || !strings.Contains(errOut, "OPEN-APP-01") || !strings.Contains(errOut, "acornfox status web") {
+		t.Fatalf("exit %d err %s", code, errOut)
+	}
+	if code, _, _ := h.runOpen(context.Background(), nil, "open", "a", "b"); code != exitUsage {
+		t.Fatalf("two names: exit %d", code)
+	}
+}
+
+func itoaTest(n int) string { return strconv.Itoa(n) }

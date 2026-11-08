@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -65,11 +66,31 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 		CPUMilli:          a.CPUMilli,
 		URL:               appURL(s.publicHost, a.PublicPort),
 		Exposure:          s.effectiveExposure(a),
+		ExposureIsDefault: a.Exposure == "",
+		DefaultExposure:   s.effectiveExposure(state.App{}),
+		CatalogID:         a.CatalogID,
+		CatalogVersion:    a.CatalogVersion,
 	}
-	if v.Exposure == state.ExposureLocal && s.lanHost != nil {
-		// Desktop: localhost is the address that works; Linux keeps the
-		// configured public host for the other exposures.
-		v.URL = appURL("localhost", a.PublicPort)
+	if a.CatalogID != "" {
+		v.CatalogOrigin = appinstall.PublicSource
+		if a.CatalogOrigin != "" {
+			v.CatalogOrigin = a.CatalogOrigin
+		}
+		if s.appCenter != nil && s.appCenter.Catalog() != nil {
+			v.CatalogOriginName, v.CatalogDisconnected = s.appCenter.Catalog().OriginState(a.CatalogOrigin)
+		}
+	}
+	if v.Exposure == state.ExposureLocal {
+		v.LocalOnly = true
+		if s.lanHost != nil {
+			// Desktop: localhost is the address that works.
+			v.URL = appURL("localhost", a.PublicPort)
+		} else if a.PublicPort > 0 {
+			// Linux server: the app listens on 127.0.0.1 only; the public
+			// host would not open it.
+			v.URL = appURL("127.0.0.1", a.PublicPort)
+			v.OpenHint = s.openHintFor(ctx, a)
+		}
 	}
 	if s.lanHost != nil && (v.Exposure == state.ExposureLAN || v.Exposure == state.ExposurePublic) {
 		if h := s.lanHost(); h != "" {
@@ -90,10 +111,26 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 		latest = &ds[0]
 		show = append(show, ds[0])
 	}
-	if detail && a.CurrentDeployment != "" {
-		if d, err := s.store.GetDeployment(ctx, a.CurrentDeployment); err == nil {
-			live = &d
-			show = append(show, d)
+	if a.CurrentDeployment != "" {
+		switch {
+		case latest != nil && latest.ID == a.CurrentDeployment:
+			// Usual case: the newest deployment is the one serving.
+			v.LiveSeq = latest.Seq
+			if detail {
+				live = latest
+				show = append(show, *latest)
+			}
+		default:
+			// A newer deployment is pending or failed while an older one
+			// keeps serving: one lookup by id, list included, so the list
+			// can say which version is serving.
+			if d, err := s.store.GetDeployment(ctx, a.CurrentDeployment); err == nil {
+				v.LiveSeq = d.Seq
+				if detail {
+					live = &d
+					show = append(show, d)
+				}
+			}
 		}
 	}
 	viewer := s.newDeploymentViewer(ctx, a, show, detail)
@@ -119,6 +156,11 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 	}
 	if doms, err := s.store.ListDomains(ctx, a.Name); err == nil {
 		v.Domains = doms
+	}
+	if a.CatalogID != "" && s.appCenter != nil {
+		if toks, err := s.appCenter.GatewayTokens(ctx, a.Name); err == nil && len(toks) > 0 {
+			v.GatewayTokenFrom = toks[0].Provider
+		}
 	}
 	if addons, err := s.addonViews(ctx, a.Name); err == nil {
 		v.Addons = addons
@@ -356,59 +398,7 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleteVolumes := raw == "true"
-	err := s.withApp(ctx, app, func() error {
-		if _, err := s.store.GetApp(ctx, app); err != nil {
-			return err
-		}
-		volumeNames := map[string]bool{}
-		if deleteVolumes {
-			volumes, err := s.runner.ListVolumes(ctx, app)
-			if err != nil {
-				return &lifecycleError{http.StatusServiceUnavailable, "runner_unavailable", "无法读取应用的数据卷，尚未删除应用，请稍后重试"}
-			}
-			for _, v := range volumes {
-				volumeNames[v.Name] = true
-			}
-			// Include recorded volumes even when Docker has already removed them
-			// during an earlier partial attempt; missing removals are idempotent.
-			vols, err := s.store.ListVolumes(ctx, app)
-			if err != nil {
-				return err
-			}
-			for _, v := range vols {
-				volumeNames[v.VolumeName] = true
-			}
-			active, err := s.store.ListAddons(ctx, app)
-			if err != nil {
-				return err
-			}
-			removed, err := s.store.ListRemovedAddons(ctx, app)
-			if err != nil {
-				return err
-			}
-			for _, a := range append(active, removed...) {
-				volumeNames[a.VolumeName] = true
-			}
-		}
-		containers, err := s.runner.ListContainers(ctx, app)
-		if err != nil {
-			return &lifecycleError{http.StatusServiceUnavailable, "runner_unavailable", "无法读取应用容器，尚未删除应用，请稍后重试"}
-		}
-		for _, c := range containers {
-			if err := s.runner.RemoveContainer(ctx, app, c.Name); err != nil {
-				return &lifecycleError{http.StatusServiceUnavailable, "container_removal_failed", "容器 " + c.Name + " 删除失败，应用记录仍保留，数据卷尚未删除，请稍后重试"}
-			}
-		}
-		for name := range volumeNames {
-			if err := s.runner.RemoveVolume(ctx, app, name); err != nil {
-				return &lifecycleError{http.StatusServiceUnavailable, "volume_removal_failed", "数据卷 " + name + " 删除失败，应用记录仍保留；部分容器或数据卷可能已删除，请稍后重试"}
-			}
-		}
-		if err := s.runner.RemoveNetwork(ctx, app); err != nil {
-			return &lifecycleError{http.StatusServiceUnavailable, "network_removal_failed", "应用网络 " + runner.NetworkName(app) + " 未能回收（可能仍有容器连接或标签不匹配），应用记录仍保留；部分容器或数据卷可能已删除，请检查后重试"}
-		}
-		return s.store.DeleteApp(ctx, app, !deleteVolumes)
-	})
+	warnings, err := s.removeAppWarn(ctx, app, deleteVolumes)
 	if err != nil {
 		var opErr *lifecycleError
 		if errors.As(err, &opErr) {
@@ -419,22 +409,15 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The deployment logs go with the app. A failure (e.g. a file still open
-	// on Windows) only leaves an orphan directory for the global prune.
-	if s.deployLogs != nil {
-		if err := s.deployLogs.DeleteApp(app); err != nil {
-			s.log.Warn("delete deployment logs", "app", app, "err", err)
-		}
-	}
-
-	// Kick the reconciler to clean up any remaining resources
-	s.kicker.Kick(app)
-
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"name":            app,
 		"deleted":         true,
 		"volumes_deleted": deleteVolumes,
-	})
+	}
+	if len(warnings) > 0 {
+		body["warnings"] = warnings
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *server) setDesired(w http.ResponseWriter, r *http.Request, desired string) {
@@ -457,6 +440,24 @@ func (s *server) setDesired(w http.ResponseWriter, r *http.Request, desired stri
 		"name":    updated.Name,
 		"desired": updated.Desired,
 	})
+}
+
+// openHintFor builds the open hint of a local-only app on a Linux server.
+func (s *server) openHintFor(ctx context.Context, a state.App) *openHint {
+	h := &openHint{Command: "acornfox open " + a.Name, Recommend: "tunnel"}
+	if s.serverLAN != nil {
+		h.LANAddress = s.serverLAN()
+	}
+	if a.CatalogID != "" && s.appCenter != nil {
+		h.HasLogin = s.appCenter.HasLogin(ctx, a.Name)
+	}
+	if h.LANAddress != "" {
+		h.LANURL = appURL(h.LANAddress, a.PublicPort)
+		if h.HasLogin {
+			h.CanLAN, h.Recommend = true, "lan"
+		}
+	}
+	return h
 }
 
 // patchAppRequest is the PATCH /v1/apps/{app} body; nil fields are unchanged.
@@ -720,6 +721,9 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		"docker_version": dockerVersion,
 		"apps":           appCount,
 	}
+	if s.version != "" {
+		body["version"] = s.version
+	}
 	if s.edgeStatus != nil {
 		if st, msg := s.edgeStatus(); st != "" {
 			body["edge"] = map[string]string{"state": st, "message": msg}
@@ -746,4 +750,113 @@ func decodeJSON(r *http.Request, v any) error {
 		return err
 	}
 	return nil
+}
+
+// removeApp deletes app: containers, the volumes when deleteVolumes, the
+// network, the record and its deployment logs. DELETE /v1/apps/{app} and the
+// app center's cleanup of a failed install share it.
+func (s *server) removeApp(ctx context.Context, app string, deleteVolumes bool) error {
+	_, err := s.removeAppWarn(ctx, app, deleteVolumes)
+	return err
+}
+
+// removeAppWarn is removeApp that also returns warnings for the caller: the
+// model-gateway tokens issued for an app installed from the catalog are
+// revoked once the app is gone, and a token that could not be revoked is
+// reported (it keeps working until removed in the gateway).
+func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bool) ([]string, error) {
+	// An app another app is linked to (its model gateway) keeps that app's
+	// container on its network: removing it would fail half-way at the
+	// network. Refuse up front, before anything is removed.
+	if apps, err := s.store.ListApps(ctx); err == nil {
+		for _, other := range apps {
+			for _, l := range other.Links {
+				if l == app && other.Name != app {
+					return nil, &lifecycleError{http.StatusConflict, "app_in_use", "应用 " + other.Name + " 正在用 " + app + "（连在它的网络上），请先删除 " + other.Name}
+				}
+			}
+		}
+	}
+	var tokens []appinstall.TokenRef
+	if s.appCenter != nil {
+		toks, err := s.appCenter.GatewayTokens(ctx, app)
+		if err != nil {
+			s.log.Warn("read gateway tokens", "app", app, "err", err)
+		}
+		tokens = toks
+	}
+	err := s.withApp(ctx, app, func() error {
+		if _, err := s.store.GetApp(ctx, app); err != nil {
+			return err
+		}
+		volumeNames := map[string]bool{}
+		if deleteVolumes {
+			volumes, err := s.runner.ListVolumes(ctx, app)
+			if err != nil {
+				return &lifecycleError{http.StatusServiceUnavailable, "runner_unavailable", "无法读取应用的数据卷，尚未删除应用，请稍后重试"}
+			}
+			for _, v := range volumes {
+				volumeNames[v.Name] = true
+			}
+			// Include recorded volumes even when Docker has already removed them
+			// during an earlier partial attempt; missing removals are idempotent.
+			vols, err := s.store.ListVolumes(ctx, app)
+			if err != nil {
+				return err
+			}
+			for _, v := range vols {
+				volumeNames[v.VolumeName] = true
+			}
+			active, err := s.store.ListAddons(ctx, app)
+			if err != nil {
+				return err
+			}
+			removed, err := s.store.ListRemovedAddons(ctx, app)
+			if err != nil {
+				return err
+			}
+			for _, a := range append(active, removed...) {
+				volumeNames[a.VolumeName] = true
+			}
+		}
+		containers, err := s.runner.ListContainers(ctx, app)
+		if err != nil {
+			return &lifecycleError{http.StatusServiceUnavailable, "runner_unavailable", "无法读取应用容器，尚未删除应用，请稍后重试"}
+		}
+		for _, c := range containers {
+			if err := s.runner.RemoveContainer(ctx, app, c.Name); err != nil {
+				return &lifecycleError{http.StatusServiceUnavailable, "container_removal_failed", "容器 " + c.Name + " 删除失败，应用记录仍保留，数据卷尚未删除，请稍后重试"}
+			}
+		}
+		for name := range volumeNames {
+			if err := s.runner.RemoveVolume(ctx, app, name); err != nil {
+				return &lifecycleError{http.StatusServiceUnavailable, "volume_removal_failed", "数据卷 " + name + " 删除失败，应用记录仍保留；部分容器或数据卷可能已删除，请稍后重试"}
+			}
+		}
+		if err := s.runner.RemoveNetwork(ctx, app); err != nil {
+			return &lifecycleError{http.StatusServiceUnavailable, "network_removal_failed", "应用网络 " + runner.NetworkName(app) + " 未能回收（可能仍有容器连接或标签不匹配），应用记录仍保留；部分容器或数据卷可能已删除，请检查后重试"}
+		}
+		return s.store.DeleteApp(ctx, app, !deleteVolumes)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var warnings []string
+	if len(tokens) > 0 {
+		if err := s.appCenter.RevokeGatewayTokens(ctx, app, tokens); err != nil {
+			warnings = append(warnings, err.Error())
+		}
+	}
+
+	// The deployment logs go with the app. A failure (e.g. a file still open
+	// on Windows) only leaves an orphan directory for the global prune.
+	if s.deployLogs != nil {
+		if err := s.deployLogs.DeleteApp(app); err != nil {
+			s.log.Warn("delete deployment logs", "app", app, "err", err)
+		}
+	}
+
+	// Kick the reconciler to clean up any remaining resources
+	s.kicker.Kick(app)
+	return warnings, nil
 }

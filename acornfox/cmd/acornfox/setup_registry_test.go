@@ -134,3 +134,30 @@ func TestCheckRegistrySourcesEmpty(t *testing.T) {
 		t.Fatal("no sources must fail")
 	}
 }
+
+// Docker Hub itself is not asked when a mirror before it answers (in China it
+// is blocked: the check must not connect to it on every start), and is asked
+// only after all the mirrors failed.
+func TestRegistryCheckAsksDockerHubLast(t *testing.T) {
+	m1, m2 := "docker.m.daocloud.io", "docker.1panel.live"
+	srcs := []string{m1, m2, runner.DockerHubRegistry}
+	f := &fakeProbe{up: map[string]bool{m2: true, runner.DockerHubRegistry: true}}
+	if ok, detail := checkRegistrySources(context.Background(), srcs, true, f.probe); !ok || !strings.Contains(detail, m2) {
+		t.Fatalf("ok=%v %s", ok, detail)
+	}
+	if slices.Contains(f.asked, runner.DockerHubRegistry) {
+		t.Fatalf("Docker Hub asked although a mirror answered: %v", f.asked)
+	}
+	f2 := &fakeProbe{up: map[string]bool{runner.DockerHubRegistry: true}}
+	if ok, detail := checkRegistrySources(context.Background(), srcs, true, f2.probe); !ok || !strings.Contains(detail, "Docker Hub") {
+		t.Fatalf("fallback: ok=%v %s", ok, detail)
+	}
+	if !slices.Contains(f2.asked, runner.DockerHubRegistry) {
+		t.Fatalf("Docker Hub not asked after the mirrors failed: %v", f2.asked)
+	}
+	// Outside China Docker Hub is the only source and asked right away.
+	f3 := &fakeProbe{up: map[string]bool{runner.DockerHubRegistry: true}}
+	if ok, _ := checkRegistrySources(context.Background(), []string{runner.DockerHubRegistry}, false, f3.probe); !ok {
+		t.Fatal("global")
+	}
+}

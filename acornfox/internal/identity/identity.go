@@ -127,6 +127,7 @@ func LoadOrCreate(dataDir string) (*Identity, error) {
 	id.Created = true
 	writeInfo(dataDir, id)
 	appendLog(dataDir, "create", id.InstallID, "")
+	matchOwner(dataDir)
 	return id, nil
 }
 
@@ -167,6 +168,7 @@ func Reset(dataDir string) (*Identity, error) {
 		prev = old.InstallID
 	}
 	appendLog(dataDir, "reset", id.InstallID, prev)
+	matchOwner(dataDir)
 	return id, nil
 }
 

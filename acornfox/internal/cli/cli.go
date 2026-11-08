@@ -43,8 +43,10 @@ type app struct {
 
 	// N3 `open` injection points (nil in production → real implementations).
 	openTunnel func(ctx context.Context, t client.Target, localPort int) (*client.Tunnel, error)
-	openURL    func(url string) error // browser opener
-	freePort   func() (int, error)    // pick a free local TCP port
+	// `open APP`: tunnel to the app's port on the server.
+	openAppTunnel func(ctx context.Context, t client.Target, localPort, remotePort int) (*client.Tunnel, error)
+	openURL       func(url string) error // browser opener
+	freePort      func() (int, error)    // pick a free local TCP port
 }
 
 // Main is the entry point invoked by cmd/acornfox for every non-server,
@@ -79,7 +81,7 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.out.usageError("%s", err.Error())
 	}
 	if len(rest) == 0 {
-		return a.out.usageError("需要一个子命令；可用：target deploy status diagnose apps versions logs stats env volume app set rollback redeploy stop start restart delete open domain add remove addons lan-console public-console limits skill version install setup uninstall doctor identity serve")
+		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、version、doctor、identity（acornfox help 看说明）")
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
@@ -91,6 +93,10 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdVersion()
 	case "skill":
 		return a.cmdSkill(ctx, cmdArgs)
+	case "catalog":
+		return a.cmdCatalog(ctx, cmdArgs)
+	case "install":
+		return a.cmdInstall(ctx, cmdArgs)
 	case "target":
 		return a.cmdTarget(ctx, cmdArgs)
 	case "deploy":
@@ -143,6 +149,16 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdPublicConsole(ctx, cmdArgs)
 	case "limits":
 		return a.cmdLimits(ctx, cmdArgs)
+	case "doctor", "identity", "uninstall":
+		// These run in the acornfox binary itself and only look at this
+		// computer; they reach here only when written after --target or --app.
+		if cmd == "uninstall" {
+			return a.out.usageError("uninstall 只管这台机器，不接受 --target、--app；直接运行 acornfox uninstall")
+		}
+		if cmd == "identity" {
+			return a.out.usageError("identity 只管这台机器，不接受 --target、--app；直接运行 acornfox identity show（要 JSON 写 acornfox identity show --json）")
+		}
+		return a.out.usageError("doctor 只管这台机器，不接受 --target、--app；直接运行 acornfox doctor（要 JSON 写 acornfox doctor --json）")
 	default:
 		return a.out.usageError("未知命令：%s", cmd)
 	}
@@ -152,17 +168,15 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 // own flags.
 const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json] 命令 [参数]
 
-本机（Mac 本机运行即将支持：Mac 上 install、doctor 和对本机的 setup 先停用，
-      请用 target add 管理一台 Linux 服务器；Linux 服务器用 install.sh 安装）
-  install                          在本机安装主程序并后台运行（再次运行即升级；--rollback 回到上一版）
-  setup                            准备运行环境：Docker、网关组件、自检（页面上同样的四步；--json 逐行事件）
-  uninstall [--purge]              卸载（默认保留数据；--purge 全部删除）
-  doctor                           检查 Docker、后台服务和局域网访问（Linux：Docker、磁盘空间、端口占用）
+本机
+  Mac 上只有命令行客户端：用 target add 登记一台 Linux 服务器来管理；Linux 服务器用 install.sh 安装、
+  upgrade.sh 升级（见使用文档），装好后服务器上也有这个命令行。
+  doctor                           检查这台服务器：Docker、后台服务、磁盘空间、端口占用（sudo acornfox doctor 看得更全）
   identity show                    这台机器在下载网关上的安装编号和公钥（reset --yes 重新生成）
 
 服务器
   target add 名称 --ssh 用户@主机   添加服务器（list、use、remove 管理已有的）
-  open                             打开网页控制台
+  open [应用]                      打开网页控制台；带应用名时在你电脑上打开这个应用（经 SSH 隧道，只本机的应用也能开）
   lan-console enable               在局域网打开控制台，要密码登录（disable、status）
   public-console enable 域名        开放控制台公网访问（disable、status）
 
@@ -171,11 +185,11 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   redeploy [应用]                  用当前镜像重新部署，让配置生效（默认等到上线或失败；--no-wait 只提交）
   rollback [应用] [--to N]         回到上一个可回退的版本，或第 N 版（只换程序，不动数据；--cancel-pending 取消正在进行的部署）
   versions [应用]                  版本记录：来源、用时、失败原因、能否回退
-  status / apps                    查看应用状态 / 列出所有应用
+  status [应用 | 部署编号] / apps   查看应用状态或一次部署的进度 / 列出所有应用
   diagnose                         查看最近一次部署的诊断
 
 运行
-  stop / start / restart           停止、启动、重启应用
+  stop / start / restart [应用]    停止、启动、重启应用（等到状态变了才返回；--no-wait 只提交）
   delete [--volumes]               删除应用（默认保留数据）
   logs [-f]                        查看日志（--version N 看某一版的运行日志，再加 --build 看构建日志）
   stats [应用]                     资源使用（不带应用名则是整台服务器）
@@ -188,8 +202,17 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   domain add|remove|list           域名与 HTTPS
   add|remove postgres|mysql|redis  数据库与缓存；addons 查看已添加的
 
+应用中心
+  catalog list / info 应用 / sync  看目录里的应用和配方、应用详情和参数、让服务器同步目录
+  catalog platform-vars            平台按这台机器自动填给应用的时区、下载源、默认模型等（只读）
+  install 应用 [--llm local|own]    从目录装一个应用（--recipe 配方 装一组；--no-wait 只提交；acornfox install -h 看详情）
+  install status 任务编号           查安装进度、首次登录信息（--show-secrets 显示密码）
+  装好的应用默认只本机能打开：在你自己的电脑上运行 acornfox open 应用名
+
 其他
   skill install                    把 AcornFox Skill 装到 AI 工作台
+  catalog lint 目录                检查应用目录的清单和配方（只读，给目录维护者用）
+  catalog build|keygen|verify      打包签名发布目录、生成签名钥匙、校验发布目录（给目录维护者用）
   version                          版本号
 
 每个命令加 -h 查看它的参数。

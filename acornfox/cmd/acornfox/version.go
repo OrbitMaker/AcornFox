@@ -11,7 +11,8 @@ import (
 // runVersion implements `acornfox version`: print version information. The
 // version string is cli.Version, set at build time via
 // -ldflags "-X github.com/acornfox/acornfox/internal/cli.Version=x.y.z".
-// `acornfox --json version` is handled by internal/cli instead.
+// `acornfox --json version` and `acornfox version --json` are handled by
+// internal/cli instead.
 func runVersion(args []string, stdout io.Writer) int {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

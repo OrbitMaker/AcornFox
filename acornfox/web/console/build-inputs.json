@@ -1,0 +1,6 @@
+{
+  "comment": "参与源码哈希的文件。构建时把哈希写进 ui/build-info.json，Go 测试按同样的规则重算并核对，防止改了源码忘记重新构建。规则：files 里的文件，加上 dirs 里的目录下所有文件；路径或文件名匹配 exclude 的不算。",
+  "files": ["index.html", "package.json", "package-lock.json", "vite.config.ts", "tailwind.config.ts", "postcss.config.cjs", "tsconfig.json", "build-inputs.json", "scripts/source-hash.mjs", "scripts/licenses-plugin.mjs"],
+  "dirs": ["public", "src"],
+  "exclude": ["\\.test\\.tsx?$", "^src/test/"]
+}

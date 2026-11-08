@@ -4,7 +4,7 @@
 
 ## 产物是什么
 
-AcornFox 只有一个程序 `acornfox`，服务端（`acornfox server`、`acornfox runner`）和用户电脑上的 CLI 是同一个文件。网页控制台的页面、字体、图标通过 `go:embed` 编进程序（`acornfox/internal/console/static/`），没有单独的前端构建步骤。
+AcornFox 只有一个程序 `acornfox`，服务端（`acornfox server`、`acornfox runner`）和用户电脑上的 CLI 是同一个文件。网页控制台的源码在 `acornfox/web/console`（React + Vite），构建产物在 `acornfox/internal/console/ui`，提交进仓库并通过 `go:embed` 编进程序，所以编译 `acornfox` 不需要 Node。改了控制台源码要按 [acornfox/web/console/README.md](../../acornfox/web/console/README.md) 重新构建并把产物一起提交，否则 `internal/console` 的测试（核对产物和源码是否一致）会失败。
 
 程序纯 Go 编写，`CGO_ENABLED=0` 构建；SQLite 用的是纯 Go 实现 `modernc.org/sqlite`，不依赖系统库。
 
@@ -16,7 +16,6 @@ AcornFox 只有一个程序 `acornfox`，服务端（`acornfox server`、`acornf
     go build ./...
     go vet ./...
     TMPDIR=/tmp go test ./...           # macOS 需要 TMPDIR=/tmp（Unix socket 路径长度限制）
-    node --test internal/console/*.cjs  # 控制台脚本的测试
 
 `internal/runner` 的 socket 测试依赖 Linux 的对端凭据校验，只能在 Linux 上通过；发版前要在 Linux 上跑一次全量测试。
 

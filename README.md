@@ -1,46 +1,37 @@
+[English](README.en.md)
+
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/assets/brand/lockup-horizontal-dark.svg">
-    <img src="website/assets/brand/lockup-horizontal.svg" alt="AcornFox" height="48">
+    <source media="(prefers-color-scheme: dark)" srcset="https://acornfox.com/assets/brand/lockup-horizontal-dark.svg">
+    <img src="https://acornfox.com/assets/brand/lockup-horizontal.svg" alt="AcornFox" height="48">
   </picture>
 </h1>
 
-**一拨即开** —— 让 AI 一句话部署你的应用
+AcornFox 是一个开源的单机应用部署工具：在你自己的 Linux 服务器上部署和管理应用，可以用命令行、网页控制台，也可以交给 AI 工作台操作。
 
-AcornFox 是一个开源的应用部署平台，让你在自己的 Linux 服务器上轻松部署和管理应用。
+## 支持的平台
 
-> 支持的平台：
->
-> - **Linux 服务器**：正式支持，AcornFox 服务和命令行都装在服务器上。
-> - **Mac**：可以装命令行（CLI），当客户端经 SSH 管理服务器。
-> - **Windows**：本版本不提供程序，用 SSH 登录服务器，在服务器上运行 `acornfox`（AI 工作台也是这样做）。
-> - 把 AcornFox 服务装在 Mac、Windows 电脑本机运行：即将支持。
->
-> 详见 [使用手册](docs/user-guide.md)。
+| 平台 | 这一版提供 | 说明 |
+| --- | --- | --- |
+| Linux 服务器 x86_64 | 服务端 + 命令行 | 正式支持。Ubuntu 22.04、24.04，Debian 12、13 |
+| Linux 服务器 arm64 | 服务端 + 命令行 | 安装脚本允许安装，还没有实测 |
+| Mac（Apple 芯片、Intel） | 只有命令行 | 当客户端，经 SSH 管理 Linux 服务器 |
+| Windows | 不提供 | 用 SSH 登录服务器，在服务器上运行 `acornfox`（AI 工作台也这样做） |
 
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev)
+AcornFox 服务装在 Mac、Windows 电脑本机运行，这一版不提供。详见 [使用手册](docs/user-guide.md)。
 
-## ✨ 特性
+## 能做什么
 
-- 🚀 **一键部署** - 本地目录、Git 仓库或 Docker 镜像
-- 🤖 **AI 集成** - 通过 AI 工作台自然语言部署
-- 🔍 **智能诊断** - 部署失败时返回结构化诊断，AI 自动修复
-- 🗄️ **附加服务** - 一键添加 PostgreSQL/MySQL/Redis
-- 📊 **监控指标** - 实时查看日志和资源使用
-- 🌐 **自动 HTTPS** - 已备案域名自动申请 SSL 证书
-- 🇨🇳 **国内优化** - 镜像加速、超时诊断
+- **部署**：本地目录（带 Dockerfile）、公开 Git 仓库或现成的 Docker 镜像
+- **应用中心**：从预先配好的目录装应用，这一版有 New API 和 Hermes 智能体，见下面“应用中心”
+- **AI 工作台**：Claude Code、Codex 等照着 AcornFox Skill 完成安装、部署和排错
+- **诊断**：部署失败时返回带编号的诊断和日志片段
+- **数据库**：一条命令加 PostgreSQL、MySQL 或 Redis
+- **版本**：每次部署都有记录，可以回退应用到之前的版本
+- **HTTPS**：绑定域名后自动申请证书（国内服务器的域名要已备案）
+- **国内网络**：自动选用国内软件源和镜像加速
 
-## 🎯 适用场景
-
-AcornFox 专为以下场景设计：
-
-- **个人开发者**: 在自己的云服务器上部署个人项目
-- **小团队**: 快速部署测试环境和演示应用
-- **AI 用户**: 通过 AI 助手自然语言部署应用
-- **学习实验**: 学习 Docker、容器编排和应用部署
-
-## 🚀 快速开始
+## 快速开始
 
 ### 推荐：把一句话发给 AI 工作台
 
@@ -58,7 +49,7 @@ AI 会先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国�
 
 | 项目 | 要求 |
 | --- | --- |
-| 系统 | 推荐 Ubuntu 24.04 或 Debian 13（x86_64，已实测完整流程）。Ubuntu 22.04、Debian 12 安装脚本也接受，但还没完整实测。arm64 还没测过 |
+| 系统 | Ubuntu 22.04、24.04，Debian 12、13（x86_64），推荐 Ubuntu 24.04 或 Debian 13。这四个版本都实测过全新安装、自检和部署。arm64 还没测过 |
 | 配置 | 建议 2 核 2 GB 以上，需要 root 或 sudo |
 | 端口 | 18800、18801、18808（AcornFox 自己用，只听本机）和 18810-18899（应用端口）必须空着，被占时安装脚本会停下，不能跳过。80、443 最好空着；已被宝塔、1Panel、Nginx 占用时可以共存，见下面的说明 |
 
@@ -114,7 +105,39 @@ acornfox status
 
 当状态变为 `live` 时，访问返回的 URL 即可。
 
-## 🤖 AI 工作台集成
+## 应用中心
+
+应用中心是一份预先配好的应用目录。装的时候不用写 Dockerfile，也不用自己想密码：AcornFox 生成密码，下载镜像、启动、检查、初始化，装好后给出首次登录信息。
+
+这一版的目录：
+
+| 应用或配方 | 是什么 |
+| --- | --- |
+| `new-api` | New API 大模型接口网关：把多家大模型合成一个 OpenAI 兼容的接口，统一管理上游 Key、令牌和额度 |
+| `hermes-agent` | Hermes 智能体：常驻的 AI 智能体，可以接飞书、钉钉、企业微信等做机器人 |
+| 配方 `hermes-with-new-api` | 两个一起装并连起来，Hermes 经本机 New API 用大模型 |
+
+两种装法：
+
+- **页面**：`acornfox open` 打开控制台，左侧“应用中心”，选应用点“安装”，弹窗里能看到每一步的进度和装好后的登录信息。
+- **命令行**：
+
+  ```bash
+  acornfox catalog list                            # 看目录
+  acornfox install new-api                         # 装一个应用
+  acornfox install --recipe hermes-with-new-api    # 装一个配方
+  ```
+
+**默认只本机能打开。** 从应用中心装的应用只听服务器本机地址（`http://127.0.0.1:端口`），不用去安全组放行端口。从自己电脑打开：
+
+- 公网服务器：在你自己的电脑上运行 `acornfox open 应用名`，它像打开控制台一样开一条 SSH 隧道，看完按 Ctrl+C 关闭。
+- 服务器在你的局域网里：页面上点“让局域网里的电脑能打开”，确认后用局域网地址打开（会在服务器所有网卡上开放这个端口）。
+
+**要升级应用怎么办。** 这一版没有应用的原地升级。目录里有新版本时，先 `acornfox delete 应用名`（默认保留数据），再用原来的安装命令加 `--reuse-data` 重装，接上旧数据。
+
+详细说明（大模型来源、令牌额度、平台变量、故障编号）见 [使用手册的“应用中心”](docs/user-guide.md#应用中心)。
+
+## AI 工作台
 
 Skill 是使用 AcornFox 的入口：首次使用时由它安装 CLI 与服务端，之后负责部署、读诊断并修复、管理数据库和生命周期。
 
@@ -141,7 +164,7 @@ AI: 诊断显示缺少数据库，添加 PostgreSQL 并重新部署。
     ✓ 已上线 http://服务器IP:18810
 ```
 
-## 📖 核心命令
+## 常用命令
 
 ```bash
 # 部署
@@ -167,11 +190,16 @@ acornfox add redis --app my-app             # 添加 Redis
 
 # 域名
 acornfox domain add example.com --app my-app # 绑定域名（自动 HTTPS）
+
+# 应用中心
+acornfox catalog list                       # 看目录里的应用和配方
+acornfox install hermes-agent --llm local   # 装 Hermes，接本机 New API
+acornfox open new-api                       # 在自己电脑上打开只本机的应用
 ```
 
-## 🏗️ 架构设计
+## 架构
 
-AcornFox 采用简洁的三层架构：
+AcornFox 由三部分组成：
 
 - **AcornFox** - 状态管理和协调
 - **Docker** - 容器运行时
@@ -183,7 +211,7 @@ AcornFox 采用简洁的三层架构：
 - **应用独立性** - 应用由 Docker 管理，AcornFox 崩溃不影响运行中的应用
 - **诊断即产品** - 失败时返回结构化诊断，AI 可自动修复
 
-## 🌏 中国大陆特别说明
+## 中国大陆说明
 
 ### 域名与备案
 
@@ -210,14 +238,18 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash -s -- --global
 ```
 
-## 📚 文档
+## 文档
 
 - [使用手册](docs/user-guide.md)
+- [快速开始](docs/quick-start.md)
+- [命令参考](docs/acornfox/cli.md)
+- [隐私和联网说明](docs/user-guide.md#隐私和联网说明)
 - [常见问题](docs/user-guide.md#常见问题)
 - [AI 工作台 Skill](skills/acornfox/SKILL.md)
 - [能力清单](docs/capabilities.md)
+- [发行说明](docs/release-notes/)
 
-## 🛠️ 升级
+## 升级
 
 ```bash
 # 服务器端升级（中国大陆）
@@ -231,20 +263,21 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
 ```
 
-通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）：重装也会新建一份备份，之后 `--rollback` 回到的是重装前的同一版本，不再是更早的版本。
+通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）。
 
 升级过程：
 - 先下载新版本并校验 SHA256；下载失败不会动现有安装
 - 停止 AcornFox 服务，备份程序和数据库（放在 `/var/lib/acornfox/backups/`，保留最近 5 份），再执行数据库迁移
-- 数据库迁移失败、或新版本服务启动失败时，自动换回原来的程序和数据库
+- 数据库迁移失败、新版本服务起不来、或升级中途出错时，自动恢复到升级前（程序和数据库都换回原来的，等于没升上）
 - 应用容器在升级过程中一直运行；升级期间命令行和控制台会暂时连不上
 - 网址入口（Caddy 容器）需要重建时，应用网址会短暂打不开，例如从 v0.3.x 升级（系统里的 Caddy 会被停用，换成 Caddy 容器）
+- 从 v0.4.x 升级到 v0.5.0 后，控制台换成新版，旧控制台已经去掉
 
-升级完成后发现问题，可以手动回到升级前的版本（程序和数据库一起回退）。详见 [使用手册](docs/user-guide.md#回滚)。
+AcornFox 本身只能升级，不能回到旧版本：没有手动回滚，指定比现在旧的版本也会被拒绝。应用自己的版本照常可以用 `acornfox rollback 应用名` 回退。详见 [使用手册](docs/user-guide.md#只能升级)。
 
-## 🤝 贡献
+## 贡献
 
-欢迎贡献代码、文档或提出建议！
+欢迎贡献代码、文档或提出建议。
 
 1. Fork 本仓库
 2. 创建特性分支 (`git checkout -b feature/amazing`)
@@ -254,24 +287,21 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 
 请阅读 [贡献指南](CONTRIBUTING.md) 了解详情。
 
-## 📜 许可证
+## 许可证
 
 本项目采用 AGPL-3.0 许可证 - 详见 [LICENSE](LICENSE) 文件。
 
-## 🙏 致谢
+## 致谢
 
-AcornFox 站在巨人的肩膀上：
+AcornFox 用到的主要开源项目：
 
 - [Docker](https://www.docker.com/) - 容器运行时
 - [Caddy](https://caddyserver.com/) - HTTP 服务器和自动 HTTPS
 - [SQLite](https://www.sqlite.org/) - 嵌入式数据库
 - 所有贡献者和用户
 
-## 📮 联系方式
+## 联系方式
 
 - 问题反馈: [GitHub Issues](https://github.com/OrbitMaker/AcornFox/issues)
 - 文档: https://github.com/OrbitMaker/AcornFox/tree/main/docs
 
----
-
-**让部署变简单，让 AI 来帮忙** 🦊

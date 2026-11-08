@@ -68,7 +68,7 @@ var Faults = []FaultDef{
 	{Code: "SETUP-CHK-05", Title: "局域网转发没有启动",
 		Causes: []string{"局域网地址上的应用端口被别的程序占用了", "刚换了网络，转发还没跟上（10 秒内会自动重试）"},
 		Next:   "运行 acornfox doctor 看是哪些端口被占；关掉占用的程序，过 10 秒再看"},
-	// Linux server checks in `acornfox doctor` (service, disk space, ports).
+	// Linux server checks in `acornfox doctor` (service, disk space, ports, clock).
 	{Code: "SETUP-SVC-01", Title: "后台服务 acornfox-server 没有应答",
 		Causes: []string{"Docker 重启或升级后，acornfox-server、acornfox-runner 跟着停了，没有自动起来", "acornfox-runner 停了或连不上 Docker（doctor 会写“执行器 acornfox-runner 没有应答”）", "服务启动失败（看 journalctl -u acornfox-server -n 50）", "用的不是 root，也不在 acornfox-users 组里，连不上服务（这时只是警告）"},
 		Next:   "运行 sudo systemctl restart acornfox-runner acornfox-server，再运行 sudo acornfox doctor；还不行就把 journalctl -u acornfox-server -n 50 的输出交给用户"},
@@ -90,10 +90,13 @@ var Faults = []FaultDef{
 	{Code: "SETUP-PORT-05", Title: "没有权限查看是哪个程序占用了端口",
 		Causes: []string{"doctor 不是用 root 运行的，看不到别的用户的进程"},
 		Next:   "普通用户运行时出现是正常的：后台服务正常时，AcornFox 自己的端口（18808、应用端口、开着的局域网控制台端口）已经认出，不在这里；剩下的要确认就用 sudo acornfox doctor 再查一次"},
+	{Code: "SETUP-CLOCK-01", Title: "本机时钟不准，或者没开网络对时",
+		Causes: []string{"没开网络对时（timedatectl 里 NTP service 是 inactive）", "开了网络对时但连不上时间服务器（有的云主机屏蔽了外网的时间服务器，要改用云厂商内网的）", "虚拟机暂停过或宿主机休眠后，时钟没追上", "有人手动改过系统时间"},
+		Next:   "先问用户，再运行 sudo timedatectl set-ntp true 打开网络对时，过一两分钟用 timedatectl 看 System clock synchronized 是否为 yes，然后再运行 acornfox doctor；一直同步不上的云主机，按云厂商文档把 chrony 或 systemd-timesyncd 改成内网时间服务器。时钟和下载网关差 300 秒以上时，下载网关会拒绝这台机器（GW-AUTH-01）：应用中心的镜像改从公共源拉，私有目录连不上；AcornFox 会按网关时间自动重试一次，但还是要把时钟校准", NeedsUser: true},
 	// The Mac build of this release is a command-line client only
 	// (maclocal.go): install, serve and setup/doctor against the Mac itself
 	// stop with this code.
-	{Code: MacLocalCode, Title: "Mac 本机运行即将支持",
+	{Code: MacLocalCode, Title: "Mac 版只有命令行客户端",
 		Causes: []string{"这个版本的 Mac 版只当命令行客户端，用来管理 Linux 服务器上的 AcornFox；在 Mac 本机安装和运行（install、serve，以及对本机的 setup、doctor）还没有开放"},
 		Next:   MacLocalMessage + "。" + MacLocalHint, NeedsUser: true},
 	{Code: "SETUP-GEN-01", Title: "准备运行环境时出错",

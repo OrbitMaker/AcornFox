@@ -35,7 +35,7 @@ func TestSetupMacLocalStopped(t *testing.T) {
 		t.Fatalf("exit %d dialed %q\n%s", code, dialed, out)
 	}
 	d := decodeJSON(t, out)["diagnosis"].(map[string]any)
-	if d["code"] != "SETUP-MAC-01" || d["stage"] != "local" || !strings.Contains(d["message"].(string), "Mac 本机运行即将支持") ||
+	if d["code"] != "SETUP-MAC-01" || d["stage"] != "local" || !strings.Contains(d["message"].(string), "Mac 版只有命令行客户端") ||
 		!strings.Contains(d["hint"].(string), "acornfox target add") {
 		t.Fatalf("diagnosis %v", d)
 	}

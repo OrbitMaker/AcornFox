@@ -2,13 +2,13 @@ package main
 
 // macOS and Windows lifecycle commands (three-platform architecture):
 //
-//	acornfox install [--rollback]    set up or upgrade this computer's acornfox
+//	acornfox install                 set up or upgrade this computer's acornfox
 //	acornfox uninstall [--purge]     remove it (keeps data unless --purge)
 //	acornfox doctor                  check Docker, the service and LAN access
 //	                                 (Linux: Docker, disk space and ports)
 //
 // install copies the running binary to the data directory's bin/, keeps the
-// previous copy and database as *.prev (for --rollback), registers the
+// previous copy and database as *.prev, registers the
 // autostart entry (LaunchAgent / logon task) running "acornfox serve
 // --background", waits for the API and adds the "local" target. It does not
 // need Docker: preparing the runtime (Docker, the gateway, the self checks)
@@ -176,7 +176,7 @@ func stopService(dataDir string) {
 func runInstall(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	rollback := fs.Bool("rollback", false, "回到上一次安装的版本（程序和数据库都恢复到升级前）")
+	rollback := fs.Bool("rollback", false, "（不支持：AcornFox 只能升级）")
 	china := fs.Bool("china", false, "中国大陆网络：镜像直接从国内源拉")
 	global := fs.Bool("global", false, "海外网络：镜像从 Docker Hub 拉")
 	noSetup := fs.Bool("no-setup", false, "只装主程序，不接着准备运行环境（之后在控制台或用 acornfox setup 准备）")
@@ -210,7 +210,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "网络：%s（%s）\n", map[bool]string{true: "中国大陆，从国内源下载", false: "海外，从官方源下载"}[netcfg.China], netcfg.Source)
 
-	// 2. Put the binary in place (and keep the previous one for --rollback).
+	// 2. Put the binary in place (and keep the previous one).
 	if err := os.MkdirAll(paths.BinDir, 0o700); err != nil {
 		fmt.Fprintln(stderr, "创建目录失败：", err)
 		return 1
@@ -219,16 +219,8 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	prev := bin + ".prev"
 	db := filepath.Join(paths.DataDir, "acornfox.db")
 	if *rollback {
-		if _, err := os.Stat(prev); err != nil {
-			fmt.Fprintln(stderr, "没有上一个版本可以回滚（找不到 "+prev+"）")
-			return 1
-		}
-		stopService(paths.DataDir)
-		if err := swapBack(bin, prev, db); err != nil {
-			fmt.Fprintln(stderr, "回滚失败：", err)
-			return 1
-		}
-		fmt.Fprintln(stdout, "已恢复上一个版本的程序和数据库")
+		fmt.Fprintln(stderr, "UPGRADE-ROLLBACK-01：AcornFox 只能升级，不支持回到旧版本。升级没成功时会自动恢复到升级前；应用自己的版本可以用 acornfox rollback 应用名 回退。")
+		return 2
 	} else {
 		self, err := os.Executable()
 		if err != nil {
@@ -324,24 +316,6 @@ func keepPrevious(bin, prev, db string) error {
 			continue
 		}
 		if err := copyFile(src, db+".prev"+suffix, 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// swapBack restores *.prev over the current binary and database.
-func swapBack(bin, prev, db string) error {
-	if err := copyFile(prev, bin, 0o755); err != nil {
-		return err
-	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		src := db + ".prev" + suffix
-		if _, err := os.Stat(src); err != nil {
-			_ = os.Remove(db + suffix)
-			continue
-		}
-		if err := copyFile(src, db+suffix, 0o600); err != nil {
 			return err
 		}
 	}
@@ -537,7 +511,7 @@ func cleanupDocker(ctx context.Context, dc *dockerclient.Client, purge bool, std
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	asJSON := fs.Bool("json", false, "输出 JSON：{\"ok\":bool,\"items\":[{\"ok\",\"level\",\"text\",\"code\"}],\"setup\":{...}}")
+	asJSON := fs.Bool("json", false, "输出 JSON：{\"ok\":bool,\"items\":[{\"ok\",\"level\",\"text\",\"code\",\"check\"}],\"setup\":{...}}；check 是这项检查的编号，通过的项也有（例如时钟一项是 SETUP-CLOCK-01），code 只出现在要处理的项上")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -555,12 +529,15 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 }
 
 // doctorItem is one line of doctor's report. Code is a fault code from
-// internal/setup (Faults) when the item needs fixing.
+// internal/setup (Faults) when the item needs fixing. Check names the check
+// by its fault code on every item that has one, passed items included, so a
+// caller can find e.g. the clock line by SETUP-CLOCK-01 whatever its result.
 type doctorItem struct {
 	OK    bool   `json:"ok"`
 	Level string `json:"level"` // ok | fail | warn
 	Text  string `json:"text"`
 	Code  string `json:"code,omitempty"`
+	Check string `json:"check,omitempty"`
 }
 
 type doctorReport struct {
@@ -569,19 +546,26 @@ type doctorReport struct {
 	Setup *setup.Status `json:"setup,omitempty"` // the server's runtime setup, when the service answers
 }
 
+// add records a passed or failed item. code is the check's fault code; on a
+// passed item it is kept only in Check.
 func (r *doctorReport) add(ok bool, code, format string, a ...any) {
-	lvl := "ok"
+	lvl, check := "ok", code
 	if !ok {
 		lvl, r.OK = "fail", false
 	} else {
 		code = ""
 	}
-	r.Items = append(r.Items, doctorItem{OK: ok, Level: lvl, Text: fmt.Sprintf(format, a...), Code: code})
+	r.Items = append(r.Items, doctorItem{OK: ok, Level: lvl, Text: fmt.Sprintf(format, a...), Code: code, Check: check})
 }
 
 func (r *doctorReport) warn(code, format string, a ...any) {
-	r.Items = append(r.Items, doctorItem{OK: true, Level: "warn", Text: fmt.Sprintf(format, a...), Code: code})
+	r.Items = append(r.Items, doctorItem{OK: true, Level: "warn", Text: fmt.Sprintf(format, a...), Code: code, Check: code})
 }
+
+// Add and Warn let the shared checks in internal/hostcheck write into the
+// report (hostcheck.Reporter).
+func (r *doctorReport) Add(ok bool, code, format string, a ...any) { r.add(ok, code, format, a...) }
+func (r *doctorReport) Warn(code, format string, a ...any)         { r.warn(code, format, a...) }
 
 func (r *doctorReport) print(w io.Writer) {
 	for _, it := range r.Items {
@@ -660,7 +644,7 @@ func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 	}
 	defer dc.Close()
 	if !afterInstall {
-		r.add(true, "", "Docker：%s %s（%s，来源 %s）", ep.Runtime, info.Info.ServerVersion, ep.Host, ep.Source)
+		r.add(true, "SETUP-RT-03", "Docker：%s %s（%s，来源 %s）", ep.Runtime, info.Info.ServerVersion, ep.Host, ep.Source)
 	}
 	arch := strings.ToLower(info.Info.Architecture)
 	if arch == "aarch64" || arch == "arm64" {
@@ -683,7 +667,7 @@ func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 	d := runner.NewDocker(dc)
 	if d.EdgeImagePresent(ctx) {
 		if res, err := dc.ContainerInspect(ctx, runner.EdgeContainerName, dockerclient.ContainerInspectOptions{}); err == nil && res.Container.State != nil && res.Container.State.Running {
-			r.add(true, "", "网关组件（Caddy）：镜像已就绪，容器运行中")
+			r.add(true, "SETUP-EDGE-01", "网关组件（Caddy）：镜像已就绪，容器运行中")
 		} else {
 			r.add(false, "SETUP-EDGE-01", "网关组件（Caddy）：镜像已就绪，但容器没有运行（后台服务启动后会自动创建；查看 docker logs %s）", runner.EdgeContainerName)
 		}
@@ -695,7 +679,7 @@ func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 	if lan == "" {
 		r.warn("SETUP-CHK-04", "没取到局域网地址（没联网？），应用只能用 localhost 打开")
 	} else {
-		r.add(true, "", "局域网地址：%s（应用的局域网网址形如 http://%s:18810）", lan, lan)
+		r.add(true, "SETUP-CHK-04", "局域网地址：%s（应用的局域网网址形如 http://%s:18810）", lan, lan)
 	}
 	// LAN reachability: a published 0.0.0.0 port of the edge must answer on
 	// the LAN address too. Colima (and some setups) forward only 127.0.0.1.
@@ -705,7 +689,7 @@ func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 			remote := dialOK(lan, port)
 			switch {
 			case local && remote:
-				r.add(true, "", "局域网访问：%s:%d 能连通", lan, port)
+				r.add(true, "SETUP-CHK-04", "局域网访问：%s:%d 能连通", lan, port)
 			case local && !remote:
 				msg := "局域网访问：端口 %d 只在 127.0.0.1 能连，局域网地址 %s 连不上，别的设备打不开应用"
 				if ep.Runtime == "Colima" {

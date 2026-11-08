@@ -1,6 +1,9 @@
 // Package gatewayclient talks to the AcornFox download gateway: it registers
-// this machine's random key (W1, POST /v1/register) and asks for a
-// short-lived download address for one file (W2, POST /v1/issue). The
+// this machine's random key (W1, POST /v1/register), asks for a short-lived
+// download address for one file (W2, POST /v1/issue, also for files of a
+// private catalog), connects this machine to a private catalog with a code
+// and fetches the private catalogs it may see (W10, POST /v1/catalog/connect
+// and /v1/catalog/index; see catalog.go). The
 // gateway never serves file contents; the caller downloads from the returned
 // URL and checks the file against its own pinned SHA-256.
 //
@@ -29,7 +32,18 @@
 //   - Stop: ACORNFOX_GATEWAY= (empty) or "gateway": "off" in network.json;
 //     the downloader then behaves as before the gateway existed.
 //   - First look: the GW-* code in the setup's "换下一个下载源" line; GW-AUTH-01
-//     is usually a wrong clock; GW-NET-01 a proxy or a wrong address.
+//     is usually a wrong clock (see below); GW-NET-01 a proxy or a wrong
+//     address.
+//
+// Clock: the gateway refuses a request whose timestamp is more than 300
+// seconds away from its own time (GW-AUTH-01). When such an answer carries a
+// Date header that is at least ClockSkewMin away from this machine's clock,
+// the client takes the gateway's time, signs the same request again with the
+// corrected timestamp once, and keeps that correction for later requests of
+// the same Client. If the gateway still refuses, the error's message says how
+// far the clocks are apart and how to fix it (timedatectl set-ntp true);
+// Error.ClockSkew carries the difference. `acornfox doctor` reports a wrong
+// clock on its own as SETUP-CLOCK-01.
 package gatewayclient
 
 import (
@@ -44,6 +58,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/acornfox/acornfox/internal/identity"
@@ -51,6 +66,12 @@ import (
 
 // DefaultTimeout bounds each request to the gateway (not the download).
 const DefaultTimeout = 10 * time.Second
+
+// ClockSkewMin is how far the gateway's Date must be from this machine's
+// clock before a GW-AUTH-01 is taken as a clock problem and retried with the
+// gateway's time. Date has a resolution of one second and the gateway allows
+// 300 seconds, so anything smaller is not what made the gateway refuse.
+const ClockSkewMin = 60 * time.Second
 
 // DefaultMaxRetryAfter is the longest GW-LIM-02 wait Issue sits out before
 // its single retry; a longer retry_after is returned to the caller at once.
@@ -81,6 +102,16 @@ type Client struct {
 
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) error
+
+	// offset is the gateway's time minus this machine's, in seconds, as
+	// learned from a GW-AUTH-01 answer's Date header (0 until then).
+	offset atomic.Int64
+}
+
+// ClockOffset is the correction this client applies to its timestamps (the
+// gateway's time minus this machine's), 0 when none was needed.
+func (c *Client) ClockOffset() time.Duration {
+	return time.Duration(c.offset.Load()) * time.Second
 }
 
 // Registered is W1's answer.
@@ -108,6 +139,12 @@ type Error struct {
 	HTTPStatus int           // 0 when no answer arrived
 	RetryAfter time.Duration // GW-LIM-02
 	Err        error         // the transport error behind GW-NET-01
+	// ClockSkew is the gateway's time minus this machine's clock when a
+	// GW-AUTH-01 was caused by a wrong clock (0 otherwise).
+	ClockSkew time.Duration
+
+	serverTime time.Time // the answer's Date header, zero when absent
+	sentAt     time.Time // this machine's clock (with the correction) when the answer arrived
 }
 
 func (e *Error) Error() string {
@@ -141,7 +178,7 @@ type CodeDef struct {
 var Codes = []CodeDef{
 	{"GW-REQ-01", "请求格式不对", "跳过网关，换下一个下载源"},
 	{"GW-REG-01", "这个 IP 今天新登记的机器太多", "跳过网关"},
-	{"GW-AUTH-01", "签名不对、时间戳超出范围或 nonce 重复", "跳过网关；本机时间差太多时先校准时间"},
+	{"GW-AUTH-01", "签名不对、时间戳超出范围或 nonce 重复", "应答带 Date 头且和本机时钟差 60 秒以上时，按网关时间重签一次；还不行就跳过网关，提示里写明时钟差了多少，请校时（timedatectl set-ntp true）"},
 	{"GW-AUTH-02", "这台机器还没登记", "自动登记一次再重试；还不行就跳过网关"},
 	{"GW-AUTH-03", "这台机器被拉黑", "跳过网关"},
 	{"GW-LIM-01", "这台机器今天的次数用完了（明天恢复）", "跳过网关"},
@@ -150,6 +187,11 @@ var Codes = []CodeDef{
 	{"GW-ART-01", "网关上没有这个文件", "跳过网关"},
 	{"GW-BE-01", "网关后端（网盘）出错", "跳过网关"},
 	{"GW-NIMP-01", "接口预留，还没实现", "跳过网关"},
+	{"GW-CAT-01", "连接码不存在、格式不对或已被别的机器用过", "提示用户检查连接码或要新码；不自动重试"},
+	{"GW-CAT-02", "连接码已过期", "提示用户要新码"},
+	{"GW-CAT-03", "私有目录已停用", "提示用户；已装的应用照常运行"},
+	{"GW-CAT-04", "连接码试得太频繁", "等 retry_after 秒后再让用户试；不自动循环"},
+	{"GW-CAT-05", "不能通过这个私有目录下载这个文件（没授权、已撤销、目录停用或文件不在目录里）", "不去公共源找；提示重新连接或联系管理员"},
 	{"GW-NET-01", "连不上网关或超时（本机判断）", "跳过网关；看网络、代理和 ACORNFOX_GATEWAY 的地址"},
 	{"GW-RESP-01", "网关的应答看不懂（本机判断）", "跳过网关；多半是地址指错了，或中间有代理改了应答"},
 }
@@ -161,11 +203,18 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: DefaultTimeout, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 }
 
-func (c *Client) clock() time.Time {
+// localClock is this machine's clock (tests replace it).
+func (c *Client) localClock() time.Time {
 	if c.now != nil {
 		return c.now()
 	}
 	return time.Now()
+}
+
+// clock is the time requests are signed with: this machine's clock plus the
+// correction learned from the gateway.
+func (c *Client) clock() time.Time {
+	return c.localClock().Add(c.ClockOffset())
 }
 
 func (c *Client) wait(ctx context.Context, d time.Duration) error {
@@ -197,7 +246,7 @@ func (c *Client) Register(ctx context.Context, info ClientInfo) (Registered, err
 			PerDay int `json:"per_day"`
 		} `json:"limits"`
 	}
-	if err := c.call(ctx, "/v1/register", body, &out); err != nil {
+	if err := c.call(ctx, "/v1/register", body, &out, maxAnswer); err != nil {
 		return Registered{}, err
 	}
 	if out.InstallID != c.Identity.InstallID {
@@ -208,21 +257,55 @@ func (c *Client) Register(ctx context.Context, info ClientInfo) (Registered, err
 
 var hexSHA256 = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
-// Issue runs W2 for one file. On GW-AUTH-02 it registers and tries once
-// more; on GW-LIM-02 with a short retry_after it waits and tries once more.
+// Issue runs W2 for one public file. On GW-AUTH-02 it registers and tries
+// once more; on GW-LIM-02 with a short retry_after it waits and tries once
+// more.
 func (c *Client) Issue(ctx context.Context, fileID, purpose string) (Issued, error) {
+	var iss Issued
+	err := c.retry(ctx, func() error {
+		var err error
+		iss, err = c.issueOnce(ctx, fileID, purpose, nil)
+		return err
+	})
+	return iss, err
+}
+
+// AppRef names a private catalog app in W2 ("app": {"catalog", "app"}).
+type AppRef struct {
+	Catalog string `json:"catalog"`
+	App     string `json:"app"`
+}
+
+// IssueApp runs W2 for a file of a private catalog (purpose app, with the
+// catalog and app named). The gateway answers GW-CAT-05 when this machine may
+// not fetch it through that catalog; callers must then not look for the file
+// on a public source.
+func (c *Client) IssueApp(ctx context.Context, fileID string, app AppRef) (Issued, error) {
+	var iss Issued
+	err := c.retry(ctx, func() error {
+		var err error
+		iss, err = c.issueOnce(ctx, fileID, "app", &app)
+		return err
+	})
+	return iss, err
+}
+
+// retry runs fn; on GW-AUTH-02 it registers and runs fn once more; on
+// GW-LIM-02 with a retry_after up to MaxRetryAfter it waits and runs it once
+// more. Nothing else is retried.
+func (c *Client) retry(ctx context.Context, fn func() error) error {
 	if c.Identity == nil {
-		return Issued{}, &Error{Code: "GW-REQ-01", Message: "没有机器钥匙"}
+		return &Error{Code: "GW-REQ-01", Message: "没有机器钥匙"}
 	}
 	registered, waited := false, false
 	for {
-		iss, err := c.issueOnce(ctx, fileID, purpose)
+		err := fn()
 		if err == nil {
-			return iss, nil
+			return nil
 		}
 		var ge *Error
 		if !errors.As(err, &ge) {
-			return Issued{}, err
+			return err
 		}
 		switch {
 		case ge.Code == "GW-AUTH-02" && !registered:
@@ -232,7 +315,7 @@ func (c *Client) Issue(ctx context.Context, fileID, purpose string) (Issued, err
 				info = DefaultInfo(info.Version)
 			}
 			if _, rerr := c.Register(ctx, info); rerr != nil {
-				return Issued{}, rerr
+				return rerr
 			}
 			continue
 		case ge.Code == "GW-LIM-02" && !waited:
@@ -241,27 +324,27 @@ func (c *Client) Issue(ctx context.Context, fileID, purpose string) (Issued, err
 				max = DefaultMaxRetryAfter
 			}
 			if ge.RetryAfter <= 0 || ge.RetryAfter > max {
-				return Issued{}, err
+				return err
 			}
 			waited = true
 			if werr := c.wait(ctx, ge.RetryAfter); werr != nil {
-				return Issued{}, werr
+				return werr
 			}
 			continue
 		}
-		return Issued{}, err
+		return err
 	}
 }
 
-func (c *Client) issueOnce(ctx context.Context, fileID, purpose string) (Issued, error) {
-	// Field order is fixed so the signed bytes are predictable; app and
-	// account_token are reserved and always null for now.
+func (c *Client) issueOnce(ctx context.Context, fileID, purpose string, app *AppRef) (Issued, error) {
+	// Field order is fixed so the signed bytes are predictable; app is null
+	// for public files and account_token is reserved and always null.
 	body, _ := json.Marshal(struct {
 		FileID       string  `json:"file_id"`
 		Purpose      string  `json:"purpose"`
-		App          *string `json:"app"`
+		App          *AppRef `json:"app"`
 		AccountToken *string `json:"account_token"`
-	}{FileID: fileID, Purpose: purpose})
+	}{FileID: fileID, Purpose: purpose, App: app})
 	var out struct {
 		FileID    string `json:"file_id"`
 		URL       string `json:"url"`
@@ -274,7 +357,7 @@ func (c *Client) issueOnce(ctx context.Context, fileID, purpose string) (Issued,
 			DayLimit int `json:"day_limit"`
 		} `json:"quota"`
 	}
-	if err := c.call(ctx, "/v1/issue", body, &out); err != nil {
+	if err := c.call(ctx, "/v1/issue", body, &out, maxAnswer); err != nil {
 		return Issued{}, err
 	}
 	u, err := url.Parse(out.URL)
@@ -294,8 +377,56 @@ func (c *Client) issueOnce(ctx context.Context, fileID, purpose string) (Issued,
 	return iss, nil
 }
 
-// call signs and POSTs body to path and decodes a successful answer into out.
-func (c *Client) call(ctx context.Context, path string, body []byte, out any) error {
+// Answer size limits: W1, W2 and connect answers are small; the private
+// catalog list carries whole signed indexes.
+const (
+	maxAnswer      = 64 << 10
+	maxIndexAnswer = 64 << 20
+)
+
+// call signs and POSTs body to path and decodes a successful answer (at most
+// limit bytes) into out. A GW-AUTH-01 caused by a wrong clock is retried
+// once with the gateway's time (see the package comment).
+func (c *Client) call(ctx context.Context, path string, body []byte, out any, limit int64) error {
+	err := c.callOnce(ctx, path, body, out, limit)
+	ge, skew := clockRefusal(err)
+	if ge == nil {
+		return err
+	}
+	// The gateway's time minus this machine's raw clock.
+	raw := c.ClockOffset() + skew
+	c.offset.Store(int64(raw.Round(time.Second) / time.Second))
+	err = c.callOnce(ctx, path, body, out, limit)
+	var again *Error
+	if errors.As(err, &again) && again.Code == "GW-AUTH-01" {
+		again.ClockSkew = raw
+		again.Message += fmt.Sprintf("；这台机器的时钟和网关差了约 %d 秒，请校时（timedatectl set-ntp true）", int64(absDuration(raw)/time.Second))
+	}
+	return err
+}
+
+// clockRefusal reports a GW-AUTH-01 whose Date header is at least
+// ClockSkewMin away from the time the request was signed with, and how far.
+func clockRefusal(err error) (*Error, time.Duration) {
+	var ge *Error
+	if !errors.As(err, &ge) || ge.Code != "GW-AUTH-01" || ge.serverTime.IsZero() || ge.sentAt.IsZero() {
+		return nil, 0
+	}
+	skew := ge.serverTime.Sub(ge.sentAt)
+	if absDuration(skew) < ClockSkewMin {
+		return nil, 0
+	}
+	return ge, skew
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+func (c *Client) callOnce(ctx context.Context, path string, body []byte, out any, limit int64) error {
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if base == "" {
 		return &Error{Code: "GW-NET-01", Message: "没有配置下载网关地址"}
@@ -330,9 +461,12 @@ func (c *Client) call(ctx context.Context, path string, body []byte, out any) er
 		return &Error{Code: "GW-NET-01", Message: "连不上下载网关", Err: err}
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return &Error{Code: "GW-NET-01", Message: "读取网关应答失败", HTTPStatus: resp.StatusCode, Err: err}
+	}
+	if int64(len(raw)) > limit {
+		return &Error{Code: "GW-RESP-01", Message: fmt.Sprintf("网关应答超过 %d 字节", limit), HTTPStatus: resp.StatusCode}
 	}
 	var head struct {
 		OK         bool   `json:"ok"`
@@ -361,7 +495,13 @@ func (c *Client) call(ctx context.Context, path string, body []byte, out any) er
 				}
 			}
 		}
-		return &Error{Code: code, Message: msg, HTTPStatus: resp.StatusCode, RetryAfter: ra}
+		e := &Error{Code: code, Message: msg, HTTPStatus: resp.StatusCode, RetryAfter: ra}
+		if d := resp.Header.Get("Date"); d != "" {
+			if t, err := http.ParseTime(d); err == nil {
+				e.serverTime, e.sentAt = t, c.clock()
+			}
+		}
+		return e
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		return &Error{Code: "GW-RESP-01", Message: "网关应答字段不对", HTTPStatus: resp.StatusCode, Err: err}

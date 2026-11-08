@@ -20,6 +20,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	dockerclient "github.com/moby/moby/client"
 
+	"github.com/acornfox/acornfox/internal/apiserver"
 	"github.com/acornfox/acornfox/internal/cli"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/reconcile"
@@ -347,6 +348,36 @@ func setupNetwork(dataDir string) platform.Network {
 	return platform.LoadNetwork(dataDir)
 }
 
+// gatewayBase is the download gateway's address ("" when it is off) used by
+// the app center, by doctor's clock check and shown by the settings and
+// runtime pages, so the three always agree. ACORNFOX_GATEWAY wins; otherwise
+// network.json's "gateway" ("off" turns it off) is honoured on every
+// platform, also on a Linux server whose region comes from install.env
+// (install.env says nothing about the gateway).
+func gatewayBase(dataDir string) string {
+	n := setupNetwork(dataDir)
+	if n.Source == "install.env" {
+		n.Gateway = platform.LoadNetwork(dataDir).Gateway
+	}
+	return n.EffectiveGateway()
+}
+
+// downloadSources is what the console's settings page shows about where this
+// server downloads from: the Docker Hub pull order the runner uses, the
+// ghcr.io mirrors and the download gateway. On a Linux server without
+// install.env the runner keeps its default (not China), so this does too.
+func downloadSources(dataDir string) apiserver.DownloadSources {
+	n := setupNetwork(dataDir)
+	if n.Source != "install.env" && !platform.DesktopMode() && platform.GOOS == "linux" {
+		n = platform.Network{Source: "default"}
+	}
+	reg := runner.Registry{China: n.China, Mirrors: n.Mirrors}
+	return apiserver.DownloadSources{
+		China: n.China, RegionSource: n.Source, DockerHub: reg.PullSources(), GHCR: runner.GHCRMirrors(),
+		Gateway: gatewayBase(dataDir), DownloadBase: n.EffectiveDownloadBase(),
+	}
+}
+
 // checkRegistry probes the image sources in the order the runner pulls
 // Docker Hub images from (runner.Registry.PullSources): the check passes
 // when any of them answers, since the runner moves on to the next source
@@ -391,20 +422,31 @@ func registryLabel(host string, china bool) string {
 
 // checkRegistrySources probes sources concurrently and judges them in
 // order: the first one that answers is the one the runner ends up using.
+// Docker Hub itself, when it comes after mirrors, is only probed once every
+// source before it has failed: in China it is blocked, and asking it on
+// every start would be a connection to a blocked address for nothing (the
+// runner only goes there when the mirrors fail too).
 func checkRegistrySources(ctx context.Context, sources []string, china bool, probe func(context.Context, string) error) (bool, string) {
 	if len(sources) == 0 {
 		return false, "没有可用的镜像下载源"
 	}
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	deferred := func(i int) bool { return i > 0 && sources[i] == runner.DockerHubRegistry }
 	results := make([]chan error, len(sources))
 	for i, host := range sources {
 		results[i] = make(chan error, 1)
-		go func(ch chan<- error, host string) { ch <- probe(pctx, host) }(results[i], host)
+		if !deferred(i) {
+			go func(ch chan<- error, host string) { ch <- probe(pctx, host) }(results[i], host)
+		}
 	}
 	var failed []string
 	for i, host := range sources {
 		name := registryLabel(host, china) + "（" + host + "）"
+		if deferred(i) {
+			// Every source before it failed (or we would have returned).
+			results[i] <- probe(pctx, host)
+		}
 		if err := <-results[i]; err != nil {
 			failed = append(failed, name+err.Error())
 			continue

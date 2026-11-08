@@ -286,7 +286,7 @@ func TestFaultCatalog(t *testing.T) {
 		seen[f.Code] = true
 	}
 	// Every code the package returns is in the catalog.
-	for _, c := range []string{"SETUP-NET-01", "SETUP-NET-02", "SETUP-SUM-01", "SETUP-RT-02", "SETUP-RT-03", "SETUP-RT-04", "SETUP-WIN-03", "SETUP-WIN-04", "SETUP-EDGE-01", "SETUP-CHK-01", "SETUP-GEN-01", "SETUP-SVC-01", "SETUP-DISK-01", "SETUP-PORT-01", "SETUP-PORT-02", "SETUP-PORT-03", "SETUP-PORT-04", "SETUP-PORT-05", "SETUP-MAC-01"} {
+	for _, c := range []string{"SETUP-NET-01", "SETUP-NET-02", "SETUP-SUM-01", "SETUP-RT-02", "SETUP-RT-03", "SETUP-RT-04", "SETUP-WIN-03", "SETUP-WIN-04", "SETUP-EDGE-01", "SETUP-CHK-01", "SETUP-GEN-01", "SETUP-SVC-01", "SETUP-DISK-01", "SETUP-PORT-01", "SETUP-PORT-02", "SETUP-PORT-03", "SETUP-PORT-04", "SETUP-PORT-05", "SETUP-CLOCK-01", "SETUP-MAC-01"} {
 		if !seen[c] {
 			t.Fatalf("missing %s", c)
 		}

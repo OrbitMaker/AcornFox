@@ -35,6 +35,10 @@ type Diagnosis struct {
 	Message    string `json:"message"`
 	LogExcerpt string `json:"log_excerpt,omitempty"`
 	Hint       string `json:"hint,omitempty"`
+	// App center errors that involve the download gateway: its GW- code and,
+	// for "too many tries", the seconds to wait.
+	GatewayCode string `json:"gateway_code,omitempty"`
+	RetryAfter  int    `json:"retry_after,omitempty"`
 }
 
 // Error is returned by every Client method on failure. Connect failures have
@@ -43,6 +47,7 @@ type Diagnosis struct {
 type Error struct {
 	Status int
 	Diag   Diagnosis
+	TaskID string // app center: the running install task (CAT-INST-04)
 }
 
 func (e *Error) Error() string { return e.Diag.Stage + "/" + e.Diag.Code + ": " + e.Diag.Message }
@@ -147,17 +152,24 @@ type Volume struct {
 }
 
 type App struct {
-	Name              string      `json:"name"`
-	Desired           string      `json:"desired"`
-	Port              int         `json:"port"`
-	HealthPath        string      `json:"health_path"`
-	PublicPort        int         `json:"public_port"`
-	CurrentDeployment string      `json:"current_deployment"`
-	MemoryMB          int         `json:"memory_mb"`
-	CPUMilli          int         `json:"cpu_milli"`
-	URL               string      `json:"url"`
-	LANURL            string      `json:"lan_url,omitempty"`
-	Exposure          string      `json:"exposure,omitempty"`
+	Name              string `json:"name"`
+	Desired           string `json:"desired"`
+	Port              int    `json:"port"`
+	HealthPath        string `json:"health_path"`
+	PublicPort        int    `json:"public_port"`
+	CurrentDeployment string `json:"current_deployment"`
+	MemoryMB          int    `json:"memory_mb"`
+	CPUMilli          int    `json:"cpu_milli"`
+	URL               string `json:"url"`
+	LANURL            string `json:"lan_url,omitempty"`
+	Exposure          string `json:"exposure,omitempty"`
+	LocalOnly         bool   `json:"local_only,omitempty"` // only opens on the server itself (URL is 127.0.0.1)
+	// OpenHint (local-only apps on a Linux server): how the user opens the
+	// app from their own computer.
+	OpenHint *OpenHint `json:"open_hint,omitempty"`
+	// GatewayTokenFrom (detail view): the local model gateway app that
+	// issued this app a token with no quota and no expiry.
+	GatewayTokenFrom  string      `json:"gateway_token_from,omitempty"`
 	ObservedState     string      `json:"observed_state"`
 	Live              *Deployment `json:"live,omitempty"`
 	Latest            *Deployment `json:"latest,omitempty"`
@@ -165,6 +177,19 @@ type App struct {
 	Env               []EnvKey    `json:"env,omitempty"`
 	Volumes           []Volume    `json:"volumes,omitempty"`
 	Domains           []Domain    `json:"domains,omitempty"`
+}
+
+// OpenHint is how to open a local-only app from the user's own computer:
+// Recommend is "lan" (the server is on the user's LAN and the app has its
+// own login: switching it to lan exposure is offered, with the user's
+// consent) or "tunnel" (Command, acornfox open APP, on the user's computer).
+type OpenHint struct {
+	LANAddress string `json:"lan_address,omitempty"`
+	LANURL     string `json:"lan_url,omitempty"`
+	HasLogin   bool   `json:"has_login"`
+	CanLAN     bool   `json:"can_lan"`
+	Recommend  string `json:"recommend"`
+	Command    string `json:"command"`
 }
 
 type Status struct {

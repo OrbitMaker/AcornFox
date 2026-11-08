@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -455,5 +456,99 @@ func TestDockerLogTail(t *testing.T) {
 	check("stopped")
 	if _, err := d.LogTail(ctx, app, ContainerName(app, "0123456789bb"), 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing container: %v", err)
+	}
+}
+
+// TestDockerLoadImageOwned loads an archive (docker save of the base image
+// under a throwaway name) with a deployment id: the image must come back
+// owned by acornfox/<app>:<id>, the name the archive carried must be gone,
+// and removing the app's tag must leave nothing of the load behind.
+func TestDockerLoadImageOwned(t *testing.T) {
+	d := newDockerIT(t)
+	ctx := context.Background()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker CLI not found")
+	}
+	const app = "afitload"
+	const dep = "0123456789ad"
+	const carried = "acornfox-it/loadtest:v1"
+	tag := ImageTag(app, dep)
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+			t.Fatalf("docker %v: %v\n%s", args, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "rmi", carried).Run()
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.RemoveImage(cctx, app, tag)
+	})
+	archive := filepath.Join(t.TempDir(), "img.tar")
+	run("tag", itBaseImage, carried)
+	run("save", "-o", archive, carried)
+	run("rmi", carried)
+
+	res, err := d.LoadImage(ctx, LoadImageRequest{App: app, Path: archive, DeploymentID: dep})
+	if err != nil {
+		t.Fatalf("LoadImage: %v", err)
+	}
+	if res.Image == nil || res.Image.App != app || res.Image.DeploymentID != dep {
+		t.Fatalf("loaded image not owned: %+v (loaded %v)", res.Image, res.Loaded)
+	}
+	if _, err := d.c().ImageInspect(ctx, carried); err == nil {
+		t.Fatalf("the archive's own name %s was kept", carried)
+	}
+	base, err := d.c().ImageInspect(ctx, itBaseImage)
+	if err != nil {
+		t.Fatalf("base image gone: %v", err)
+	}
+	if base.ID != res.Image.ID {
+		t.Logf("note: loaded id %s differs from base %s (image store)", res.Image.ID, base.ID)
+	}
+	if err := d.RemoveImage(ctx, app, tag); err != nil {
+		t.Fatalf("RemoveImage: %v", err)
+	}
+	if _, err := d.c().ImageInspect(ctx, tag); err == nil {
+		t.Fatal("app tag still there")
+	}
+}
+
+// TestDockerLoadArchiveFromEnv loads a real image archive named by
+// ACORNFOX_IT_ARCHIVE (for example a catalog app's archive as the download
+// gateway serves it) the way an install does, then removes it again. Skipped
+// without the variable.
+func TestDockerLoadArchiveFromEnv(t *testing.T) {
+	archive := os.Getenv("ACORNFOX_IT_ARCHIVE")
+	if archive == "" {
+		t.Skip("set ACORNFOX_IT_ARCHIVE to an image archive")
+	}
+	d := newDockerIT(t)
+	ctx := context.Background()
+	const app = "afitarchive"
+	const dep = "0123456789ae"
+	tag := ImageTag(app, dep)
+	res, err := d.LoadImage(ctx, LoadImageRequest{App: app, Path: archive, DeploymentID: dep})
+	if err != nil {
+		t.Fatalf("LoadImage: %v", err)
+	}
+	t.Logf("loaded %v -> %s (id %s)", res.Loaded, tag, res.Image.ID)
+	if res.Image == nil || res.Image.App != app {
+		t.Fatalf("not owned: %+v", res.Image)
+	}
+	for _, ref := range res.Loaded {
+		if ref == res.Image.ID {
+			continue
+		}
+		if _, err := d.c().ImageInspect(ctx, ref); err == nil {
+			t.Fatalf("carried name %s kept", ref)
+		}
+	}
+	if err := d.RemoveImage(ctx, app, tag); err != nil {
+		t.Fatalf("RemoveImage: %v", err)
+	}
+	if _, err := d.c().ImageInspect(ctx, res.Image.ID); err == nil {
+		t.Fatalf("image %s left after removing the app's tag", res.Image.ID)
 	}
 }

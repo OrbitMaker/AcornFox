@@ -91,6 +91,9 @@ type OK struct {
 type PingResponse struct {
 	DockerAPIVersion string `json:"docker_api_version"`
 	ServerVersion    string `json:"server_version"`
+	// DockerRootDir is Docker's data root as Docker reports it; empty when
+	// Docker did not say (or the runner is older than this field).
+	DockerRootDir string `json:"docker_root_dir,omitempty"`
 }
 
 type AppRef struct {
@@ -220,7 +223,21 @@ type EnsureContainerRequest struct {
 	// the host, the pinned image is pulled if missing, and the spec's
 	// entrypoint is applied. See addon.go.
 	Role string `json:"role,omitempty"`
+
+	// App-center extras (app role only; ignored for add-ons).
+	// Command replaces the image's CMD (the entrypoint stays); empty keeps it.
+	Command []string `json:"command,omitempty"`
+	// PidsLimit overrides DefaultPidsLimit when > 0 (at most MaxPidsLimit).
+	PidsLimit int `json:"pids_limit,omitempty"`
+	// Links are other apps whose network NetworkName(link) the container also
+	// joins, so it reaches them by their alias (the app name). A link whose
+	// network does not exist yet is skipped; one that is not managed for that
+	// app is refused.
+	Links []string `json:"links,omitempty"`
 }
+
+// MaxPidsLimit bounds EnsureContainerRequest.PidsLimit.
+const MaxPidsLimit = 8192
 
 // ContainerInfo is the observed state of one managed container.
 type ContainerInfo struct {

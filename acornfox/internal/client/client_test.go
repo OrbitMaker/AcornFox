@@ -253,6 +253,22 @@ func TestServerErrorMapping(t *testing.T) {
 	}
 }
 
+// The app center's gateway fields (gateway_code, retry_after) reach the
+// diagnosis, so --json can show them.
+func TestServerErrorGatewayFields(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"CAT-CONN-06","message":"试得太频繁","gateway_code":"GW-CAT-04","retry_after":120}}`))
+	}))
+	defer ts.Close()
+	c := newDirectClient(t, ts)
+	_, err := c.App(context.Background(), "x")
+	var e *Error
+	if !asError(err, &e) || e.Diag.GatewayCode != "GW-CAT-04" || e.Diag.RetryAfter != 120 {
+		t.Fatalf("got %+v", err)
+	}
+}
+
 func TestDeploymentAndEvents(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("after") != "5" {

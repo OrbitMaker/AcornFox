@@ -134,6 +134,10 @@ func registryMirrors() []string {
 
 func ghcrMirrors() []string { return mirrorsFromEnv("ACORNFOX_GHCR_MIRRORS", DefaultGHCRMirrors) }
 
+// GHCRMirrors lists the ghcr.io mirrors in use (the console's settings page
+// shows them).
+func GHCRMirrors() []string { return ghcrMirrors() }
+
 func mirrorsFromEnv(name string, def []string) []string {
 	v, ok := os.LookupEnv(name)
 	if !ok {

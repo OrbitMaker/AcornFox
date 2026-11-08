@@ -1,112 +1,126 @@
-# 用自己的 AI 和 AcornFox 部署项目
+# acornfox 命令参考
 
-AcornFox 负责接收项目、生成镜像并运行容器。你的 AI 客户端负责阅读项目、补齐 Dockerfile 和运行配置。CLI 调用平台 API，不直接操作数据库或 Docker，也不会替你重写业务代码。
+这份参考按用途列出 `acornfox` 的命令，每条一句话加一个例子，和 `acornfox help` 的内容一致。每个命令的全部参数以命令自己的帮助为准：在命令后面加 `-h`，例如 `acornfox install -h`。
 
-运行 `acornfox help --json` 查看当前 CLI 提供的命令。安装、升级请使用与 CLI 配套的发布物；参见[安装说明](install.md)。
+同一个 `acornfox` 程序既是命令行，也是服务器上的 AcornFox 服务。Linux 服务器用安装脚本安装，装好后服务器上就有这个命令；Mac、Linux 电脑可以另装一个命令行，经 SSH 管理服务器。安装方法见 [使用手册](../user-guide.md)。
 
-## 登录
+## 全局参数
 
-远程管理使用 HTTPS。以下命令会在终端提示输入密码，不要把密码放进命令参数：
+全局参数可以写在命令前面或后面；`doctor`、`identity` 例外，它们的 `--json` 要写在命令后面（`acornfox doctor --json`）。
 
-```sh
-acornfox login --server https://console.example.com
-```
+| 参数 | 作用 |
+| --- | --- |
+| `--target 服务器` | 这次用哪台服务器（默认用 `target use` 设的那台） |
+| `--app 应用` | 这次操作哪个应用（默认用当前目录对应的应用） |
+| `--json` | 输出 JSON：成功是 `{"ok":true, …}`，失败带 `diagnosis`（`code`、`message`、`hint`），方便 AI 工作台读取 |
 
-如果 AI 就在服务器本机运行，可以使用安装输出里的回环地址：
+退出码：`0` 成功；`1` 操作做完了但失败（例如部署失败、安装失败）；`2` 参数不对；`3` 连不上服务器；`4` 服务器拒绝。
 
-```sh
-acornfox login --local --server http://127.0.0.1:PORT
-```
+有的命令可以直接写应用名，例如 `acornfox logs web`；其余的用 `--app`，例如 `acornfox status --app web`。下面的例子按各命令现在的写法给出。
 
-将 `PORT` 换成实际控制台端口。`--local` 仅允许回环 IP 的 HTTP，不允许公网或局域网 HTTP 降级。自动化可使用 `--password-stdin` 从安全输入读取一行密码；不要把密码、会话文件或密钥贴进对话、脚本日志或项目仓库。
+## 连接服务器
 
-## 先检查本地项目
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `target add 名称 --ssh 用户@主机` | 登记一台服务器并测试连接（`--port` 指定 SSH 端口，`--identity` 指定私钥）。第一次连接前先用 `ssh` 登录一次核对服务器指纹 | `acornfox target add my-server --ssh root@203.0.113.10` |
+| `target add 名称 --url 地址` | 在服务器本机登记本机的 AcornFox 服务（Windows 用户经 SSH 在服务器上用） | `acornfox target add local --url unix:///run/acornfox/api.sock` |
+| `target list` | 列出登记过的服务器 | `acornfox target list` |
+| `target use 名称` | 切换默认服务器 | `acornfox target use my-server` |
+| `target remove 名称` | 删除登记（不动服务器） | `acornfox target remove my-server` |
+| `open` | 打开网页控制台：经 SSH 转发到你的电脑并打开浏览器，按 Ctrl+C 关闭（`--no-browser` 只打印登录链接） | `acornfox open` |
 
-```sh
-acornfox check ./my-project --json
-```
+## 部署和版本
 
-- `ready_for_upload`：文件符合上传要求，存在根目录 Dockerfile；这不代表应用已部署。
-- `configuration_required`：让自己的 AI 根据 `issues` 补齐配置，再检查一次。
-- 依赖缓存、版本库目录和常见凭据文件会被排除；`excluded_paths` 会列出排除项。
-- 不跟随项目内符号链接。单文件最多 32 MiB，合计最多 100 MiB、10,000 个文件；服务器还会独立检查。
-- 当前上传路径仅支持 ASCII 文件名。不要自动改动用户文件；不兼容的路径先由项目所有者决定如何调整。
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `deploy` | 部署当前目录（根目录要有 Dockerfile），默认等到上线或失败（`--no-wait` 只提交，`--timeout` 改等待时间） | `acornfox deploy` |
+| `deploy --image 镜像` | 部署现成的 Docker 镜像（`--port` 指定容器端口） | `acornfox deploy --image nginx:1.27-alpine --port 80 --app hello` |
+| `deploy --git 仓库` | 部署公开的 Git 仓库（`--ref` 指定分支或提交） | `acornfox deploy --git https://gitee.com/你的账号/你的仓库.git` |
+| `redeploy [应用]` | 按当前程序重新部署一次，让改过的环境变量和设置生效 | `acornfox redeploy web` |
+| `versions [应用]` | 版本记录：每一版的来源、用时、失败原因、能不能回退 | `acornfox versions web` |
+| `rollback [应用] [--to N]` | 应用回到上一个可回退的版本或第 N 版；只换程序，不动数据库、数据目录和环境变量（`--cancel-pending` 取消正在进行的部署） | `acornfox rollback web --to 7` |
 
-## 运行配置
+`rollback` 回退的是你的应用，不是 AcornFox 平台。AcornFox 平台本身只能升级，见 [使用手册的“只能升级”](../user-guide.md#只能升级)。
 
-需要覆盖镜像默认启动方式、声明数据目录或调整资源时，创建 `runtime.json`。例如：
+## 日志和状态
 
-```json
-{
-  "environment": [{"name": "APP_MODE", "value": "production"}],
-  "volumes": [{"name": "data", "mount_path": "/app/data", "size_bytes": 67108864}],
-  "resources": {
-    "cpu_millis": 500,
-    "memory_bytes": 536870912,
-    "pids": 128,
-    "disk_reservation_bytes": 268435456
-  }
-}
-```
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `status` | 应用的状态和访问地址；跟一个部署编号时看那次部署 | `acornfox status --app web` |
+| `apps` | 列出这台服务器上的所有应用；只本机能打开的标“只本机” | `acornfox apps` |
+| `diagnose [部署编号]` | 最近一次（或指定的）部署为什么失败、怎么办 | `acornfox diagnose` |
+| `logs [应用]` | 应用最近的日志（`-f` 持续跟随，`--tail N` 行数） | `acornfox logs web -f` |
+| `logs [应用] --version N` | 第 N 版的运行日志，加 `--build` 看构建日志 | `acornfox logs web --version 6 --build` |
+| `stats [应用]` | 应用的 CPU、内存等资源使用；不带应用名是整台服务器 | `acornfox stats web` |
 
-数据目录必须换成应用实际使用的位置。`name` 标识同一个应用的数据卷，更新时保持名称和目录稳定。磁盘数字是容量预留，不是 Docker 本地卷的硬配额。需要时可以增加 `entrypoint`、`command` 字符串数组；省略时沿用镜像默认值。
+## 运行
 
-普通参数和环境变量会随版本保存，不能填写密码或令牌。当前入口明确不支持运行期 secret 文件；应用内部的登录与业务设置由用户自己的 AI 后续维护。不要用明文参数绕过限制。
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `stop`、`start`、`restart` | 停止、启动、重启应用 | `acornfox restart --app web` |
+| `delete 应用名` | 删除应用，默认保留数据卷；加 `--volumes` 连数据一起删，不能恢复。请一定写上应用名 | `acornfox delete web` |
+| `limits` | 整台服务器最多分给应用多少内存和 CPU，以及各应用已分配多少（`--memory`、`--cpu` 修改，`auto` 恢复自动） | `acornfox limits --memory 1800` |
 
-```sh
-acornfox check ./my-project --runtime-file runtime.json --json
-```
+## 配置
 
-## 上传、查看计划、部署
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `env set KEY=VALUE` | 设环境变量（`--secret` 标记为密钥，值不再显示）；改完用 `redeploy` 生效 | `acornfox env set API_KEY=xxx --secret --app web` |
+| `env unset KEY`、`env list` | 删除、列出环境变量 | `acornfox env list --app web` |
+| `volume add 路径` | 给应用加数据目录（容器里的绝对路径），下次部署生效；`volume list` 列出 | `acornfox volume add /app/data --app web` |
+| `app set` | 改应用的内存（`--memory`，MB）、CPU（`--cpu`，核）、容器端口（`--port`）、健康检查路径（`--health-path`）、暴露方式（`--expose local\|lan\|public\|default`）；内存和 CPU 立即生效 | `acornfox app set --app web --memory 512 --cpu 1` |
 
-一步提交本地项目：
+## 数据库
 
-```sh
-acornfox up ./my-project --name my-app --runtime-file runtime.json --json
-```
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `add postgres`、`add mysql`、`add redis` | 给应用加数据库或缓存，连接信息以 `DATABASE_URL`、`REDIS_URL` 交给应用，应用自动重新部署一次 | `acornfox add postgres --app web` |
+| `remove 类型` | 移除数据库或缓存，默认保留数据卷；`--volumes` 连数据一起删 | `acornfox remove redis --app web` |
+| `addons` | 列出应用已添加的数据库和缓存 | `acornfox addons --app web` |
 
-也可以先只上传并查看服务器识别出的配置：
+## 对外访问和域名
 
-```sh
-acornfox up ./my-project --name my-app --no-deploy --json
-acornfox plan APP_ID SOURCE_ID --json
-```
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `domain add 域名` | 给应用绑定域名，自动申请 HTTPS 证书（国内服务器的域名要已备案） | `acornfox domain add app.example.com --app web` |
+| `domain remove 域名`、`domain list` | 解绑、列出域名 | `acornfox domain list --app web` |
+| `lan-console enable` | 在局域网里打开控制台，要密码登录（`disable` 关闭，`status` 查看，`--reset-password` 换密码） | `acornfox lan-console enable` |
+| `public-console enable 域名` | 用一个域名开放控制台的公网访问，带 HTTPS（`disable` 关闭，`status` 查看） | `acornfox public-console enable panel.example.com` |
+| `open 应用名` | 在你自己的电脑上打开一个应用：经 SSH 隧道转到本地端口，只本机能打开的应用也能这样开，看完按 Ctrl+C 关闭 | `acornfox open new-api` |
 
-保存返回的 `application.id`、`source_revision_id`。如果根目录没有 Dockerfile，或者无法唯一确定端口，AI 应补齐配置后再提交。端口不能推断时由用户或 AI 根据实际启动配置明确选择 `--port PORT`。
+## 应用中心
 
-修改后继续使用同一个应用：
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `catalog list` | 目录里的应用和配方、目录序号、上次同步结果 | `acornfox catalog list` |
+| `catalog info 应用` | 应用详情和安装时能填的参数 | `acornfox catalog info hermes-agent` |
+| `catalog sync` | 让服务器现在同步一次目录 | `acornfox catalog sync` |
+| `catalog platform-vars` | 平台按这台机器自动填给应用的时区、下载源、默认模型等，以及哪些能改 | `acornfox catalog platform-vars` |
+| `install 应用` | 从目录装一个应用，默认只本机能打开（`--llm local\|own` 选大模型来源，`--set 参数=值` 填参数，`--no-wait` 只提交，`--reuse-data` 接上以前同名应用留下的数据） | `acornfox install hermes-agent --llm local` |
+| `install --recipe 配方` | 装一个配方里的几个应用并连起来 | `acornfox install --recipe hermes-with-new-api` |
+| `install status 任务编号` | 查安装进度和首次登录信息（`--show-secrets` 显示密码） | `acornfox install status 3f9a0c1b2d4e --show-secrets` |
 
-```sh
-acornfox up ./my-project --app APP_ID --base-source SOURCE_ID --runtime-file runtime.json --port 8080 --json
-```
+装好的应用默认只本机能打开，在你自己的电脑上用 `acornfox open 应用名` 打开。详细说明见 [使用手册的“应用中心”](../user-guide.md#应用中心)。
 
-也可拆开操作：
+## 本机服务和自检
 
-```sh
-acornfox sources upload APP_ID SOURCE_ID ./my-project --json
-acornfox plan APP_ID NEW_SOURCE_ID --json
-acornfox deploy APP_ID --source NEW_SOURCE_ID --runtime-file runtime.json --port 8080 --json
-```
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `doctor` | 检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟；每个问题带故障编号（`--json` 输出 JSON）。用 sudo 运行看得更全 | `sudo acornfox doctor` |
+| `identity show` | 这台机器在下载网关上的安装编号和公钥（还没生成时说明原因，不会生成） | `sudo acornfox identity show` |
+| `identity reset` | 重新生成机器钥匙，安装编号随之改变；不加 `--yes` 只说明会做什么。之后 `sudo systemctl restart acornfox-server` 才生效 | `sudo acornfox identity reset --yes` |
+| `version` | 版本号 | `acornfox version` |
 
-相同内容会复用已验证的来源。需要重试同一网络操作时，可重复使用同一个 `--idempotency-key KEY`；修改了输入后要使用新 key。只改运行参数时，可直接使用已有 SOURCE_ID 重新提交部署，无须重复上传。
+## Skill
 
-GitHub 项目仍使用公开 HTTPS 仓库地址：
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `skill install` | 把和命令行同版本的 AcornFox Skill 装到 AI 工作台（Claude Code、Codex；`--dir` 指定其他目录） | `acornfox skill install` |
+| `skill print` | 把 Skill 内容打印出来，给其他工具用 | `acornfox skill print > SKILL.md` |
 
-```sh
-acornfox up https://github.com/OWNER/REPOSITORY.git --ref main --json
-```
+## 目录维护（给维护应用目录的人用）
 
-## 判断结果和处理失败
-
-`accepted: true` 只表示服务器接受了部署请求。CLI 不把它写成“应用已运行”。继续读取真实状态与日志：
-
-```sh
-acornfox status APP_ID DEPLOYMENT_ID --json
-acornfox operation APP_ID OPERATION_ID --json
-acornfox logs APP_ID DEPLOYMENT_ID --source build --json
-acornfox logs APP_ID DEPLOYMENT_ID --source runtime --json
-```
-
-检查过程中保存应用、来源、部署和操作 ID，按返回的错误与日志定位。不要因为一次失败就反复创建新应用。程序退出码为：0 成功完成命令；2 输入或配置需调整；3 登录问题；4 冲突；5 暂时不可用；6 接口响应不符合约定。
-
-建议交给 AI 的工作范围是：检查项目 → 补齐必要容器配置 → 本地检查 → 上传并读取计划 → 按计划部署 → 查看状态和日志。遇到业务改造、数据迁移或超出原项目范围的工作时，先交回用户决定。
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `catalog lint 目录` | 检查应用目录的清单和配方，只读 | `acornfox catalog lint .` |
+| `catalog build`、`catalog keygen`、`catalog verify` | 打包签名发布目录、生成签名钥匙、校验发布目录；各自加 `-h` 看用法 | `acornfox catalog verify dist --pubkey 公钥` |

@@ -39,7 +39,7 @@ func TestDeleteTakesTheNamedApp(t *testing.T) {
 		t.Fatalf("a refused command deleted something: %v", got)
 	}
 	code, out, _ := h.run("delete", "-h")
-	if code != exitOK || !strings.Contains(out, "默认保留数据卷") || !strings.Contains(out, "acornfox delete web") {
+	if code != exitOK || !strings.Contains(out, "默认保留数据卷") || !strings.Contains(out, "acornfox delete hermes-agent") {
 		t.Fatalf("help: code=%d out=%s", code, out)
 	}
 }

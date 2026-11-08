@@ -20,7 +20,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/deploylog"
+	"github.com/acornfox/acornfox/internal/hostcheck"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -142,7 +144,13 @@ type Config struct {
 	// "lan" on macOS/Windows); empty means "public".
 	DefaultExposure string
 	// LANHost returns this machine's LAN address for lan_url; nil => no lan_url.
+	// Only the desktop server sets it (a local-only app then opens at
+	// localhost on the same computer).
 	LANHost func() string
+	// ServerLAN returns a Linux server's address on the user's local
+	// network, or "" when it has none (a cloud or other public server). It
+	// only feeds the open hint of local-only apps (open_hint); nil => "".
+	ServerLAN func() string
 	// LANConsole manages opening the console on the LAN; nil => 404.
 	LANConsole LANConsole
 	// EdgeStatus reports the Caddy container ("preparing" / "running" /
@@ -156,6 +164,24 @@ type Config struct {
 	// archived logs (GET /v1/deployments/{id}/logs answers logs_not_kept and
 	// every deployment's "logs" is all false).
 	DeployLogs *deploylog.Store
+
+	// AppCenter installs apps from the catalog; nil => the /v1/catalog
+	// routes answer app_center_unavailable.
+	AppCenter *appinstall.Engine
+
+	// Console pages (runtime page, home dashboard, settings):
+	// HostHistory keeps the last 24 hours of host CPU, memory and disk in
+	// memory; nil => GET /v1/metrics/host/history lists no ranges.
+	HostHistory *HostHistory
+	// CheckPorts are the ports GET /v1/runtime/checks checks on Linux (the
+	// gateway admin port, the LAN console port, the apps' range); zero =>
+	// no port check.
+	CheckPorts hostcheck.Ports
+	// Sources reports where images and files are downloaded from (shown on
+	// the settings page); nil => not reported.
+	Sources func() DownloadSources
+	// Version is this program's version, reported by GET /v1/status.
+	Version string
 }
 
 // HostProvider returns a point-in-time host resource snapshot. It must return
@@ -188,10 +214,16 @@ type server struct {
 
 	defaultExposure string
 	lanHost         func() string
+	serverLAN       func() string
 	lanConsole      LANConsole
 	edgeStatus      func() (string, string)
 	setup           Setup
 	deployLogs      *deploylog.Store
+	appCenter       *appinstall.Engine
+	hostHistory     *HostHistory
+	checkPorts      hostcheck.Ports
+	sources         func() DownloadSources
+	version         string
 
 	// resMu serializes the allocation check and the write that follows it
 	// (app limits, add-ons, new apps, server-wide caps), see resources.go.
@@ -245,10 +277,16 @@ func newServer(cfg Config) *server {
 
 		defaultExposure: cfg.DefaultExposure,
 		lanHost:         cfg.LANHost,
+		serverLAN:       cfg.ServerLAN,
 		lanConsole:      cfg.LANConsole,
 		edgeStatus:      cfg.EdgeStatus,
 		setup:           cfg.Setup,
 		deployLogs:      cfg.DeployLogs,
+		appCenter:       cfg.AppCenter,
+		hostHistory:     cfg.HostHistory,
+		checkPorts:      cfg.CheckPorts,
+		sources:         cfg.Sources,
+		version:         cfg.Version,
 	}
 }
 
@@ -302,6 +340,9 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/setup/start", s.postSetupStart)
 	mux.HandleFunc("POST /v1/setup/resume", s.postSetupResume)
 	mux.HandleFunc("POST /v1/setup/pause", s.postSetupPause)
+	mux.HandleFunc("GET /v1/metrics/host/history", s.getHostHistory)
+	mux.HandleFunc("GET /v1/runtime/checks", s.getRuntimeChecks)
+	s.registerCatalog(mux)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the
@@ -310,6 +351,7 @@ func (s *server) registerV1(mux *http.ServeMux) {
 // is a programmer error at wiring time.
 func New(cfg Config) http.Handler {
 	s := newServer(cfg)
+	s.wireAppCenter()
 	mux := http.NewServeMux()
 	s.registerV1(mux)
 	// The trusted entry mints console login tokens; the console entry must not.

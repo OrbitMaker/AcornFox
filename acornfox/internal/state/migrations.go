@@ -392,6 +392,66 @@ const migration0009 = `
 ALTER TABLE apps ADD COLUMN exposure TEXT NOT NULL DEFAULT '' CHECK (exposure IN ('', 'local', 'lan', 'public', 'afx_cloud'));
 `
 
+// migration0010 records which apps came from the app catalog and what their
+// containers need beyond the defaults (app center, v0.5): the start command,
+// a process limit, other apps whose network the container joins (an app
+// using another app as its model gateway), the catalog id and version, and
+// two encrypted blobs (install parameters and first-login fields). Install
+// tasks keep their progress so it can be queried after a restart; their data
+// never holds passwords or keys.
+const migration0010 = `
+ALTER TABLE apps ADD COLUMN command TEXT NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN pids_limit INTEGER NOT NULL DEFAULT 0 CHECK (pids_limit >= 0);
+ALTER TABLE apps ADD COLUMN links TEXT NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN catalog_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN catalog_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN catalog_source TEXT NOT NULL DEFAULT '';
+CREATE TABLE app_catalog_secrets (
+    app             TEXT PRIMARY KEY NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+    params_enc      TEXT NOT NULL,
+    first_login_enc TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    CHECK (updated_at GLOB '` + timePattern + `')
+);
+CREATE TABLE install_tasks (
+    id         TEXT PRIMARY KEY NOT NULL,
+    kind       TEXT NOT NULL CHECK (kind IN ('app', 'recipe')),
+    target     TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+    fault_code TEXT NOT NULL DEFAULT '',
+    data       TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (created_at GLOB '` + timePattern + `'),
+    CHECK (updated_at GLOB '` + timePattern + `')
+);
+CREATE INDEX install_tasks_status ON install_tasks(status, created_at);
+`
+
+// migration0011 records which catalog an app was installed from: empty for the
+// public catalog (and every app installed before private catalogs existed),
+// otherwise the private catalog id ("cat-..."). An app of a private catalog
+// that was later disconnected keeps running but can no longer be installed
+// again or upgraded from it.
+const migration0011 = `
+ALTER TABLE apps ADD COLUMN catalog_origin TEXT NOT NULL DEFAULT '';
+`
+
+// migration0012 keeps an app-center app's saved parameters (encrypted) when
+// the app is deleted with its data volumes kept, so that installing it again
+// on that data (reuse_data) gets the same passwords and keys the data was
+// initialized with. Deleting with the volumes removes the row too.
+const migration0012 = `
+CREATE TABLE kept_catalog_secrets (
+    app            TEXT PRIMARY KEY NOT NULL,
+    catalog_id     TEXT NOT NULL,
+    catalog_origin TEXT NOT NULL DEFAULT '',
+    params_enc     TEXT NOT NULL,
+    kept_at        TEXT NOT NULL,
+    CHECK (kept_at GLOB '` + timePattern + `')
+);
+`
+
 // migrationList is the complete, ordered schema history. Never edit a shipped
 // entry; append a new one instead.
 func migrationList() []migration {
@@ -405,6 +465,9 @@ func migrationList() []migration {
 		{"0007_backfill_deployment_origin", migration0007},
 		{"0008_resource_limits", migration0008},
 		{"0009_app_exposure", migration0009},
+		{"0010_app_catalog", migration0010},
+		{"0011_app_catalog_origin", migration0011},
+		{"0012_kept_catalog_secrets", migration0012},
 	}
 }
 

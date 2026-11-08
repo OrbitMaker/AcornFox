@@ -64,6 +64,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathNetworkRemove, s.handleNetworkRemove)
 	s.mux.HandleFunc("POST "+PathEdgeEnsure, s.handleEdgeEnsure)
 	s.mux.HandleFunc("POST "+PathEdgeConnect, s.handleEdgeConnect)
+	s.mux.HandleFunc("POST "+PathImageAdopt, s.handleImageAdopt)
+	s.mux.HandleFunc("POST "+PathImageLoad, s.handleImageLoad)
+	s.mux.HandleFunc("POST "+PathVolumeWrite, s.handleVolumeWrite)
 }
 
 // ---- response helpers ----
@@ -375,6 +378,20 @@ func (s *Server) handleContainerEnsure(w http.ResponseWriter, r *http.Request) {
 	if req.CPUMilli < 100 {
 		writeError(w, http.StatusBadRequest, "invalid_request", "cpu_milli must be >= 100")
 		return
+	}
+	if req.PidsLimit < 0 || req.PidsLimit > MaxPidsLimit {
+		writeError(w, http.StatusBadRequest, "invalid_request", "pids_limit out of range")
+		return
+	}
+	if len(req.Command) > 64 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "command too long")
+		return
+	}
+	for _, l := range req.Links {
+		if !ValidApp(l) || l == req.App {
+			writeError(w, http.StatusBadRequest, "refused", "invalid link")
+			return
+		}
 	}
 	prefix := VolumePrefix(req.App)
 	for _, m := range req.Mounts {

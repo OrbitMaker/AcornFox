@@ -1,13 +1,13 @@
 # AcornFox 单机版使用手册
 
-适用版本：0.4.0 起。
+适用版本：0.5.0 起。
 
 > 支持的平台：
 >
 > - **Linux 服务器**：正式支持。AcornFox 服务和命令行都装在服务器上。
 > - **Mac**：可以装命令行（CLI），当客户端经 SSH 管理服务器，见“Mac 电脑：当命令行客户端”。
-> - **Windows**：本版本不提供程序。用 SSH 登录服务器，在服务器上运行 `acornfox`，见“Windows 电脑：经 SSH 在服务器上操作”。
-> - 把 AcornFox 服务装在 Mac、Windows 电脑本机运行：**即将支持**。
+> - **Windows**：这一版不提供程序。用 SSH 登录服务器，在服务器上运行 `acornfox`，见“Windows 电脑：经 SSH 在服务器上操作”。
+> - 把 AcornFox 服务装在 Mac、Windows 电脑本机运行：这一版不提供。
 
 ## 先了解三件事
 
@@ -15,28 +15,27 @@
 2. **应用都跑在 Docker 里。** 应用的数据放在 Docker 数据卷里，不占你的用户目录。网址入口由 Caddy 负责，Caddy 也是一个容器（名字叫 `acornfox-caddy`），由 acornfox 自动管理。
 3. **默认谁能打开。**
 
-| | Linux 服务器 | Mac、Windows 电脑本机（即将支持） |
-| --- | --- | --- |
-| 应用 | 服务器地址 + 端口，可绑域名并自动签发 HTTPS 证书 | 本机 `http://localhost:端口`，局域网 `http://电脑的局域网地址:端口` |
-| 控制台 | 只在服务器本机；用 `acornfox open` 经 SSH 打开 | 只在本机；`acornfox open` 直接打开 |
-| 局域网打开控制台 | 手动开启，要密码 | 手动开启，要密码 |
+| | 默认谁能打开 |
+| --- | --- |
+| 自己部署的应用（`acornfox deploy`） | 所有网卡：`http://服务器地址:端口`，可以绑域名并自动签发 HTTPS 证书 |
+| 从应用中心装的应用 | 只有服务器本机（`http://127.0.0.1:端口`）。从自己电脑打开的办法见“应用中心 → 怎么打开只本机的应用” |
+| 控制台 | 只有服务器本机；在你自己电脑上用 `acornfox open` 经 SSH 打开 |
+| 局域网打开控制台 | 默认关闭；手动开启，要密码 |
 
 每个应用都可以单独改“暴露方式”：
 
 | 暴露方式 | 意思 | 怎么设 |
 | --- | --- | --- |
-| `local` | 只有这台机器能打开 | `acornfox app set --expose local` |
-| `lan` | 这台机器和局域网都能打开（Mac、Windows 的默认值） | `acornfox app set --expose lan` |
-| `public` | 所有网卡，可以绑域名（Linux 的默认值） | `acornfox app set --expose public` |
-| `default` | 恢复本系统的默认值 | `acornfox app set --expose default` |
-
-还有一种“经 AFX 云”（afx_cloud）的方式，目前只预留了名字，还不能用。
+| `local` | 只有服务器本机能打开（从应用中心装的应用默认是这个） | `acornfox app set --app 应用名 --expose local` |
+| `lan` | 局域网能打开。Linux 服务器上同样是在所有网卡上开放这个端口，公网能不能访问取决于防火墙和安全组 | `acornfox app set --app 应用名 --expose lan` |
+| `public` | 所有网卡，可以绑域名（自己部署的应用默认是这个） | `acornfox app set --app 应用名 --expose public` |
+| `default` | 恢复系统默认值。Linux 服务器上就是 `public`，从应用中心装的应用改成 `default` 也会变成所有网卡能打开；想改回只本机请用 `local` | `acornfox app set --app 应用名 --expose default` |
 
 ---
 
 ## Linux 服务器
 
-支持 Ubuntu 22.04、24.04 和 Debian 12、13（x86_64），推荐 Ubuntu 24.04 或 Debian 13。这四个版本都实测过全新安装、自检和部署；从 v0.3.x 升级和回滚目前只在 Ubuntu 24.04 上实测过。arm64 还没测过。需要 root 或 sudo，建议 2 核 2 GB 以上。
+支持 Ubuntu 22.04、24.04 和 Debian 12、13（x86_64），推荐 Ubuntu 24.04 或 Debian 13。这四个版本都实测过全新安装、自检和部署；从 v0.3.x 升级目前只在 Ubuntu 24.04 上实测过。arm64 还没测过。需要 root 或 sudo，建议 2 核 2 GB 以上。
 
 **买国内云服务器时，系统请选 Ubuntu 24.04（或 Debian 13）。** 阿里云默认的 Alibaba Cloud Linux、腾讯云默认的 OpenCloudOS / TencentOS、火山引擎默认的 veLinux，以及 CentOS、Rocky 等系统装不上，安装脚本会停下并提示“……不能安装 AcornFox”（故障编号 `INSTALL-OS-01`）。已经买了的，可以在云厂商控制台“更换操作系统”，换成 Ubuntu 或 Debian（会清空系统盘）。
 
@@ -144,11 +143,13 @@ acornfox logs --version 6 --app web    # 第 6 版的运行日志；加 --build 
 
 ### 局域网访问
 
-应用默认在所有网卡上可以打开：`http://服务器地址:端口`。只想让服务器本机访问的话：
+自己部署的应用默认在所有网卡上可以打开：`http://服务器地址:端口`。只想让服务器本机访问的话（在部署它的目录里运行，或加 `--app 应用名`）：
 
 ```bash
 acornfox app set --expose local
 ```
+
+从应用中心装的应用默认只本机能打开，从自己电脑打开的办法见下文“应用中心 → 怎么打开只本机的应用”。
 
 在局域网打开控制台（要密码）：
 
@@ -178,47 +179,39 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash
 ```
 
-通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）：重装也会新建一份备份，之后 `--rollback` 回到的是重装前的同一版本，不再是更早的版本。
+通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）。
 
 - 先下载新版本并校验 SHA256；下载失败不会动现有安装。
 - 然后停止 AcornFox 服务，备份程序和数据库（放在 `/var/lib/acornfox/backups/`，保留最近 5 份），再执行数据库迁移。
-- 数据库迁移失败、或者新版本的服务启动不了时，脚本自动换回原来的程序和数据库。其他问题（例如 Caddy 容器没起来）只提示，不自动回退，需要时按下面的“回滚”手动回退。
+- 数据库迁移失败、新版本的服务起不来、或者升级中途出错（包括被 Ctrl+C 打断、SSH 断开）时，脚本用这份备份自动恢复到升级前：程序和数据库都换回原来的，服务照常运行，等于没升上。脚本最后打印 `故障编号: UPGRADE-FAIL-…` 和失败原因，可以稍后再试一次。恢复的过程不响应 Ctrl+C，请等它结束；这段过程另记在 `/var/log/acornfox-upgrade.log`，SSH 断开、看不到结果时，重新连上后用 `sudo tail -n 40 /var/log/acornfox-upgrade.log` 查看。
+- 新版本的服务起来之后，其他问题（例如 Caddy 容器没起来）只提示，不再恢复到升级前。
 - 应用容器在升级过程中一直运行。升级期间命令行和控制台会暂时连不上。
 - 从 v0.3.x 升级时，原来装在系统里的 Caddy 会被停用，证书复制到数据卷，之后由 Caddy 容器接管 80、443 和应用端口。**换过去的那一下应用网址会打不开几秒**（实测约 2～3 秒），请避开访问高峰。应用和数据库本身不受影响。
 - 请同时升级你电脑（Linux、Mac）上的 CLI（重新运行一次安装 CLI 的命令）；Windows 用户在服务器上运行的命令行随升级一起换了，不用另外升级。新版 CLI 连到没升级的服务器时，`rollback --to`、`versions`、`logs --version` 会提示“服务器上的 AcornFox 版本较旧”，不会执行。
+- 先升级服务器，再升级电脑上的 CLI。应用中心的命令（`catalog`、`install 应用`）要服务器也是 0.5.0 以上才能用。
+- 从 0.4.x 升级到 0.5.0 后，控制台换成新版（`acornfox open` 打开的就是新版），旧控制台已经去掉，旧地址 `/legacy/` 会跳到新控制台。
 
-### 回滚
+### 只能升级
 
-回到最近一次升级前的版本。先把升级脚本下载到服务器上，再运行（国内把地址换成上面 Gitee 的 `upgrade.sh` 地址）：
+AcornFox 本身只能升级，不能回到旧版本：
 
-```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh -o upgrade.sh
-```
+- 升级脚本没有 `--rollback`，用了会被拒绝（`故障编号: UPGRADE-ROLLBACK-01`）。
+- `--version` 指定比现在旧的版本会被拒绝，加 `-y` 也一样（`故障编号: UPGRADE-DOWN-01`）。用 `install.sh` 在已经装好的服务器上装更旧的版本也会被拒绝（`故障编号: INSTALL-DOWN-01`）；卸载时保留了数据的，再装也不能装比这份数据旧的版本（同一个编号）。
+- 这几种情况都在停服务之前停下，什么都不改。
 
-```bash
-sudo bash upgrade.sh --rollback
-```
+升级没成功时脚本已经自动恢复到升级前（见上一节），不需要手动处理。升级后发现问题，请等有更新的版本时再升级，或者把问题和 `acornfox doctor` 的输出反馈给我们。
 
-程序和数据库都回到升级前的版本。如果是回滚到 v0.3.x，脚本会删掉 Caddy 容器，并重新启用系统里的 Caddy，换的那一下应用网址同样会打不开几秒（实测约 3 秒）。
+这里说的是 AcornFox 平台本身。**应用自己的版本照常可以回退**：`acornfox versions 应用名` 看有哪些版本，`acornfox rollback 应用名` 回到上一版（只换应用的程序，不动数据），和平台升级无关。
 
-**回滚前要知道：**
+升级失败时的几个编号：
 
-- 回滚会把控制面数据库（应用列表、版本记录、环境变量、域名等设置）恢复到升级前的样子。**升级之后新建的应用、设的环境变量、绑的域名都会从列表里消失**；回到 v0.3.x 时，它不认识的应用容器也会被删掉。
-- 这些应用的数据卷**不会删**，还留在磁盘上（`docker volume ls` 能看到，名字以 `af-应用名-` 开头），可以重新部署后手工把数据找回来。
-- 升级之前就有的应用、数据卷和数据库不受影响。
-- 要回到 v0.3.x，只能用 `--rollback` 回到升级前的那份备份。**不支持用 `--version v0.3.x` 降级**：旧版本的程序不认识新版本的数据库，会失败。
-
-回滚按顺序找这次升级的备份：先看 `/tmp/acornfox_last_backup`，再看 `/var/lib/acornfox/backups/.last`，所以服务器重启过也能直接回滚。要回到更早的某一份备份时，先看有哪些（目录名是升级时间，里面有 `version.txt`），再指定要用的那一份：
-
-```bash
-ls /var/lib/acornfox/backups/
-```
-
-```bash
-echo /var/lib/acornfox/backups/20261105_103000 | sudo tee /tmp/acornfox_last_backup
-```
-
-把 `20261105_103000` 换成上一条命令列出的目录名。
+| 编号 | 意思 | 怎么办 |
+| --- | --- | --- |
+| `UPGRADE-BACKUP-01` | 停服务后备份程序或数据库没做完（常见是磁盘满了），没有升级，原来的服务已重新启动 | `df -h /var/lib/acornfox` 看空间，腾出空间后重新运行升级命令 |
+| `UPGRADE-FAIL-01` | 新版本的数据库迁移失败，已恢复到升级前 | 稍后再试；再失败就把输出反馈给我们 |
+| `UPGRADE-FAIL-02` | 新版本的服务起不来，已恢复到升级前 | 同上；输出里带了新版本起不来时的日志 |
+| `UPGRADE-FAIL-03` | 升级中途出错或被打断，已恢复到升级前 | 重新运行升级命令 |
+| `UPGRADE-RESTORE-01` | 恢复到升级前时文件没能换回去（这时不启动服务），或者已经换回去但服务还是起不来 | 应用容器没停，一般还能打开；把 `journalctl -u acornfox-server -n 50 --no-pager` 和 `journalctl -u acornfox-runner -n 50 --no-pager` 的输出反馈给我们。不要删 `/var/lib/acornfox/backups/` 里的备份，也不要重装 |
 
 ### 卸载
 
@@ -232,13 +225,207 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/unins
 sudo bash uninstall.sh
 ```
 
-脚本会要求输入 `yes` 确认。默认保留数据（`/var/lib/acornfox` 和数据卷），重新安装后应用会恢复。要全部删除（不可恢复）：
+脚本会要求输入 `yes` 确认。默认保留数据（`/var/lib/acornfox` 和数据卷），重新安装后应用会恢复。保留数据时会记下这份数据的版本号，之后重新安装不能装比它旧的版本（旧程序读不了新数据库，`故障编号: INSTALL-DOWN-01`）。要全部删除（不可恢复）：
 
 ```bash
 sudo bash uninstall.sh --purge
 ```
 
 加 `-y` 不再询问确认。Docker 本身不会被卸载。
+
+---
+
+## 应用中心
+
+应用中心是一份预先配好的应用目录。从目录装应用不用写 Dockerfile，也不用自己想密码：AcornFox 生成密码和密钥，下载镜像、启动、做健康检查和初始化，最后给出首次登录信息。应用用的都是上游原版镜像，AcornFox 不改它们的代码。
+
+### 能装什么
+
+| 应用 | 目录里的名字 | 是什么 | 内存 | 磁盘剩余空间 | 大约多久 |
+| --- | --- | --- | --- | --- | --- |
+| New API | `new-api` | 大模型接口网关：把多家大模型合成一个 OpenAI 兼容的接口，统一管理上游 Key、令牌和额度（上游项目 QuantumNous/new-api，AGPL-3.0） | 最少 256 MB，建议 512 MB | 至少 512 MB | 1 分钟左右 |
+| Hermes 智能体 | `hermes-agent` | 常驻的 AI 智能体，可以接飞书、钉钉、企业微信等做机器人（上游项目 Nous Research 的 Hermes Agent，MIT） | 最少 1 GB，建议 2 GB | 至少 6 GB | 3～4 分钟 |
+
+配方是一组一起装好的应用：
+
+| 配方 | 装什么 |
+| --- | --- |
+| `new-api` | 只装 New API |
+| `hermes-agent` | 只装 Hermes 智能体 |
+| `hermes-with-new-api` | 两个一起装并连起来：Hermes 经本机 New API 用大模型，你只要在 New API 里加一次上游 Key |
+
+- 两个应用都是单容器，装好后默认只有服务器本机能打开。
+- Hermes 要求大模型的上下文不少于 64K，否则启动不了。
+- 装之前会检查内存和磁盘剩余空间，不够时停下（`CAT-INST-05`、`CAT-INST-27`），不会装一半。
+
+### 从页面装
+
+1. 在你自己的电脑上运行 `acornfox open` 打开控制台，点左侧“应用中心”。
+2. 点一个应用或配方，看详情：它是什么、装好后还要你做的几步、对应的命令。
+3. 点“安装”（配方是“开始”）。Hermes 要选大模型来源（见下文“Hermes 的大模型从哪来”）。“更多设置”和“平台自动填的”一般不用改。
+4. 弹窗里会显示每一步的进度，装好后显示首次登录信息和怎么打开。
+
+### 从命令行装
+
+在服务器上，或者在登记了服务器的电脑上运行：
+
+```bash
+acornfox catalog list                    # 目录里的应用和配方
+acornfox catalog info hermes-agent       # 应用详情和安装时能填的参数
+acornfox install new-api                 # 装 New API，等到装好或失败
+acornfox install --recipe hermes-with-new-api   # 一起装 New API 和 Hermes 并连起来
+```
+
+- `install` 默认等到装好或失败才返回，期间每 10 秒打印一次进度；默认最多等 30 分钟（`--timeout` 可改），等不到也不会取消安装。
+- 加 `--no-wait` 只提交，输出任务编号，之后用 `acornfox install status 任务编号` 查进度。
+- 应用名默认就是目录里的名字（`new-api`、`hermes-agent`），`--name` 可以换一个。
+- 目录每天会自动同步一次；想马上拿到最新目录，运行 `acornfox catalog sync`。在线目录取不到时用程序自带的目录，照样能装。
+
+### Hermes 的大模型从哪来
+
+| 来源 | 写法 | 说明 |
+| --- | --- | --- |
+| 本机 New API | `--llm local` | 本机已经装了在运行的 New API 时，不写也默认用它。AcornFox 在 New API 里建一把令牌交给 Hermes |
+| 自己的 Key | `--llm own --set llm.base_url=… --set llm.api_key=… --set llm.model=…` | 三项都要给，例如 `--set llm.base_url=https://api.example.com/v1` |
+| 平台 Key | — | 这一版还不能用，选了会报 `CAT-INST-09` |
+
+```bash
+acornfox install hermes-agent --llm local
+```
+
+- 配方 `hermes-with-new-api` 固定让 Hermes 用本机 New API；要用自己的 Key，单独装 `hermes-agent --llm own`。
+- 用本机 New API 时，Hermes 里配的模型名默认是 `deepseek-chat`。New API 渠道里的模型名不一样时，安装时加 `--set platform.llm.model.chat=模型名`（页面上在“平台自动填的”里改“默认对话模型”），也可以装好后在 Hermes 控制台里改。
+
+### 安装进度和下载网关
+
+每一步（检查、建应用、下载镜像、写配置、启动、健康检查、初始化）都有状态和说明，页面上实时显示，命令行用 `acornfox install status 任务编号` 查。
+
+- Hermes 的镜像约 1.1 GB，只在 Docker Hub 上，国内直接拉很慢。AcornFox 先从下载网关 `dl.acornfox.com` 要一个临时下载地址来下载我们存好的镜像包，下载时显示已下多少、总共多少、速度和预计剩余时间，下完显示“正在导入镜像”。
+- 下载中途断开、超时或地址过期时，从已下的位置接着下；没有进展时最多重试 5 次（总共最多试 30 次）才放弃。下完按目录里签名的校验值和大小核对，对不上就删掉、不导入。
+- 下载网关没成功时（关掉了、连不上、次数用完等），改从公共镜像源拉，进度里写明网关为什么没成功。
+- New API 的镜像约 78 MB，直接从公共镜像源拉（国内走镜像加速）。
+- 下载网关会联系我们的服务器，具体发了什么、怎么关，见下文“隐私和联网说明”。
+
+### 平台变量
+
+时区、下载源、默认模型这类底层设置不写死在应用里，安装时由平台按这台机器填进去，叫“平台变量”。查看这台机器上的值：
+
+```bash
+acornfox catalog platform-vars
+```
+
+| 名字 | 是什么 | 能不能改 |
+| --- | --- | --- |
+| `tz` | 时区，取服务器本机时区，读不到时为 UTC | 能改 |
+| `llm.model.chat` | 默认对话模型，用本机 New API 又没指定模型时用它 | 能改 |
+| `mirror.pypi` | Python 包下载源：国内用国内镜像（在阿里云、腾讯云上用该厂商的公开镜像），海外用官方源 | 能改 |
+| `mirror.npm` | Node 包下载源，规则同上 | 能改 |
+| `region` | 网络区域（`cn` 或 `global`），按安装时的判断 | 不能改 |
+| `app.url` | 这个应用的访问地址，按装好时的对外方式算 | 不能改 |
+| `llm.base_url`、`llm.api_key` | 平台模型接口地址和平台 Key | 这一版没有值 |
+
+能改的在安装时改，只对这次装的应用生效：
+
+```bash
+acornfox install new-api --set platform.tz=Asia/Tokyo
+```
+
+页面上在安装弹窗的“平台自动填的”里改。改法不对报 `CAT-INST-28`。
+
+### 装好以后：首次登录
+
+| 应用 | 账号 | 密码 |
+| --- | --- | --- |
+| New API | `admin` | 安装时自动生成 |
+| Hermes 智能体 | `admin` | 安装时自动生成 |
+
+- 密码默认遮成 `******`。页面上在“我的应用”里点开应用，“首次登录”里点显示；命令行用安装时的任务编号：`acornfox install status 任务编号 --show-secrets`。
+- New API 第一次打开时谁先打开谁当管理员，所以 AcornFox 在装好后立刻替你完成了初始化，并关掉了自助注册（只有管理员账号能登录）。安装进度的“初始化”一步如果写着“没能关闭自助注册”，请登录 New API，在“系统设置”里关掉“允许新用户注册”。
+- 装好后还要你做的几步会列在最后，例如 New API 要在“渠道”里新建一个渠道，填上游的 Key 和模型，点“测试”。在 New API 里加上游渠道会产生模型费用，由上游按你的用量收取。
+
+### 怎么打开只本机的应用
+
+从应用中心装的应用默认只有服务器本机能打开，地址是 `http://127.0.0.1:端口`，在你自己电脑上点不开。**不用去安全组放行端口**：应用只听本机地址，放行了也打不开。有两种办法：
+
+**办法一：服务器在你的局域网里（例如家里或公司的一台 Linux 机器）。** 页面上应用的“怎么打开”里有“让局域网里的电脑能打开”按钮，点了会先说明影响，确认后马上生效。之后用应用卡片上的“打开”按钮，或在浏览器里输入 `http://服务器的局域网地址:端口` 打开，用应用自己的账号密码登录。
+
+- 这会在服务器的所有网卡上开放这个端口。服务器如果还有公网地址、防火墙或安全组又放行了这个端口，公网也能访问到。
+- 命令行的等价写法：`acornfox app set --app new-api --expose lan`；改回只本机：`acornfox app set --app new-api --expose local`。
+- 云服务器、或者认不出是局域网的服务器，页面上不显示这个按钮，请用办法二。
+
+**办法二：公网服务器，或者不想开放端口。** 在你自己的电脑上运行：
+
+```bash
+acornfox open new-api
+```
+
+它像 `acornfox open` 打开控制台一样，开一条 SSH 隧道把应用转到你电脑的一个本地端口，再打开浏览器；看完按 Ctrl+C 关闭。前提是你电脑上装了 CLI，并用 `acornfox target add 名称 --ssh 用户@服务器地址` 登记了服务器。
+
+- Windows 电脑、或者电脑上没有 CLI：在自己电脑的终端运行 `ssh -N -L 端口:127.0.0.1:端口 用户@服务器地址` 并保持不关，然后在浏览器打开 `http://127.0.0.1:端口`（端口是应用地址里的端口，`acornfox apps` 能看到）。
+- `OPEN-APP-01`：应用还没有访问端口，用 `acornfox status --app 应用名` 看部署状态。
+- `OPEN-APP-02`：这台服务器是用网址（局域网控制台或公网控制台）登记的，开不了隧道。用 `--ssh` 再登记一次，或者改成局域网。
+
+要让公网直接访问（`--expose public` 或绑定域名）请慎重：New API 里存着你的上游 Key，Hermes 的控制台能执行命令。一定要用 HTTPS 和强密码。
+
+### Hermes 接本机 New API 和令牌额度
+
+用本机 New API 时（`--llm local` 或配方 `hermes-with-new-api`），AcornFox 在 New API 里建一把令牌交给 Hermes，令牌名是 `acornfox-应用名`（例如 `acornfox-hermes-agent`）。两个容器在同一个容器网络里直接相连，不经过公网。
+
+- **这把令牌不限额、不过期。** 要控制花费，登录 New API，在“令牌”页给它设额度上限。
+- New API 还没加上游渠道时，Hermes 调模型会返回 503“没有可用渠道”，这是正常的，加好渠道就行。
+- 删除 Hermes 时会顺带吊销这把令牌。New API 当时没在运行、没吊销成的，删除命令会给出提示，请到 New API 的“令牌”页手动删掉。
+- Hermes 还连着 New API 时，不能删 New API（`app_in_use`），要先删 Hermes。
+- Hermes 上游的程序启动时会访问 `nousresearch.github.io`（取它的能力目录），国内网络打不开，不影响对话。
+
+### 删除和接上旧数据重装
+
+删除应用默认保留数据卷：
+
+- 页面：“我的应用”里点开应用 →“高级”→“删除”。默认勾着“保留数据卷”；去掉勾选要输入应用名确认，连数据一起删。
+- 命令行：一定写上应用名。
+
+```bash
+acornfox delete hermes-agent            # 删除应用，保留数据
+acornfox delete hermes-agent --volumes  # 连数据一起删，不能恢复
+```
+
+保留了数据的应用，以后用同一个名字再装时会停下（`CAT-INST-24`），因为默认不让新装的应用悄悄接上旧数据。这时二选一：
+
+- 要接着用旧数据：页面上点“接上旧数据重装”并确认；命令行在原来的安装命令后面加 `--reuse-data`，例如 `acornfox install new-api --reuse-data`（装的时候用了 `--name` 的，要用同一个名字）。账号密码和以前一样。接上的旧数据即使这次安装失败也不会被删。旧数据是别的应用留下的，会被拒绝。
+- 不要旧数据：用 `--name` 换个名字装；或者确定不要了，按错误信息里的卷名用 `docker volume rm` 删掉旧卷后再装。
+
+### 要升级应用怎么办
+
+这一版没有“从目录升级到新版本”的功能。目录里有了新版本，想换上去：
+
+1. `acornfox catalog sync` 拿到最新目录，`acornfox catalog info 应用` 看版本。
+2. `acornfox delete 应用名` 删除应用，默认保留数据。用本机 New API 的 Hermes，要换 New API 时先删 Hermes。
+3. 用原来的安装命令加 `--reuse-data` 重装，接上旧数据。
+
+新版本能不能读旧数据由应用自己决定，重要的数据请先自己备份。
+
+### 常见故障编号
+
+安装失败时，这次新建的应用和数据卷会自动清理（以前留下的数据不会动），处理好原因后直接重装即可。服务器返回的错误里带编号、原因和建议。
+
+| 编号 | 意思 | 怎么办 |
+| --- | --- | --- |
+| `CAT-INST-03` | 已经有同名应用 | `--name` 换个名字；要重装先确认后删掉旧的 |
+| `CAT-INST-04` | 同一个应用正在装 | 不要重复提交，用错误里的任务编号查进度 |
+| `CAT-INST-05` | 整机分配给应用的内存不够 | 调小别的应用（`acornfox app set --memory`）或调大整机上限（`acornfox limits --memory`） |
+| `CAT-INST-09` | 平台 Key 这一版不能用 | 改用 `--llm local` 或 `--llm own` |
+| `CAT-INST-10` | 选了本机 New API，但本机没有在运行的 New API | 先 `acornfox install new-api`，或装配方 `hermes-with-new-api` |
+| `CAT-INST-11` | 本机 New API 发不出令牌 | `acornfox status --app new-api` 看它在不在运行；管理员密码改过的话改用 `--llm own` |
+| `CAT-INST-12` | 镜像从所有来源都没拿到 | 稍后重试；`sudo acornfox doctor` 看网络和镜像加速 |
+| `CAT-INST-15` | 容器没能启动或上线 | 看错误里的部署诊断；`acornfox logs 应用名` 看日志 |
+| `CAT-INST-16` | 健康检查在时限内没通过 | `acornfox logs 应用名` 看日志；Hermes 还要确认模型上下文不少于 64K、内存够用 |
+| `CAT-INST-17` | 装好后的初始化调用失败 | 看错误信息；这次的应用已清理，直接重装 |
+| `CAT-INST-18` | 安装途中 AcornFox 服务重启了 | 已清理，重新安装 |
+| `CAT-INST-24` | 以前同名应用的数据卷还在 | 见上文“删除和接上旧数据重装” |
+| `CAT-INST-27` | 磁盘剩余空间不够 | 错误信息里写了要多少、剩多少；删掉不用的应用或镜像，或者扩容磁盘；`sudo acornfox doctor` 看各分区 |
+| `CAT-INST-28` | 改平台变量不对 | `acornfox catalog platform-vars` 看哪些能改 |
+
+完整列表见 [能力清单](capabilities.md#应用中心安装故障编号)。
 
 ---
 
@@ -263,7 +450,7 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 
 升级服务器后，在 Mac 上重新运行一次安装 CLI 的命令，让两边同版本。
 
-**在 Mac 本机运行 AcornFox（`acornfox install`、`acornfox setup`，应用跑在这台 Mac 上）即将支持，本版本请不要使用。**
+**这一版不提供在 Mac 本机运行 AcornFox（应用跑在这台 Mac 上）。在 Mac 上运行不带应用名的 `acornfox install`、或 `acornfox doctor`，只会提示还不能用（故障编号 `SETUP-MAC-01`）。**
 
 ---
 
@@ -271,7 +458,7 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 
 本版本没有 Windows 版程序（在 Git Bash 里运行 `install-cli.sh` 只会说明这一点并退出）。按上面“Linux 服务器”装好 AcornFox 后，服务器上已经有 `acornfox` 命令，用 SSH 登录服务器运行它就行。Windows 10、11 自带 `ssh` 和 `scp`，在 PowerShell 里就能用；让 AI 工作台按 Skill 代你操作时，请装 Git for Windows，工作台在 Git Bash 里执行。
 
-**把 AcornFox 服务装在 Windows 电脑本机运行，即将支持。**
+这一版不提供把 AcornFox 服务装在 Windows 电脑本机运行。
 
 ### 第一次：登记
 
@@ -342,6 +529,107 @@ ssh 用户@服务器地址 'acornfox open --no-browser'
 ### 升级
 
 升级服务器（见“Linux 服务器 → 升级”）时，服务器上的命令行一起升级，Windows 电脑上不用做什么。
+
+---
+
+## 隐私和联网说明
+
+AcornFox 没有使用统计，也没有崩溃上报。下面写清楚它什么时候会联系 AcornFox 的服务器、发了什么、怎么关，以及安装和运行时还会访问哪些地址。
+
+### 什么时候会联系 AcornFox 的服务器
+
+一共三种情况，都发生在服务器上的 AcornFox 服务里（你电脑上的命令行只经 SSH 连你登记的服务器）：
+
+**1. 下载网关 `dl.acornfox.com`：从应用中心装我们存有镜像包的应用时（这一版是 Hermes 智能体）。**
+
+- 第一次要用时，AcornFox 在本机随机生成一把钥匙（ECDSA P-256），存在 `/var/lib/acornfox/identity/`；由公钥算出一个安装编号（形如 `afx-` 加 20 个字母数字）。钥匙是随机的，不读任何硬件信息。
+- 第一次向网关登记时发送：公钥、AcornFox 程序版本、系统（`linux`）、CPU 架构（`amd64` 或 `arm64`），以及“由 acornfox 程序发出”的标记。
+- 之后每次要下载地址时发送：安装编号、时间戳、一个随机数、用这把钥匙算的签名，以及要下载哪个文件（文件编号）和用途。
+- 网关只返回一个临时下载地址，文件本身从这个地址下载（文件放在我们租用的存储服务上）。网关会记下这台机器在什么时候要了哪个文件，用来限制每台机器每天的次数。
+- 和任何网络请求一样，网关能看到这台服务器的公网 IP。
+
+**2. 应用目录：每天同步一次。**
+
+- 服务启动时同步一次，之后每天在一个随机时刻同步一次；运行 `acornfox catalog sync` 时也会同步。看应用详情或安装应用时，本机还没有这个应用的应用包（几 KB 的清单和图标）就下载一份。
+- 地址先是 `https://acornfox.com/catalog`，打不开时改读 Gitee 上的备用副本（`https://gitee.com/VIP13390/acornfox-catalog/raw/published`）。两处是同一份带签名的文件，签名对不上的不会用。
+- 这些是普通的下载请求，不带安装编号、不带签名。对方能看到这台服务器的公网 IP。
+
+**3. 时钟检查：运行 `acornfox doctor`、打开控制台的“运行环境”页时。**
+
+- 下载网关要求请求的时间和它相差不超过 300 秒，所以自检会向网关地址发一个 HEAD 请求，只读应答里的 `Date`（服务器时间），最多等 3 秒。这个请求不带安装编号、不带签名。
+- 时钟不准（故障编号 `SETUP-CLOCK-01`）时，按提示运行 `sudo timedatectl set-ntp true` 打开网络对时。AcornFox 不会改系统时间。
+
+### 不收集什么
+
+- 不读、不发硬件信息（网卡地址、序列号、主机名等）。
+- 不发你的应用列表、应用名、项目代码、环境变量、日志、密码和域名。
+- 下载网关只知道这台机器在什么时候下载了我们存放的哪些文件。
+
+查看这台机器的安装编号和公钥：`sudo acornfox identity show`。想让网关把它当成一台新机器，运行重置再重启服务（服务只在启动时读钥匙）：
+
+```bash
+sudo acornfox identity reset --yes   # 不加 --yes 只说明会做什么
+sudo systemctl restart acornfox-server
+```
+
+用 sudo 运行时，新钥匙文件的属主会改回数据目录的属主（后台服务的账号），服务照样读得到。旧钥匙留在同目录的 `machine-key.pem.prev`。
+
+### 怎么关
+
+**关掉下载网关。** 在服务器上写一个 `/var/lib/acornfox/network.json`（这个文件原来没有；已经有的话在里面加 `"gateway": "off"` 这一项），然后重启服务：
+
+```bash
+echo '{"gateway": "off"}' | sudo tee /var/lib/acornfox/network.json
+sudo systemctl restart acornfox-server
+```
+
+后台服务和 `acornfox doctor` 都认这个文件。要恢复，删掉这个文件（或这一项）再重启服务。也可以给后台服务设环境变量 `ACORNFOX_GATEWAY` 为空值（`sudo systemctl edit acornfox-server`，写入 `[Service]` 和 `Environment=ACORNFOX_GATEWAY=` 两行，再重启服务）；它优先于 `network.json`。`acornfox doctor` 也认这个变量，但用 `systemctl edit` 设置的环境变量只在后台服务里有，你在终端里运行 `acornfox doctor` 时没有，两边会不一致，所以推荐用 `network.json`，两边都认。
+
+关掉之后：
+
+- 不再联系下载网关，也不会生成机器钥匙（以前生成的还留在 `/var/lib/acornfox/identity/`）。
+- Hermes 的镜像改从公共镜像源拉（Docker Hub，国内走镜像加速），会慢很多：国内网络可能要十几分钟，有时拉不下来（`CAT-INST-12`）。New API 本来就从公共镜像源拉，不受影响。
+- 时钟检查只看系统有没有开网络对时、是否已同步，不再和网关比对。
+
+**应用目录的来源。** 这一版没有关掉目录同步的开关。可以用环境变量 `ACORNFOX_CATALOG_SOURCES` 换成你自己放的一份副本（多个地址用逗号分隔，按顺序试；`sudo systemctl edit acornfox-server` 写入 `Environment=ACORNFOX_CATALOG_SOURCES=https://…`）。副本里的文件必须是原样复制的，签名对不上的不会用。所有来源都取不到时，用程序自带的目录，应用中心照样能用。
+
+### 安装和运行时还会访问哪些地址
+
+**安装、升级脚本（在服务器上）**
+
+| 做什么 | 访问哪里 | 什么时候 |
+| --- | --- | --- |
+| 判断在哪家云、哪个地域，取公网 IP | 阿里云、腾讯云、火山引擎、华为云的实例元数据接口 | 每次安装、升级；只在云主机内部能访问，不在云上时很快超时跳过 |
+| 判断是否在中国大陆 | `ip-api.com` | 认不出是哪家云时 |
+| 查最新版本号、下载程序和脚本 | 中国大陆：先 Gitee 发行版，失败再 GitHub；其他地区：GitHub | 安装、升级 |
+| GitHub 下载加速 | `ghfast.top`、`gh-proxy.com`，或你用 `ACORNFOX_GITHUB_PROXY` 指定的地址 | 只在中国大陆、直连 GitHub 失败或太慢时 |
+| 系统软件源（APT） | 云厂商内网源；中国大陆还有 `mirrors.huaweicloud.com` | 系统原来的源指向 Ubuntu、Debian 官方地址时才换；其他源原样保留 |
+| Docker 安装包 | 云厂商内网源；中国大陆依次是华为、腾讯、阿里、南京大学、清华镜像站；其他地区 `download.docker.com` | 安装 Docker 时（`--skip-docker` 跳过） |
+| Caddy 安装包 | 中国大陆先从 Gitee 发行版取，再 GitHub 上的 Caddy 官方发行版；校验值写在脚本里 | 安装时，本机还没有 Caddy 镜像的话 |
+
+**运行时（服务器上的 AcornFox 服务）**
+
+| 做什么 | 访问哪里 | 什么时候 |
+| --- | --- | --- |
+| 拉取应用和数据库镜像 | Docker Hub；镜像加速 `docker.m.daocloud.io`、`docker.1panel.live`，腾讯云服务器还有腾讯云内网加速；ghcr.io 的镜像在中国大陆走 `ghcr.nju.edu.cn` | 部署、加数据库、从应用中心装应用时；后台服务每次启动自检时探测一次（`GET /v2/`，前面的镜像加速都不通时才探测 Docker Hub） |
+| 下载应用中心的镜像包 | 下载网关给的临时地址 | 见上文 |
+| 同步应用目录 | `acornfox.com`、`gitee.com` | 见上文 |
+| 拉取代码 | 你在 `deploy --git` 里给的仓库地址 | 用 Git 仓库部署时 |
+| 构建 | 你的 Dockerfile 里写的软件包源（npm、pip 等） | 构建镜像时 |
+| 申请 HTTPS 证书 | Let's Encrypt | 绑定域名、开公网控制台时 |
+| 取公网 IP | 云厂商元数据接口；取不到再问 `4.ipw.cn`、`ipv4.icanhazip.com`（IPv6 是 `6.ipw.cn`、`ipv6.icanhazip.com`） | 只在开公网控制台时 |
+
+**应用自己**
+
+应用装好后自己访问哪些地址由应用决定。已知的有：
+
+- New API 访问你在渠道里填的上游模型接口。
+- Hermes 访问你配的模型接口；平台把 `mirror.pypi`、`mirror.npm` 作为下载源环境变量交给它，它装插件、技能时实际访问哪里由 Hermes 自己决定；启动时访问 `nousresearch.github.io`（国内打不开，不影响对话）。
+
+**命令行（在你自己的电脑上）**
+
+- 安装命令行：中国大陆先 Gitee 发行版，再 GitHub 和上面的下载加速；判断是否在中国大陆时会访问云厂商元数据接口和 `ip-api.com`。
+- 管理服务器：只通过 SSH 连你登记的服务器。
 
 ---
 

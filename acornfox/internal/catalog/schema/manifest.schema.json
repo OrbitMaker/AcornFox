@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acornfox.com/catalog/schema/manifest-2.json",
+  "title": "AcornFox 应用清单 schema 2",
+  "description": "apps/<id>/manifest.yaml 的格式。单机版和云版共用。这里只放程序要读的字段；上架状态、排序、文案等运营数据不在清单里。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schema", "source", "app", "lifecycle", "resources", "release", "endpoints"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "和目录名相同" },
+    "schema": { "const": 2 },
+    "source": { "enum": ["upstream", "community", "official"] },
+    "maintainer": { "type": "string" },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "summary", "category", "license", "homepage"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "summary": { "type": "string", "minLength": 4, "maxLength": 80 },
+        "category": { "enum": ["ai", "ai-agent", "ai-gateway", "automation", "site", "database", "monitor", "dev", "files"] },
+        "tags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9-]+$" } },
+        "keywords": { "type": "array", "items": { "type": "string" }, "description": "搜索时也能命中的词，例如中文俗称" },
+        "icon": { "type": "string", "pattern": "^[a-z0-9._-]+\\.(svg|png)$" },
+        "homepage": { "type": "string", "format": "uri" },
+        "license": { "type": "string", "description": "SPDX 表达式" },
+        "source_code": { "type": "string", "format": "uri", "description": "GPL、AGPL 类许可证必填" }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_platform", "status"],
+      "properties": {
+        "min_platform": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "status": { "enum": ["active", "deprecated"] }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_mb", "platforms"],
+      "properties": {
+        "memory_mb": { "$ref": "#/$defs/minRec" },
+        "cpu": { "type": "object", "additionalProperties": false, "properties": { "min": { "type": "number", "exclusiveMinimum": 0 } } },
+        "disk_mb": { "type": "object", "additionalProperties": false, "properties": { "min": { "type": "integer", "minimum": 0 } } },
+        "platforms": { "type": "array", "minItems": 1, "items": { "enum": ["linux/amd64", "linux/arm64"] } },
+        "gpu": { "enum": ["none", "optional", "required"] }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "images"],
+      "properties": {
+        "version": { "type": "string", "not": { "const": "latest" } },
+        "images": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "description": "首发只支持单容器；多容器在后续版本放开",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "repository", "digest"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+              "repository": { "type": "string", "pattern": "^[a-z0-9]+([._/-][a-z0-9]+)*$", "description": "不带仓库前缀，前缀由下载来源决定" },
+              "tag": { "type": "string", "not": { "const": "latest" } },
+              "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "size_mb": { "type": "integer", "minimum": 1 },
+              "artifact": { "type": "string", "description": "镜像文件在下载网关上的文件编号（大镜像经网关下发时填）" },
+              "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "网关上那个镜像包（docker save 出来的 tar）的 SHA256；下载后先按它核对再导入，不填就不走网关" },
+              "artifact_size": { "type": "integer", "minimum": 1, "description": "那个镜像包的字节数" }
+            }
+          }
+        }
+      }
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": { "type": "array", "items": { "type": "string" } },
+        "user": { "type": "string" },
+        "shm_mb": { "type": "integer", "minimum": 64 },
+        "pids_limit": { "type": "integer", "minimum": 64 },
+        "no_new_privileges": { "type": "boolean", "default": true }
+      }
+    },
+    "endpoints": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "port", "protocol"],
+        "properties": {
+          "name": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "protocol": { "enum": ["http"] },
+          "primary": { "type": "boolean" },
+          "health": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^/" },
+              "expect_json": { "type": "object" },
+              "timeout_s": { "type": "integer", "minimum": 5, "maximum": 1200 }
+            }
+          }
+        }
+      }
+    },
+    "exposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "default": { "enum": ["local", "lan", "public"] } }
+    },
+    "volumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "path"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "path": { "type": "string", "pattern": "^/" },
+          "backup": { "type": "boolean" }
+        }
+      }
+    },
+    "params": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "type"],
+        "properties": {
+          "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "type": { "enum": ["string", "int", "bool", "enum", "secret", "url", "domain", "email", "llm_provider"] },
+          "label": { "type": "string" },
+          "hint": { "type": "string" },
+          "default": {},
+          "options": { "type": "array" },
+          "pattern": { "type": "string" },
+          "min": { "type": "number" },
+          "max": { "type": "number" },
+          "required": { "type": "boolean" },
+          "hidden": { "type": "boolean", "description": "不出现在表单里，只由平台生成" },
+          "generate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["length"],
+            "properties": { "length": { "type": "integer", "minimum": 20, "maximum": 128 }, "charset": { "enum": ["alnum", "hex"] } }
+          },
+          "editable": { "enum": ["never", "always", "reinstall"] },
+          "scope": { "enum": ["all", "standalone", "cloud"] },
+          "llm": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "type 为 llm_provider 时：平台 Key、本机网关、自己的 Key 三种来源",
+            "properties": {
+              "platform": { "enum": ["default", "optional", "off"] },
+              "local_gateway": { "type": "boolean", "description": "本机装了提供 llm_gateway 的应用时，把它列为首选" },
+              "needs": { "type": "array", "items": { "enum": ["chat", "embedding", "rerank", "image", "tts"] } },
+              "min_context": { "type": "integer", "minimum": 1024 }
+            }
+          }
+        }
+      }
+    },
+    "env": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key"],
+        "properties": {
+          "key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "from": { "type": "string", "pattern": "^(params|platform|requires|uses)\\.[a-z0-9_.]+$", "description": "platform.<名字> 是平台变量，名字只能用程序里那张表上的（acornfox catalog platform-vars）" },
+          "value": { "type": "string" },
+          "secret": { "type": "boolean" }
+        },
+        "oneOf": [{ "required": ["from"] }, { "required": ["value"] }]
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "安装时写进数据卷的配置文件（模板里只能用 {{params.*}} 等引用），不在宿主机执行任何脚本",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["volume", "path", "template"],
+        "properties": {
+          "volume": { "type": "string" },
+          "path": { "type": "string", "pattern": "^[a-zA-Z0-9._/-]+$" },
+          "template": { "type": "string" },
+          "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+          "owner": { "type": "string", "pattern": "^[0-9]{1,6}:[0-9]{1,6}$", "description": "文件属主 uid:gid，应用不以 root 运行时填它的用户" },
+          "overwrite": { "enum": ["never", "install"] }
+        }
+      }
+    },
+    "init": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "when", "http"],
+        "properties": {
+          "name": { "type": "string" },
+          "when": { "enum": ["after_healthy"] },
+          "http": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["method", "path"],
+            "properties": {
+              "method": { "enum": ["GET", "POST", "PUT"] },
+              "path": { "type": "string", "pattern": "^/" },
+              "json": { "type": "object" },
+              "expect_json": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "first_login": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label"],
+        "properties": { "label": { "type": "string" }, "from": { "type": "string" }, "value": { "type": "string" }, "secret": { "type": "boolean" } }
+      }
+    },
+    "provides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "adapter", "endpoint"],
+        "properties": {
+          "kind": { "enum": ["llm_gateway"] },
+          "adapter": { "enum": ["new-api"], "description": "平台内置的适配器名；发令牌等步骤写在平台代码里" },
+          "endpoint": { "type": "string" },
+          "base_path": { "type": "string", "pattern": "^/" }
+        }
+      }
+    },
+    "uses": {
+      "type": "array",
+      "description": "引用本机已装的另一个应用（不同于 requires：requires 是每个应用自带一套独立实例）",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "kind": { "enum": ["llm_gateway"] },
+          "for_param": { "type": "string", "description": "选中时填进哪个 llm_provider 参数" },
+          "optional": { "type": "boolean" }
+        }
+      }
+    },
+    "cn": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": { "type": "array", "items": { "type": "object", "required": ["key", "value"], "properties": { "key": { "type": "string" }, "value": { "type": "string" } }, "additionalProperties": false } },
+        "verified": { "type": "string", "format": "date" }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier"],
+      "properties": {
+        "tier": { "enum": ["auto", "steps"] },
+        "minutes": { "type": "integer", "minimum": 1 },
+        "video": { "type": "string", "format": "uri" },
+        "user_steps": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "upgrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "from": { "type": "string" }, "breaking": { "type": "boolean" }, "notes": { "type": "string" } }
+    },
+    "uninstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "data": { "type": "array", "items": { "type": "string", "pattern": "^(volumes|requires)\\.[a-z0-9-]+$" } } }
+    }
+  },
+  "$defs": {
+    "minRec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min"],
+      "properties": { "min": { "type": "integer", "minimum": 64 }, "recommended": { "type": "integer", "minimum": 64 } }
+    }
+  }
+}

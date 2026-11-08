@@ -52,6 +52,12 @@ func NewConsole(cfg Config) http.Handler {
 	// Session lifecycle endpoints live only on the console entry.
 	api.HandleFunc("GET /v1/console/session", s.consoleSession)
 	api.HandleFunc("POST /v1/console/logout", s.consoleLogout)
+	// The settings page shows whether the console is open on the LAN or the
+	// internet. Read-only here: opening or closing it stays on the trusted
+	// entry (acornfox lan-console / public-console on the server), so a
+	// browser session can never widen who reaches the console.
+	api.HandleFunc("GET /v1/lan-console", s.getLANConsole)
+	api.HandleFunc("GET /v1/public-console", s.publicConsoleStatus)
 
 	// Wrap the /v1 API with the session + CSRF middleware.
 	guardedAPI := s.sessionMiddleware(api)
@@ -66,7 +72,10 @@ func NewConsole(cfg Config) http.Handler {
 	})
 	// All other /v1 traffic goes through the guarded API mux.
 	root.Handle("/v1/", guardedAPI)
-	// Everything else is static console assets.
+	// The previous console was removed; old bookmarks land on the new one.
+	root.HandleFunc("/legacy", redirectHome)
+	root.HandleFunc("/legacy/", redirectHome)
+	// Everything else is the new console's static assets.
 	root.HandleFunc("/", s.serveStatic)
 
 	// Outermost: Host check + security headers on every response.
@@ -269,23 +278,32 @@ func (s *server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		s.placeholder(w)
 		return
 	}
-	upath := strings.TrimPrefix(r.URL.Path, "/")
+	serveSPA(w, r, s.consoleFS, strings.TrimPrefix(r.URL.Path, "/"), s.placeholder)
+}
+
+// redirectHome sends /legacy and anything under it to the console's home.
+func redirectHome(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// serveSPA serves upath from fsys ("" is index.html). An unknown path gets
+// index.html so a client-side router works; without index.html, missing().
+func serveSPA(w http.ResponseWriter, r *http.Request, fsys fs.FS, upath string, missing func(http.ResponseWriter)) {
 	if upath == "" {
 		upath = "index.html"
 	}
-	f, err := s.consoleFS.Open(upath)
+	f, err := fsys.Open(upath)
 	if err != nil {
-		// Fall back to index.html so a client-side router works, else placeholder.
-		if idx, ierr := s.consoleFS.Open("index.html"); ierr == nil {
+		if idx, ierr := fsys.Open("index.html"); ierr == nil {
 			_ = idx.Close()
-			serveFSFile(w, r, s.consoleFS, "index.html")
+			serveFSFile(w, r, fsys, "index.html")
 			return
 		}
-		s.placeholder(w)
+		missing(w)
 		return
 	}
 	_ = f.Close()
-	serveFSFile(w, r, s.consoleFS, upath)
+	serveFSFile(w, r, fsys, upath)
 }
 
 // serveFSFile writes one embedded file. http.FileServer is not used because it

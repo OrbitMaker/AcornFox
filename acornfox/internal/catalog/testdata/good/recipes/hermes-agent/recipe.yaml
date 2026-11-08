@@ -1,0 +1,14 @@
+id: hermes-agent
+schema: 1
+title: Hermes 智能体
+summary: 常驻的 AI 智能体，可以接飞书、钉钉、企业微信做机器人
+keywords: [hermes, 爱马仕, 爱马仕智能体, 智能体, agent]
+apps:
+  - app: hermes-agent
+delivery:
+  tier: auto
+  minutes: 3
+  memory_mb: 2048
+  user_steps:
+    - 打开控制台，用应用详情里的密码登录
+    - 要接飞书、企业微信等机器人时，在控制台里填机器人凭据

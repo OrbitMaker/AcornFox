@@ -5,6 +5,7 @@ SHA-256 digests are in `licenses-manifest.json`.
 
 | Component | Version | Declared notice | Source |
 | --- | --- | --- | --- |
+| go:github.com/Microsoft/go-winio | v0.6.2 | LicenseRef-c84e55ba9686580892502f58faac3d6cce947714a14e6e51442fcc6e7c7ceb1e | https://pkg.go.dev/github.com/Microsoft/go-winio@v0.6.2 |
 | go:github.com/containerd/errdefs | v1.0.0 | LicenseRef-ddc08c4dfeaa615482945f32596bd54749b45fc67374bcccfb0168dcfdd1094a | https://pkg.go.dev/github.com/containerd/errdefs@v1.0.0 |
 | go:github.com/containerd/errdefs/pkg | v0.3.0 | LicenseRef-ddc08c4dfeaa615482945f32596bd54749b45fc67374bcccfb0168dcfdd1094a | https://pkg.go.dev/github.com/containerd/errdefs/pkg@v0.3.0 |
 | go:github.com/distribution/reference | v0.6.0 | LicenseRef-34bf928180527b2cde464061881465abf29e67042f38830de3b2fb4c424a2f41 | https://pkg.go.dev/github.com/distribution/reference@v0.6.0 |
@@ -23,12 +24,15 @@ SHA-256 digests are in `licenses-manifest.json`.
 | go:github.com/opencontainers/go-digest | v1.0.0 | LicenseRef-a3359fcbbc1a160326ff05d9ab08d0bb780b0aef6f3f1ac9cbdf55068ed08c77 | https://pkg.go.dev/github.com/opencontainers/go-digest@v1.0.0 |
 | go:github.com/opencontainers/image-spec | v1.1.1 | LicenseRef-be51645bc2a687623287db919ae61c1a5d8d7342b8cae8cbd164bb47b8fb1c1a | https://pkg.go.dev/github.com/opencontainers/image-spec@v1.1.1 |
 | go:github.com/remyoudompheng/bigfft | v0.0.0-20230129092748-24d4a6f8daec | LicenseRef-c9e8f050860b79de5ff12989f0e8402239fd1b46e467ac94a548e93abc348250 | https://pkg.go.dev/github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec |
+| go:github.com/santhosh-tekuri/jsonschema/v6 | v6.0.2 | LicenseRef-826ba1a05b7d7d5ecc495d990d86b29861bb9d7923a5e5d1d4f11fd990015b7f | https://pkg.go.dev/github.com/santhosh-tekuri/jsonschema/v6@v6.0.2 |
 | go:go.opentelemetry.io/auto/sdk | v1.1.0 | LicenseRef-42502a0272808fd5d86c342781ab8bda4ad77adf42e454f66a14a7c3cb446b22 | https://pkg.go.dev/go.opentelemetry.io/auto/sdk@v1.1.0 |
 | go:go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp | v0.60.0 | LicenseRef-42502a0272808fd5d86c342781ab8bda4ad77adf42e454f66a14a7c3cb446b22 | https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp@v0.60.0 |
 | go:go.opentelemetry.io/otel | v1.35.0 | LicenseRef-42502a0272808fd5d86c342781ab8bda4ad77adf42e454f66a14a7c3cb446b22 | https://pkg.go.dev/go.opentelemetry.io/otel@v1.35.0 |
 | go:go.opentelemetry.io/otel/metric | v1.35.0 | LicenseRef-42502a0272808fd5d86c342781ab8bda4ad77adf42e454f66a14a7c3cb446b22 | https://pkg.go.dev/go.opentelemetry.io/otel/metric@v1.35.0 |
 | go:go.opentelemetry.io/otel/trace | v1.35.0 | LicenseRef-42502a0272808fd5d86c342781ab8bda4ad77adf42e454f66a14a7c3cb446b22 | https://pkg.go.dev/go.opentelemetry.io/otel/trace@v1.35.0 |
 | go:golang.org/x/sys | v0.47.0 | LicenseRef-15a7908f982fda5955ff467804801d374cc8a340a5c274e7da7e3a01c2bd059d | https://pkg.go.dev/golang.org/x/sys@v0.47.0 |
+| go:golang.org/x/text | v0.14.0 | LicenseRef-4e2f582818a7d7db29bc33d73e8d5072816d4e47974ff3f82fd0b466a6b9f6c8 | https://pkg.go.dev/golang.org/x/text@v0.14.0 |
+| go:gopkg.in/yaml.v3 | v3.0.1 | LicenseRef-2606b60793016330e1c633289146b6d4b59f827570787e55116e536696966e2a | https://pkg.go.dev/gopkg.in/yaml.v3@v3.0.1 |
 | go:modernc.org/libc | v1.75.7 | LicenseRef-3cbab66de7ce13e39857f6be07a2a9ce981a528b40038bf68009b36f839e1d9d | https://pkg.go.dev/modernc.org/libc@v1.75.7 |
 | go:modernc.org/mathutil | v1.7.1 | LicenseRef-705eade8e2374357ee5bcdd4c3c648741702b7b7135d5ff3a4322c13502c6645 | https://pkg.go.dev/modernc.org/mathutil@v1.7.1 |
 | go:modernc.org/memory | v1.12.1 | LicenseRef-20f4e4351efd4091667de515f8b5888cedf581f6063f42af0d29f4a8a90848de | https://pkg.go.dev/modernc.org/memory@v1.12.1 |
@@ -36,8 +40,47 @@ SHA-256 digests are in `licenses-manifest.json`.
 | go:standard-library | go1.25.13 | LicenseRef-e924f0b275775a321659fdb7f2257fd4028cc91c18f81593f753e1b1e0c3cbcf | https://go.dev/dl/#go1.25.13 |
 | bin:github.com/caddyserver/caddy/v2 | v2.8.4 | LicenseRef-139a1f027991337f20485a23592df0d4012ea54b8d3bc303a0b8be163c0de3a7 | https://github.com/caddyserver/caddy/releases/tag/v2.8.4 |
 | font:IBM Plex Sans / IBM Plex Mono | IBM/plex@763c36e | LicenseRef-0d8e9c02ccb5fc51479838e67250aeaf6582fea4b0732ed65d3d144379c28740 | https://github.com/IBM/plex |
+| npm:@fontsource/geist-mono | 5.2.7 | LicenseRef-99d533b0a935449151b0d76ae38b28212c5ff658d4e73f3174f4fab52167a6d7 | https://www.npmjs.com/package/@fontsource/geist-mono/v/5.2.7 |
+| npm:@fontsource/geist-sans | 5.2.5 | LicenseRef-720b6a742188b8a8c53bde90bca49366697a4c15e06fef4ad04b96d7e64dc93f | https://www.npmjs.com/package/@fontsource/geist-sans/v/5.2.5 |
+| npm:@reduxjs/toolkit | 2.14.0 | LicenseRef-091ca1eae0e688d6bf3140aa3a1d73fcc357c147cb1e48b79985d6445732df3c | https://www.npmjs.com/package/@reduxjs/toolkit/v/2.14.0 |
+| npm:class-variance-authority | 0.7.1 | LicenseRef-5316bdc22c5967e4a9519ef7dc690fc3123f5ed4317f12186ea26e8ee72b77cd | https://www.npmjs.com/package/class-variance-authority/v/0.7.1 |
+| npm:clsx | 2.1.1 | LicenseRef-4958f7e88ee4b800d01a189a4776da0b4b3d1b5a20010c97677cea44c6922b67 | https://www.npmjs.com/package/clsx/v/2.1.1 |
+| npm:d3-array | 3.2.5 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-array/v/3.2.5 |
+| npm:d3-color | 3.1.1 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-color/v/3.1.1 |
+| npm:d3-format | 3.1.3 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-format/v/3.1.3 |
+| npm:d3-interpolate | 3.0.2 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-interpolate/v/3.0.2 |
+| npm:d3-path | 3.1.1 | LicenseRef-a1823ff391a51594115fe5aac67c2b27f9bb27e03181dabc9ffb5cbfd0ca7ecb | https://www.npmjs.com/package/d3-path/v/3.1.1 |
+| npm:d3-scale | 4.0.3 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-scale/v/4.0.3 |
+| npm:d3-shape | 3.2.1 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-shape/v/3.2.1 |
+| npm:d3-time | 3.1.1 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-time/v/3.1.1 |
+| npm:d3-time-format | 4.1.1 | LicenseRef-dfd3916622f5f66f001a5c9ec0beb6d4b0208b9ba41a81206bf6fa0940b6e980 | https://www.npmjs.com/package/d3-time-format/v/4.1.1 |
+| npm:decimal.js-light | 2.5.1 | LicenseRef-935aa1992f50e10b372cfb6b5785c4cc4fd490b2d552500b27ac63a51770b514 | https://www.npmjs.com/package/decimal.js-light/v/2.5.1 |
+| npm:es-toolkit | 1.53.2 | LicenseRef-2f8a40dcc97a121dab9db42eca762ba71b31b3c7dae5b0e8e4e7bba98a845474 | https://www.npmjs.com/package/es-toolkit/v/1.53.2 |
+| npm:eventemitter3 | 5.0.4 | LicenseRef-bd21f92cab5cfad172f004369005036e2b1284d2e4983314da43bd2afc621ac5 | https://www.npmjs.com/package/eventemitter3/v/5.0.4 |
+| npm:immer | 11.2.9 | LicenseRef-cd88e2b38ba5bea781b457bdd9f7fc021d8c6725d1b1fb506f97d75d1c14ee32 | https://www.npmjs.com/package/immer/v/11.2.9 |
+| npm:lucide-react | 0.511.0 | LicenseRef-32e94a37b02c905769a0d0dab78a431dc6dcea87ba592d20aba80f4ff38a9cbb | https://www.npmjs.com/package/lucide-react/v/0.511.0 |
+| npm:react | 18.3.1 | LicenseRef-8ea7eb4f65aa41c905001146af35e3a19ef9b8296512561cd816232a6e3472d2 | https://www.npmjs.com/package/react/v/18.3.1 |
+| npm:react-dom | 18.3.1 | LicenseRef-8ea7eb4f65aa41c905001146af35e3a19ef9b8296512561cd816232a6e3472d2 | https://www.npmjs.com/package/react-dom/v/18.3.1 |
+| npm:react-is | 18.3.1 | LicenseRef-8ea7eb4f65aa41c905001146af35e3a19ef9b8296512561cd816232a6e3472d2 | https://www.npmjs.com/package/react-is/v/18.3.1 |
+| npm:react-redux | 9.3.1 | LicenseRef-e3dea8619d85a68f0e39ea1e1e7f45f0c10a379a3fc43bc5dbd98a452f72e107 | https://www.npmjs.com/package/react-redux/v/9.3.1 |
+| npm:recharts | 3.10.1 | LicenseRef-74e1014d231ee2dce9dbb2bc2567a6028eec170a96ed44f8bd765b90753bbaf9 | https://www.npmjs.com/package/recharts/v/3.10.1 |
+| npm:redux | 5.0.1 | LicenseRef-e3dea8619d85a68f0e39ea1e1e7f45f0c10a379a3fc43bc5dbd98a452f72e107 | https://www.npmjs.com/package/redux/v/5.0.1 |
+| npm:redux-thunk | 3.1.0 | LicenseRef-47afecf3e6b80ee6c56c0ab2f14cfe9517b9facebd04aa94b96b48795c0c2a0c | https://www.npmjs.com/package/redux-thunk/v/3.1.0 |
+| npm:reselect | 5.2.0 | LicenseRef-cf84b3dc02d987820cea7dfcf9b161c7c8115ff3822f770239209d118c9e00a3 | https://www.npmjs.com/package/reselect/v/5.2.0 |
+| npm:scheduler | 0.23.2 | LicenseRef-8ea7eb4f65aa41c905001146af35e3a19ef9b8296512561cd816232a6e3472d2 | https://www.npmjs.com/package/scheduler/v/0.23.2 |
+| npm:tailwind-merge | 2.6.0 | LicenseRef-24c2b5f851ec5af1667f9dd7789a6c97813e2d2771d500c715c80419bef34687 | https://www.npmjs.com/package/tailwind-merge/v/2.6.0 |
+| npm:tailwindcss | 3.4.17 | LicenseRef-a2c49580a8e8cf755b431cf0100449ea9b047be1078803ad707b033ba0bc7be4 | https://www.npmjs.com/package/tailwindcss/v/3.4.17 |
+| npm:tiny-invariant | 1.3.3 | LicenseRef-679601ff1dbd10dc60c647936d457638c5678eb4082f041bee5937f3385a0d8a | https://www.npmjs.com/package/tiny-invariant/v/1.3.3 |
+| npm:use-sync-external-store | 1.7.0 | LicenseRef-7917f88912e4ef70d9eb58e828f57d314f94af63dcac1d07ee1952e254e0c96c | https://www.npmjs.com/package/use-sync-external-store/v/1.7.0 |
+| npm:victory-vendor | 37.4.1 | LicenseRef-9c8a02219793961d61b9461b81964e8df4660cb73d147de00453d24367904e31 | https://www.npmjs.com/package/victory-vendor/v/37.4.1 |
+| npm:vite | 6.4.5 | LicenseRef-44915b521931d8fc4d33305878f76b655c19a1f81871df95b35cd09f9f540fe9 | https://www.npmjs.com/package/vite/v/6.4.5 |
+| src:shadcn/ui | shadcn-ui/ui@main | LicenseRef-27ff630fb02ba87d82a980b69e625c4b9825ad812e4eb377be6b444da8c1f831 | https://github.com/shadcn-ui/ui |
 
 `go:` entries are compiled into the `acornfox` binary. `bin:` entries are shipped
 unmodified next to each release. The IBM Plex fonts (OFL-1.1, Reserved Font Name
-"Plex") are bundled in `acornfox/internal/console/static/fonts/` and `website/assets/fonts/`,
+"Plex") are bundled in `website/assets/fonts/`,
 with the full license text in `OFL.txt` next to the font files.
+`npm:` entries are bundled into the web console embedded in the binary
+(`acornfox/internal/console/ui/`, built from `acornfox/web/console/`), including the
+Geist fonts (OFL-1.1). `src:shadcn/ui` covers the components adapted into
+`acornfox/web/console/src/components/ui/`.

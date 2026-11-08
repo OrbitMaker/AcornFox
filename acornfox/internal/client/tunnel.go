@@ -89,16 +89,16 @@ func NewLiveTunnelForTest(localURL string) *Tunnel {
 }
 
 // tunnelArgs builds the ssh argv (excluding the program name) for a `-L`
-// forward from 127.0.0.1:local to 127.0.0.1:consoleRemotePort on t. It mirrors
+// forward from 127.0.0.1:local to 127.0.0.1:remotePort on t. It mirrors
 // sshArgs' -p/-i handling but uses -N -T and ExitOnForwardFailure so a refused
 // forward makes ssh exit instead of hanging.
-func tunnelArgs(t Target, localPort int) []string {
+func tunnelArgs(t Target, localPort, remotePort int) []string {
 	args := []string{
 		"-N", "-T",
 		"-o", "BatchMode=yes",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "ServerAliveInterval=15",
-		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", localPort, consoleRemotePort),
+		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", localPort, remotePort),
 	}
 	if t.Port != 0 {
 		args = append(args, "-p", strconv.Itoa(t.Port))
@@ -116,6 +116,16 @@ func tunnelArgs(t Target, localPort int) []string {
 // *Tunnel; on failure a classified connect *Error (including
 // connect/forwarding_disabled when the server refuses the forward).
 func OpenTunnel(ctx context.Context, t Target, localPort int) (*Tunnel, error) {
+	return OpenTunnelTo(ctx, t, localPort, consoleRemotePort)
+}
+
+// OpenTunnelTo is OpenTunnel to another loopback port of the server:
+// `acornfox open APP` forwards to the app's port (apps listen on the
+// server's 127.0.0.1 whatever their exposure).
+func OpenTunnelTo(ctx context.Context, t Target, localPort, remotePort int) (*Tunnel, error) {
+	if remotePort < 1 || remotePort > 65535 {
+		return nil, connectError(codeConnectFailed, "服务器端口不对")
+	}
 	if t.SSH == "" {
 		return nil, connectError(codeConnectFailed, "target 缺少 ssh")
 	}
@@ -129,7 +139,7 @@ func OpenTunnel(ctx context.Context, t Target, localPort int) (*Tunnel, error) {
 		prog = resolved
 	}
 
-	cmd := exec.Command(prog, tunnelArgs(t, localPort)...)
+	cmd := exec.Command(prog, tunnelArgs(t, localPort, remotePort)...)
 	stderr := newBoundedBuffer(stderrCap)
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
