@@ -68,7 +68,7 @@ windows_not_supported() {
   ssh 用户@地址 'acornfox --json status'
 
 把“用户@地址”换成你登录服务器用的账号和地址。部署你电脑上的项目时，先把项目文件夹传到服务器
-（scp -r 或 git），再在服务器上那个目录里运行 acornfox deploy。Windows 本机运行即将支持。
+（scp -r 或 git），再在服务器上那个目录里运行 acornfox deploy。这一版不提供 Windows 本机运行。
 
 EOF
     exit 2

@@ -16,7 +16,7 @@ AcornFox 把应用（现成镜像、公开 Git 仓库、带 Dockerfile 的项目
 | AcornFox 服务装在 Linux 服务器，arm64 | 安装脚本允许，但还没实测 |
 | Mac 电脑上的命令行（CLI） | 支持，只当客户端：经 SSH 管理 Linux 服务器（情况乙） |
 | Windows 电脑 | 本版本没有 Windows 版程序：所有 `acornfox` 命令经 `ssh` 在服务器上运行（情况丙） |
-| AcornFox 服务装在 Mac、Windows 电脑本机 | **即将支持**，现在不要尝试 |
+| AcornFox 服务装在 Mac、Windows 电脑本机 | **这一版不提供**，不要尝试 |
 
 Mac、Windows 用户现在的做法：准备一台 Linux 服务器，把 AcornFox 装到服务器上。Mac 电脑只装命令行工具（CLI），通过 SSH 管理服务器；Windows 电脑上什么都不装，AI 工作台经 `ssh` 在服务器上直接运行 `acornfox`（服务器上安装 AcornFox 时已经装好了命令行）。**不要运行 `acornfox install`、`acornfox setup` 去在 Mac 本机装服务端**，这个流程还没发布。
 
@@ -59,7 +59,7 @@ uname -s
 
 拿不准是甲还是乙，就问用户一句：“要把 AcornFox 装在这台机器上，还是装到另一台服务器？”
 
-用户是 Mac、Windows，又没有 Linux 服务器：告诉用户“AcornFox 目前要装在 Linux 服务器上，Mac、Windows 本机运行即将支持”，建议买一台云服务器（2 核 2 GB 以上，系统选 Ubuntu 24.04）。**买服务器要花钱，由用户自己决定和操作。** 用户买好后再继续。
+用户是 Mac、Windows，又没有 Linux 服务器：告诉用户“AcornFox 目前要装在 Linux 服务器上，这一版不提供 Mac、Windows 本机运行”，建议买一台云服务器（2 核 2 GB 以上，系统选 Ubuntu 24.04）。**买服务器要花钱，由用户自己决定和操作。** 用户买好后再继续。
 
 ### 第 2 步（情况乙、丙）：连上服务器
 
