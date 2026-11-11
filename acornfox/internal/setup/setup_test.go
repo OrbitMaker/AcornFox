@@ -280,13 +280,13 @@ func TestStatusSurvivesRestart(t *testing.T) {
 func TestFaultCatalog(t *testing.T) {
 	seen := map[string]bool{}
 	for _, f := range Faults {
-		if seen[f.Code] || !strings.HasPrefix(f.Code, "SETUP-") || f.Title == "" || f.Next == "" || len(f.Causes) == 0 {
+		if seen[f.Code] || !(strings.HasPrefix(f.Code, "SETUP-") || strings.HasPrefix(f.Code, "LAN-CONSOLE-")) || f.Title == "" || f.Next == "" || len(f.Causes) == 0 {
 			t.Fatalf("bad entry %+v", f)
 		}
 		seen[f.Code] = true
 	}
 	// Every code the package returns is in the catalog.
-	for _, c := range []string{"SETUP-NET-01", "SETUP-NET-02", "SETUP-SUM-01", "SETUP-RT-02", "SETUP-RT-03", "SETUP-RT-04", "SETUP-WIN-03", "SETUP-WIN-04", "SETUP-EDGE-01", "SETUP-CHK-01", "SETUP-GEN-01", "SETUP-SVC-01", "SETUP-DISK-01", "SETUP-PORT-01", "SETUP-PORT-02", "SETUP-PORT-03", "SETUP-PORT-04", "SETUP-PORT-05", "SETUP-CLOCK-01", "SETUP-MAC-01"} {
+	for _, c := range []string{"SETUP-NET-01", "SETUP-NET-02", "SETUP-SUM-01", "SETUP-RT-02", "SETUP-RT-03", "SETUP-RT-04", "SETUP-WIN-03", "SETUP-WIN-04", "SETUP-EDGE-01", "SETUP-CHK-01", "SETUP-GEN-01", "SETUP-SVC-01", "SETUP-DISK-01", "SETUP-PORT-01", "SETUP-PORT-02", "SETUP-PORT-03", "SETUP-PORT-04", "SETUP-PORT-05", "SETUP-CLOCK-01", "SETUP-MAC-01", "LAN-CONSOLE-01", "LAN-CONSOLE-02", "LAN-CONSOLE-03"} {
 		if !seen[c] {
 			t.Fatalf("missing %s", c)
 		}

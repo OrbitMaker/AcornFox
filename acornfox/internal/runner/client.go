@@ -144,11 +144,15 @@ func (c *Client) Build(ctx context.Context, req BuildRequest) (BuildResponse, er
 	return out, err
 }
 
-// PullImage implements API. It uses a 10 minute timeout; the peer client used
-// for builds (25 min) safely bounds it, and a large response bound leaves room
-// for a classified failure log excerpt.
+// PullImage implements API. The runner bounds a pull to 10 minutes itself and
+// then answers with a classified failure ("pull timed out, configure a
+// mirror"); the caller waits one minute longer so that answer arrives instead
+// of the caller giving up first with a bare "runner: unavailable" (as
+// EnsureContainer does for add-ons). The peer client used for builds (25 min)
+// safely bounds it, and a large response bound leaves room for a classified
+// failure log excerpt.
 func (c *Client) PullImage(ctx context.Context, app, deploymentID, ref string) (PullResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, pullTimeout)
+	ctx, cancel := context.WithTimeout(ctx, pullTimeout+time.Minute)
 	defer cancel()
 	var out PullResponse
 	err := c.call(ctx, c.long, PathImagePull, PullRequest{App: app, DeploymentID: deploymentID, Ref: ref}, clientLargeBound, &out)

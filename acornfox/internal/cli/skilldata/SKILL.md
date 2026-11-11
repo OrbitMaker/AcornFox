@@ -25,10 +25,12 @@ Mac、Windows 用户现在的做法：准备一台 Linux 服务器，把 AcornFo
 **必须先停下问用户、得到明确同意的事：**
 
 - 花钱：买服务器、升级配置、扩容磁盘。
-- 删除数据：`acornfox delete`、`remove … --volumes`、卸载、`--purge`、`docker system prune`、重装系统。
+- 删除数据：`acornfox delete`、`remove … --volumes`、卸载、`--purge`、`docker system prune`、`docker image prune`、`docker volume prune`、删服务器上的文件、重装系统。
 - 改安全组、防火墙（`ufw` 等），停掉别的程序（例如 nginx）。
 - 输入密码：SSH 密码、sudo 密码、网盘或云账号密码。**任何密码都不能由你输入**，交给用户在他自己的终端里操作。
 - 改服务器级设置：整机资源上限（`acornfox limits`）、开公网控制台、升级 AcornFox。
+
+**可以直接做、不用问的：** 只读的检查和排查，例如 `acornfox status`、`apps`、`logs`、`doctor`、`install status`、`faults`，以及 `df -h`、`du`、`ls`、`free -m`。查清原因再把要用户决定的事给他，不要把“要不要再查一下”也当成选项问用户。
 
 **输出规则：**
 
@@ -425,7 +427,7 @@ EOF
 - `doctor` 里 `"ok":false` 的项目：按它的 `code` 查下文“自检故障编号”；`warn` 项转述给用户即可，不挡路。
 - 输出结构：`{"ok":…,"items":[…]}`，每项有 `ok`、`level`（`ok`、`warn`、`fail`）、`text`、`check`，要处理的项另有 `code`；没有 `status` 字段。
 - 要看某一项的结果（例如时钟），按 `check` 找，不要按文字找：每一项都带 `check`，是这项检查的编号，通过的项也有（时钟一项是 `SETUP-CLOCK-01`，端口一项是 `SETUP-PORT-01`）。`code` 只出现在要处理的项上。
-- 不是 root 的用户（已在 `acornfox-users` 组里）直接运行 `acornfox doctor` 时，下面两条是正常的，不是故障：Docker 一项写“由后台服务访问 Docker……当前用户不需要 Docker 权限”（Docker 由后台服务访问，普通用户本来就不用连 Docker）；`SETUP-PORT-05` 警告“不是 root，看不到是谁占用”（AcornFox 自己的端口已经认出来了，剩下的端口要确认就用 `sudo acornfox doctor --json`）。
+- 不是 root 的用户（已在 `acornfox-users` 组里）直接运行 `acornfox doctor` 时，下面三条是正常的，不是故障：Docker 一项写“由后台服务访问 Docker……当前用户不需要 Docker 权限”（Docker 由后台服务访问，普通用户本来就不用连 Docker）；`SETUP-PORT-05` 警告“不是 root，看不到是谁占用”（AcornFox 自己的端口已经认出来了，剩下的端口要确认就用 `sudo acornfox doctor --json`）；`SETUP-GW-01` 那一项通过、写“下载网关：当前用户读不到……这一项没查”（v0.5.1 起，普通用户读不到数据目录里的网关设置）：这一项其实**没查**，不能当成“网关正常”，要知道网关通不通就用 `sudo acornfox doctor --json`。
 - `services` 里有不是 `active` 的：执行 `sudo journalctl -u acornfox-server -n 50 --no-pager`（以及 `-u acornfox-runner`），把报错转述给用户。
 - `caddy=` 不是 `running` 或 `gateway=` 不是 `403`：执行 `sudo docker logs --tail 50 acornfox-caddy`，多半是端口被占，按 `SETUP-PORT-01`、`SETUP-PORT-02` 处理。
 
@@ -592,6 +594,23 @@ tar -czf - --exclude=node_modules --exclude=.git -C 项目文件夹 . | ssh 用�
 - 还要用户做的事：安全组放行 18810-18899（以及 80、443）。
 - 以后怎么用：在项目目录里说“部署”就行；看网页控制台见下文“网页控制台”。
 
+## 遇到故障编号怎么办（v0.5.1 起）
+
+故障编号出现在：安装、升级脚本最后一行的 `故障编号: …`；命令出错时不加 `--json` 的输出里 `故障编号：…` 那一行（v0.5.1 起；不是故障的通用错误码写成 `错误码：…`）；`acornfox doctor` 每项后面括号里的；命令加 `--json` 时输出里的 `code`、`diagnosis.code`、`gateway_code`；控制台“运行环境”页上的。每个编号的完整说明编在程序里，用 `acornfox faults` 查，不用记。
+
+最低路径（照做，不用推理）：
+
+1. 运行 `acornfox faults 编号 --json`。它只读、不连服务器，Mac 上的命令行也能用；情况丙在服务器上运行（`ssh 用户@服务器 acornfox faults 编号 --json`）。大写编号不分大小写，小写的诊断码（例如 `build_failed`）照原样写。
+2. 返回 `"ok": false`、`diagnosis.code` 是 `fault_unknown`（退出码 1）：目录里没有这个编号（接口和命令的通用错误码，例如 `invalid_app`、`not_found`、`internal`，也不在目录里）。按返回里 `fallback` 那一条做：把出错那条输出里的 `message` 和 `hint` 原样告诉用户（照抄原文、加引号，不要缩写或改写；用户只报了编号、手上没有那条输出时，请他把出错那条命令加 `--json` 的完整输出发来）；`hint` 只是让这条命令换个参数或稍后重试的，可以照做；别的一律只读、不动任何东西，收集证据交给用户。到此为止。
+3. 先告诉用户这是什么问题（`fault.title`，有 `fault.explain` 就一起说）和下一步（`fault.next`）。`fault.auto` 不为空时，告诉用户 AcornFox 已经自动做了什么。
+4. 按 `fault.steps` 的顺序运行只读的检查，对照 `fault.causes` 里每条的 `check` 判断是哪个原因；`auto` 为 true 的原因，`acornfox doctor --json` 已经替你判断了。
+5. 按 `fault.actions` 处置：`tier` 为 0、1 的可以直接做；`tier` 为 2 的，先把要做的事和后果告诉用户，用户明确同意后才做，同时告诉用户做完后怎么确认（照 `fault.verify` 说）。`fault.ask` 写到的情况一律先停下问用户；`fault.needs_user` 为 true 的只能用户自己做。
+6. 做完按 `fault.verify` 确认。确认不了，或者同一个编号按步骤做了两次还在，停下，把 `acornfox faults --json` 返回的 `evidence` 列的证据交给用户。
+
+可以发挥的地方：用大白话解释原因；处置有好几条时，按判断出的原因选；把用户的话和 `causes` 对上。`fault.steps` 之外的只读检查（`df`、`du`、`ls`、看日志）可以直接做，查清原因再把选项给用户，不用先问。不能跳过 `tier` 2 和 `ask` 的确认，`next` 里写了“不要”的事不能做。
+
+`acornfox faults` 不带编号列出全部，`acornfox faults --group SETUP` 只列一组。电脑上的命令行太旧、没有 `faults` 命令时，按下面各节的表处理。
+
 ## 安装故障编号
 
 安装脚本在改动系统之前先检查，不满足时打印 `故障编号: 编号` 并停下，什么都没改。升级脚本也用这些编号；`UPGRADE-` 开头的编号只在升级时出现，见“升级、卸载”一节。
@@ -666,7 +685,7 @@ EOF
 | `SETUP-CHK-02` | Docker 不能创建和删除容器 | 多半是磁盘满了，按 `SETUP-DISK-01` 处理 |
 | `SETUP-CLOCK-01` | 本机时钟不准，或者没开网络对时 | **先问用户**，再运行 `sudo timedatectl set-ntp true`；过一两分钟 `timedatectl` 看 `System clock synchronized: yes`，再 `acornfox doctor`。时钟差太多时下载网关会拒绝这台机器（`GW-AUTH-01`），应用中心的大镜像会改从公共源拉、慢很多 |
 
-表里没有的编号：把那一项的 `text` 原样转述给用户，照里面的建议做；涉及删除、停程序、花钱的先问用户。
+表里没有的编号（例如 `SETUP-GW-01` 下载网关连不上、`SETUP-SYNC-01` 应用目录没同步上）：按上面“遇到故障编号怎么办”运行 `acornfox faults 编号 --json`；命令行太旧没有这个命令时，把那一项的 `text` 原样转述给用户，照里面的建议做。涉及删除、停程序、花钱的先问用户。
 
 ## 连接故障（`diagnosis.stage` 为 `connect`）
 
@@ -819,18 +838,24 @@ acornfox remove postgres --json [--volumes]
 
 **最低路径（照着做）：**
 
-1. 看目录：`acornfox --json catalog list`。`apps[].id` 是应用名，`recipes[].id` 是配方名，`apps[].installed` 不为空表示这台服务器已经装过。同步结果是 `CAT-SYNC-08`（在线目录都取不到）时，用的是程序自带的目录，照样能装，不用处理。
+1. 看目录：`acornfox --json catalog list`。`apps[].id` 是应用名，`recipes[].id` 是配方名，`apps[].installed` 不为空表示这台服务器已经装过。应用或配方的 `needs_platform` 不为空（v0.5.1 起才有这一项）表示要先升级 AcornFox 才能装，先不要提交安装，按下面“要先升级 AcornFox 才能装的应用”做。同步结果是 `CAT-SYNC-08`（在线目录都取不到）时，用的是程序自带的目录，照样能装，不用处理。
 2. 看要填什么：`acornfox --json catalog info 应用`。`params` 里每一项是能填的参数；`generated: true` 的留空会自动生成；`llm` 这一项说明三种大模型来源现在能不能用。`platform` 是平台按这台机器自动填的（时区、下载源、默认模型等），**不用填**。
 3. 提交安装，不等：
 
    ```bash
-   acornfox --json install new-api --no-wait                  # 记下输出里的 task_id
+   acornfox --json install new-api --no-wait                  # 记下输出里的 task_id；next_command 就是第 4 步要运行的命令
    acornfox --json install hermes-agent --llm local --no-wait  # Hermes 接本机 New API（先装好 New API）
    acornfox --json install --recipe hermes-with-new-api --no-wait   # 两个一起装并连起来
    ```
 
-4. 每隔 5 秒查一次：`acornfox --json install status TASK_ID`，直到 `status` 是 `succeeded` 或 `failed`。`steps` 里是每一步的进度。
-5. 成功：把 `first_login` 告诉用户，再按下面“装好后怎么打开”告诉用户怎么打开。密码默认是 `******`，**不要在对话里复述密码**；告诉用户自己在服务器上运行 `acornfox install status TASK_ID --show-secrets` 查看，或在控制台的应用详情里看。再把 `user_steps`（还要用户做的几步）逐条告诉用户。任务的 `apps[]` 里带 `gateway_token` 的应用（例如接了本机 New API 的 Hermes）用的是 New API 里一把**不限额、不过期**的令牌，要告诉用户：要控制花费，可在 New API 后台的“令牌”页给它设上限。`gateway_token` 里只有编号和 `provider`，令牌名不在输出里，固定是 `acornfox-应用名`（例如 `acornfox-hermes-agent`）。
+4. 等它装完：`acornfox --json install status TASK_ID --wait`（v0.5.1 起）。它最多等 90 秒，装好或失败就提前返回。看输出最外层这几项，照着做，不用自己判断：
+   - `done` 是 `false`：还没装完，结果还不知道。只把 `say` 告诉用户（它写了到了哪一步、这一步和整次各用了多久），然后运行 `next_command`（还是这条命令）接着等，直到 `done` 是 `true`。没到之前**不要**对用户说“卡住了”“装不好”“容器没在运行”“没有令牌”这类结论，也不要自己估计还要多久：时间只照 `say` 里的说，不要说“几分钟”。“启动”一步做完之前，`acornfox status 应用名` 里 `observed_state` 是 `missing`、`current_deployment` 为空，这是正常的，不用另外去查。
+   - `stuck` 是 `true`（`timing.code` 是 `CAT-INST-30`）：正在做的那一步比平常慢很多，但安装还没失败。先运行 `next_command`（看日志或自检，只读，不用问用户），把 `say` 和看到的要点告诉用户，再问用户接着等还是不装了；详细步骤按“遇到故障编号怎么办”查 `CAT-INST-30`。不要自己删除、重装或重启服务。`slow` 是 `true` 只是比平常慢一些，照常接着等。
+   - `done` 是 `true`：`status` 是 `succeeded` 做第 5 步，`failed` 做第 6 步。
+   - 命令报不认识 `--wait`（服务器上的命令行是 v0.5.0）：去掉 `--wait`，每隔 5 秒查一次 `acornfox --json install status TASK_ID`，直到 `status` 是 `succeeded` 或 `failed`；中间同样不下结论。
+
+   `steps` 里是每一步的进度，`timing.steps` 是每一步用了多久、正常多久（`normal_seconds`）。“下载镜像”这一步写着“没有 linux/arm64 的镜像包”“只算 linux/amd64 的”（v0.5.1 起）时，是这台服务器的 CPU 架构在下载网关上没有镜像包，改从公共源拉，会慢一些，不是故障，照常等。
+5. 成功：把 `first_login` 告诉用户，再按下面“装好后怎么打开”告诉用户怎么打开。密码默认是 `******`，**不要在对话里复述密码**；告诉用户自己在服务器上运行 `acornfox install status TASK_ID --show-secrets` 查看，或在控制台的应用详情里看。再把 `user_steps`（还要用户做的几步）逐条告诉用户。`must_tell`（v0.5.1 起）里的每一句都要照原话告诉用户，一句都不能漏（没能吊销的旧令牌、不限额不过期的令牌）；应用名、令牌名、令牌结尾照抄，不要换成别的叫法（例如不要把 `new-api` 写成 New API）。任务的 `apps[]` 里带 `gateway_token` 的应用（例如接了本机 New API 的 Hermes）用的是 New API 里一把**不限额、不过期**的令牌，要告诉用户：要控制花费，可在 New API 后台的“令牌”页给它设上限。`gateway_token` 里只有编号和 `provider`，令牌名不在输出里，固定是 `acornfox-应用名`（例如 `acornfox-hermes-agent`）。
 6. 失败：看 `fault.code`，按下表处理。失败时这次建出来的应用和数据卷已经自动清理（只清理这次新建的，以前留下的数据不会动），处理好原因后重新安装即可。加了 `--keep-data-on-failure` 时数据卷会留着，任务的 `apps[].volumes` 列出卷名。
 
 ### 装好后怎么打开（只本机的应用）
@@ -856,29 +881,32 @@ acornfox remove postgres --json [--volumes]
 
 **必须先停下问用户的：**
 
-- 用自己的大模型 Key（`--llm own`）：要用户给 `base_url`、`api_key`、`model`，用 `--set llm.base_url=… --set llm.api_key=… --set llm.model=…` 传。Key 由用户在自己的终端里输入，你不要替他编或保存。
+- 用自己的大模型 Key（`--llm own`）：要 `base_url`、`api_key`、`model` 三项，用 `--set llm.base_url=… --set llm.api_key=… --set llm.model=…` 传。分两种情况：
+  - 用户已经在对话里给了 Key：可以照用。回答里不要复述 Key（写成 `sk-…`），不要写进任何文件；告诉用户这条命令会留在服务器的命令历史和 sudo 日志里。这把 Key 是用户在上游（Key 的提供方）那里的，要作废就去那里换，不在 New API 里。
+  - 用户没给：不要向他要，也不要替他编。把整条安装命令给用户（Key 那里写成 `sk-你的Key`），请他自己在服务器终端运行，再把输出里的 `task_id` 告诉你，你接着按第 4 步等。
 - 对外开放：应用默认只本机能打开（`exposure: local`）。New API 管着上游 Key，Hermes 的控制台能执行命令，要开放到局域网或公网（`acornfox app set --expose …`、绑定域名）必须用户明确同意，并提醒走 HTTPS、用强密码。用户只是想自己看一眼时，优先用 `acornfox open 应用名`，不用改对外方式。New API 装好时平台已替用户关掉自助注册（只有管理员账号能登录）；如果安装任务 `init` 步骤的说明里写着“没能关闭自助注册”，开放前先请用户登录 New API，在“系统设置”里关掉“允许新用户注册”。
 - 花钱：在 New API 里加上游渠道会产生模型费用，由用户自己在 New API 页面里加。
 - 内存不够（`CAT-INST-05`）：调小别的应用或调大整机上限都要用户同意。
 - 删掉同名的旧应用（`CAT-INST-03`）：会删数据，先问。
-- 以前同名应用留下的数据卷（`CAT-INST-24`）：先问用户旧数据还要不要。要接着用旧数据，就在同一条安装命令后面加 `--reuse-data` 重装（账号密码和以前一样；少数情况平台没留下以前的记录，首次登录会写“沿用旧数据里的”，让用户用自己记得的旧密码）；不要旧数据就用 `--name 新名字` 装，或者确定不要了由用户自己运行 `message` 里卷名对应的 `docker volume rm` 后再装。你不要替用户删。`--reuse-data` 只接上数据和账号，**对外方式会回到只本机**：以前开放过局域网的，装好后先告诉用户，问要不要照旧开放（提醒照“装好后怎么打开”第 2 条说），同意后再改。
+- 应用要更新版本的 AcornFox 才能装（目录里 `needs_platform` 不为空，或安装报错里带 `needs_platform`：`CAT-INST-08` 一定带，`CAT-INST-29` 有的带）：升级 AcornFox 要用户同意，见下面“要先升级 AcornFox 才能装的应用”。
+- 以前同名应用留下的数据卷（`CAT-INST-24`）：先问用户旧数据还要不要。要接着用旧数据，就在同一条安装命令后面加 `--reuse-data` 重装（账号密码和以前一样；少数情况平台没留下以前的记录，首次登录会写“沿用旧数据里的”，让用户用自己记得的旧密码）；不要旧数据就用 `--name 新名字` 装，或者确定不要了由用户自己运行 `message` 里卷名对应的 `docker volume rm` 后再装。你不要替用户删。接上旧数据时这次没写的设置按以前的来，见下面“换应用版本、删了再接上旧数据重装”。**对外方式会回到只本机**：以前开放过局域网的，装好后先告诉用户，问要不要照旧开放（提醒照“装好后怎么打开”第 2 条说），同意后再改。
 - 用户要改平台自动填的值（例如时区、下载源）：先 `acornfox --json catalog platform-vars` 看 `user_can_set` 是不是 `true`，是才加 `--set platform.名字=值`（只对这次装的应用生效）。`false` 的（网络区域、访问地址、平台 Key）不能改，不要试。
-- 删掉用了本机 New API 的应用（例如 Hermes）时，AcornFox 会顺带吊销给它发的令牌；返回里有 `warnings`（New API 没在跑，没吊销成）时，告诉用户去 New API 的“令牌”页删掉 `acornfox-应用名`。
+- 连数据一起删掉（`--volumes`）用了本机 New API 的应用（例如 Hermes）时，AcornFox 会顺带吊销给它发的令牌；返回里有 `warnings`（New API 没在跑，没吊销成）时，告诉用户去 New API 的“令牌”页删掉 `acornfox-应用名`。只删应用、保留数据时（v0.5.1 起），令牌跟着数据留下，以后接上旧数据重装时接着用，不用去 New API 里删。
 
 **常见故障编号（完整列表和含义以 `acornfox/internal/appinstall/faults.go` 为准，服务器回的 `hint` 就是处理方法）：**
 
 | 编号 | 意思 | 怎么办 |
 | --- | --- | --- |
 | `CAT-INST-01` | 目录里没有这个应用、配方或版本 | `acornfox --json catalog list` 看有哪些 |
-| `CAT-INST-02` | 参数不对 | 按 `message` 改 `--set`；`acornfox --json catalog info 应用` 看参数 |
+| `CAT-INST-02` | 参数不对 | 按 `message` 改 `--set`；`acornfox --json catalog info 应用` 看参数。接上旧数据重装时 `message` 说“原来用本机的 … 现在本机没有它了”：停下问用户用哪个大模型（`--llm local` 本机在运行的 New API，或 `--llm own` 自己的 Key），再重新提交 |
 | `CAT-INST-03` | 已有同名应用 | `--name 新名字`；要重装先问用户再删旧的 |
 | `CAT-INST-04` | 同一个应用正在装 | 不要重复提交；用错误里的 `task_id` 查进度 |
 | `CAT-INST-05` | 内存不够 | 问用户：调小别的应用或调大整机上限 |
-| `CAT-INST-08` | AcornFox 版本太旧 | 问用户是否升级 AcornFox |
+| `CAT-INST-08` | AcornFox 版本太旧，这个应用要更新的版本才能装 | 停下问用户是否升级 AcornFox（见下面“要先升级 AcornFox 才能装的应用”） |
 | `CAT-INST-09` | 平台 Key 即将开放 | 改用 `--llm local`（本机 New API）或 `--llm own`（问用户要 Key） |
-| `CAT-INST-10` | 本机没有在运行的 New API | 先 `acornfox --json install new-api`，或装配方 `hermes-with-new-api` |
-| `CAT-INST-11` | 本机 New API 发不出令牌 | `acornfox --json status new-api` 看它在不在跑；管理员密码改过就改用 `--llm own` |
-| `CAT-INST-12` | 镜像拉不到 | 稍后重试；国内网络看 `acornfox doctor --json` |
+| `CAT-INST-10` | 要用的本机 New API 没装、停着或没在运行 | 看 `message`：说“装着但停着”的，**停下问用户**要不要启动它，同意后 `acornfox --json start 网关名`：它会等到运行才返回，输出里 `running: true` 就是已经在运行，直接用原来的命令重新提交；`running` 不是 `true`，或者报 `start_timeout`，再 `acornfox --json status 网关名` 看原因、告诉用户。用户不想启动就问他要不要改用 `--llm own`（自己的 Key）。这种情况**不要** `install new-api`（同名的已经装着，会报 `CAT-INST-03`）。说“容器却没起来”的，`acornfox --json status 网关名` 看它怎么了，把原因告诉用户。本机还没有 New API 时，才先 `acornfox --json install new-api`，或装配方 `hermes-with-new-api` |
+| `CAT-INST-11` | 本机 New API 发不出令牌 | `acornfox --json status new-api` 看它在不在跑；管理员密码改过就改用 `--llm own`；`message` 里有 `HTTP 429` 是 New API 限制了登录和取令牌的次数（同一来源 20 分钟 20 次）：告诉用户等 20 分钟再装，不要反复重试 |
+| `CAT-INST-12` | 镜像拉不到 | 稍后重试；国内网络看 `sudo acornfox doctor --json` 的“下载网关”一项（不加 sudo 时这一项不查） |
 | `CAT-INST-13` | 下载网关给的镜像包和目录里的校验值对不上（没导入） | 会自动换公共源；不要手动绕过 |
 | `CAT-INST-15` | 没能上线 | 看 `fault.diagnosis`，按“部署诊断码”处理；`acornfox logs 应用` |
 | `CAT-INST-16` | 健康检查不过 | `acornfox logs 应用` 看日志；内存太小时问用户调大 |
@@ -886,10 +914,107 @@ acornfox remove postgres --json [--volumes]
 | `CAT-INST-18` | 安装途中服务重启 | 重新安装 |
 | `CAT-INST-24` | 以前同名应用的数据卷还在 | 停下问用户（见上面“必须先停下问用户的”） |
 | `CAT-INST-25`、`CAT-INST-26` | 和私有目录有关（这一版私有目录还没开放） | 不要自己想办法绕过，把原始输出交给用户 |
-| `CAT-INST-27` | 磁盘不够（`message` 里有要多少、剩多少） | 停下问用户：删掉不用的应用或镜像、或扩容磁盘，都由用户确认后做；你不要替用户删 |
+| `CAT-INST-27` | 磁盘不够（`message` 里有要多少、剩多少） | 先运行 `acornfox faults CAT-INST-27 --json`，按 `steps` 只读查清是什么占了空间（`df`、`du` 直接做，不用问）。删掉不用的应用、镜像或找出来的大文件，或者扩容磁盘，都先告诉用户是什么、多大，用户确认后才做；你不要替用户删。清出来的空间够了就再装一次，装成功才算好；`doctor` 的磁盘一项剩余不到 10 GB 时仍是警告，不影响这次安装 |
 | `CAT-INST-28` | 改平台变量不对（没有这个变量、不能改、格式不对） | 去掉那个 `--set platform.…`；`acornfox --json catalog platform-vars` 看哪些能改 |
+| `CAT-INST-29`（v0.5.1 起） | 这个应用里有这个版本的 AcornFox 不认识的写法 | 看错误里有没有 `needs_platform`（`--json` 输出的 `diagnosis.needs_platform`）：有，就和 `CAT-INST-08` 一样处理，它的值是要升到的版本；没有，是目录有问题，不要升级，把 `message` 原话告诉用户，过一段时间再试。不要按 `hint` 里有没有“升级”两个字判断（两种情况的 `hint` 是同一句） |
+| `CAT-INST-30`（v0.5.1 起） | 安装还在进行，正在做的那一步比平常慢很多（`install status` 输出 `stuck: true`），还没失败 | 运行输出里的 `next_command`（只读）看原因，把 `say` 和要点告诉用户，问接着等还是不装；不要删除、重装、重启服务 |
 
 **可以发挥的地方：** 用户只说“想要一个能接飞书的 AI 助手”时，可以推荐配方 `hermes-with-new-api` 并解释两步（装好后在 New API 里加上游渠道）。这个配方固定让 Hermes 用本机 New API，要用自己的 Key 就单独装 `hermes-agent --llm own`（配方里给 `--llm own` 会报 `CAT-INST-02`）。New API 没加渠道时，Hermes 调模型会返回 503“没有可用渠道”，这是正常的，提醒用户去加渠道。
+
+### 换应用版本、删了再接上旧数据重装
+
+这一版没有“把已装的应用升级到目录里的新版本”的功能。用户要换应用的版本（或者删掉应用后又想装回来），做法是删掉应用、保留数据，再用原来的安装命令加 `--reuse-data` 装回来。
+
+**最低路径（照着做）：**
+
+1. 删除前先 `acornfox --json status 应用名` 看一眼它现在的状态。和你之前告诉用户的对不上时（例如你说过“卡住”，它其实已经在运行），先把实际情况告诉用户，再问还要不要删。删除要先问用户（会停掉应用）。同意后 `acornfox --json delete 应用名`（**不加** `--volumes`，数据卷保留）。Hermes 还连着 New API 时，要换 New API 先删 Hermes。这个应用用的是本机 New API（例如 Hermes 接本机 New API）时，删除前再 `acornfox --json status new-api` 看一眼：它停着的，先告诉用户并问要不要启动，启动好了再删，免得删了以后装不回来、应用一直不在。
+2. 只是删了装回原来的版本：跳过这一步。要换新版本的，`acornfox --json catalog sync` 后 `acornfox --json catalog info 应用` 看目录里的版本。
+3. 用原来的安装命令加 `--reuse-data`，不等：`acornfox --json install 应用 --reuse-data --no-wait`（装的时候用了 `--name` 的，用同一个名字）。**不用**把以前的 `--set`、`--llm` 再写一遍：没写的都按以前的来。用户这次明确要改的才写上。
+4. 照“从应用中心装应用”第 4 步等它装完（`acornfox --json install status TASK_ID --wait`），直到 `done` 是 `true`。没到之前什么结论都不下，旧令牌的事也一样（见第 5 步）。
+5. 成功后先照“从应用中心装应用”第 5 步做（`first_login`、`user_steps`、`must_tell`，再按“装好后怎么打开”从第 1 步 `acornfox --json apps` 做起），然后把任务 `apps[]` 里这几项告诉用户（v0.5.1 起才有；没有这几项是服务器版本旧，设置可能没沿用，照实说）：
+   - `carried`：沿用了什么，一条一句，照原话转述（例如“沿用以前改过的平台变量：platform.tz=Asia/Tokyo”“大模型沿用原来的：本机的 new-api”“接着用以前在 new-api 里给它的令牌”）。
+   - `kept_files`：数据里原有、没有重写的配置文件（用户和应用自己改过的内容都还在）。
+   - `file_backups`：因为平台要填的内容变了（`steps` 里“写配置”一步的 `message` 写着变了什么）而重写的配置文件，`backup` 是旧文件另存的名字（在应用的数据卷里）。告诉用户：以前自己改过的内容在这个旧文件里，需要的话照着抄回去；你不要替用户进容器改。
+   - `carried` 里以“没能吊销以前在 … 里给 … 的令牌”开头的一句：**必须原话告诉用户**。那是以前给这个应用的一把不限额、不过期的令牌，New API 当时停着（或连不上）没吊销成，平台以后不会再试；要用户在 New API 运行时到它的“令牌”页按这句话里说的名字和结尾删掉。你不要替用户删。
+   - 换了大模型来源（例如这次加了 `--llm own`）时，原来那把令牌怎么样了**只看 `carried`**（v0.5.1 起这句也在 `must_tell` 里）：有“……已吊销”那句才说已吊销；有“没能吊销……”那句就原话转述；任务还没到 `succeeded` 时只说“装好后会告诉你旧令牌的处理结果”。吊销在装好之后、“初始化”一步里才做，结果到 `succeeded` 时才出现。**不要**因为这次 `apps[]` 里没有 `gateway_token`，就说“没有 New API 令牌”“不用去 New API 里管”。
+6. 对外方式回到只本机：照“装好后怎么打开”做（先 `acornfox --json apps` 看 `open_hint`）；以前开放过局域网的，先告诉用户，问要不要照旧开放（见上面“必须先停下问用户的”里 `CAT-INST-24` 那条）。
+
+沿用的规矩（判断用，不用念给用户）：
+
+| 设置 | 这次没写 | 这次写了 |
+| --- | --- | --- |
+| 账号密码、平台生成的密钥 | 和以前一样 | 以这次为准 |
+| 以前 `--set platform.名字=值` 改过的平台变量 | 恢复以前改的值。v0.5.0 装的应用分不出来，`carried` 里会说“要这次再写一遍”：问用户以前改过哪些，再加 `--set` 重装 | 以这次为准 |
+| 大模型来源 | 自己的 Key 照旧；本机 New API 还在运行就接着用，令牌也接着用原来那把；那个 New API 停着报 `CAT-INST-10`（见上表，问用户后启动它）；本机没有它了报 `CAT-INST-02`（见上表） | 以这次为准：这次选的还是原来那个本机 New API（`--llm local`）时接着用原来那把令牌；换了来源（例如 `--llm own`）时，原来那把在装好后吊销（New API 那时停着就吊销不了，`carried` 里会说）；吊销成没成只看装好后的 `carried`，不要自己推断（见上面第 5 步） |
+| 数据里已有的配置文件 | 平台要填的内容没变就不重写；变了（换了大模型、原来的令牌没了、新版本改了模板）就重写，旧文件先另存为 `文件名.bak-时间`；上一次接旧数据没装好、已经改写过的，这次也重写（旧文件再另存一份） | 同左 |
+
+**可以发挥的地方：** 新版本能不能读旧数据由应用自己决定；用户的数据很重要时，建议先让用户自己备份数据卷再换版本。
+
+### 要先升级 AcornFox 才能装的应用（v0.5.1 起）
+
+目录里有的应用或配方要更新版本的 AcornFox 才能装。v0.5.1 起，目录列表会提前标出来；更早的版本没有这个标记，要到安装时才报 `CAT-INST-08`。
+
+**最低路径（照着做）：**
+
+1. 认出来（符合任意一条）：
+   - `acornfox --json catalog list` 或 `acornfox --json catalog info 应用` 里，这个应用或配方的 `needs_platform` 不为空。它的值就是要升到的版本，例如 `"0.6.0"`。不带 `--json` 时显示“要先升级到 0.6.0”。
+   - 安装返回 `CAT-INST-08`（v0.5.1 起错误里带 `needs_platform`，就是要升到的版本；在 `--json` 输出的 `diagnosis.needs_platform`）。
+   - 安装返回 `CAT-INST-29`，并且错误里带 `needs_platform`（`diagnosis.needs_platform` 不为空）。不带的是目录有问题，不算。
+2. 不提交安装；已经报错的，不要换参数、换版本号重试。
+3. 告诉用户：“这个应用需要更新版本的 AcornFox（要 0.6.0，这台服务器现在是 …）”。现在的版本用 `acornfox --json version` 看。
+4. **停下问用户**要不要升级 AcornFox。升级是改服务器级设置，必须用户同意；同意后按“升级、卸载”一节的命令和规矩做（国内、海外二选一，不加 `-y`），不要另找命令。
+5. 升级完，重新运行 `acornfox --json catalog list`，确认这个应用的 `needs_platform` 已经是空的，再回到上面的最低路径安装。
+
+**几种情况：**
+
+- 升级后 `needs_platform` 还不为空：最新版的 AcornFox 也还不够新，这个应用要等下一个版本。告诉用户，不要反复升级。
+- `CAT-INST-29` 的错误里不带 `needs_platform`：是目录有问题，不是版本的事，升级没用。把原话告诉用户，过一段时间再试；一直不行，请用户反馈给维护者。
+- 用户不同意升级：不装这个应用。可以问用户要不要换一个不用升级的（`needs_platform` 为空的）。
+
+### 查一个应用是用什么设置装的（v0.5.1 起）
+
+什么时候用：用户问“这个应用的密码、地址、时区、模型是怎么设的”“当时填的是哪个 Key”，或者排查应用配置（例如怀疑时区、下载源、模型地址不对）时。只对从应用中心装的应用有用。只读，不改任何东西。v0.5.1 之前没有这个命令（报用法错误，退出码 2），告诉用户要 v0.5.1 起才有，不要自己去翻容器。
+
+**最低路径（照着做）：**
+
+1. 运行。应用名必须写，这个命令不会按当前目录猜（`acornfox --json apps` 看有哪些）：
+
+   ```bash
+   acornfox --json apps vars 应用名
+   ```
+
+2. 先看三处：
+   - `from_catalog` 是 `false`：不是从应用中心装的，没有这些变量。把 `notes` 告诉用户；它的环境变量用 `acornfox env list --app 应用名 --json` 看。到此为止。
+   - `manifest.source`：`install`（安装时保存的清单）、`backfill`（升级后补存的）都照常往下看；`manifest.saved` 是 `false` 见下面“清单没存”。
+   - `notes`：给人看的说明，转述给用户。
+3. 读 `vars`，每个变量一行，按用户问的找对应的行。判断用英文取值，说给用户听用同名的 `*_label`（中文）：
+
+   | 列 | 意思 |
+   | --- | --- |
+   | `name` | `params.名字` 是这个应用自己的参数；`platform.名字` 是平台按这台机器给的（`platform.tz` 时区、`platform.app.url` 访问地址、`platform.llm.model.chat` 默认对话模型、`platform.mirror.pypi` 和 `platform.mirror.npm` 下载源、`platform.region` 网络区域）。大模型参数拆成 `params.名字.source`、`.app`、`.base_url`、`.api_key`、`.model` 几行 |
+   | `layer` | 哪一层：`custom` 自定义变量（应用自己的），`system` 系统变量（平台给的） |
+   | `class` | 类别：`system` 系统给、`generated` 平台生成、`default` 有默认值、`optional` 可选、`llm_source` 要选模型来源、`user_required` 必须用户填。空表示清单没存，分不出 |
+   | `value` | 安装时保存的值。`masked: true` 表示被遮住了 |
+   | `secret` | 是不是密码、密钥、Key 这一类 |
+   | `origin` | 值从哪来：`user` 用户填的、`recipe` 配方预填的、`default` 清单默认值、`generated` 平台生成的、`platform` 平台算的、`platform_user` 用户安装时用 `--set platform.名字=值` 改的、`restored` 接上旧数据时恢复的、`install_time` 装时的值（旧版本装的，那时不记是谁给的）、`unset` 没填、`old_data` 沿用旧数据里的（平台不知道，`value` 是空） |
+   | `editable` | 清单写的能不能改：`never` 不能改、`always` 随时能改、`reinstall` 重装才能改、`install_only` 只能在安装时用 `--set platform.名字=值` 改；空是清单没写或没存。**这只是清单的说法，现在哪一种都还改不了**（见下面） |
+   | `used` | 只有系统变量有：这个应用用没用到它。`false` 表示这个值对这个应用不起作用 |
+
+4. 只回答用户问的那几项，不用把整张表念一遍。密码、密钥、Key 默认只显示后 4 位（`******` 加后 4 位；不到 12 个字符的全遮成 `******`）。说到它们时只说“有值、后 4 位是什么、谁给的”。
+
+**必须先停下问用户的：**
+
+- 看完整的密码和 Key（`--reveal`）：**先问用户**，同意了才运行 `acornfox --json apps vars 应用名 --reveal`。看到的密码和 Key **不要在对话里复述**，也不要写进文件、提交信息或别的命令。用户只是想自己看密码时，优先请他自己在服务器上运行 `acornfox apps vars 应用名 --reveal`，或在控制台的应用详情里看。
+- 用户要改设置：**现在只能看，不能改**（输出里 `can_change` 一定是 `false`）。照实告诉用户“改设置的功能还没有”。**不要**自己去改容器、进容器改配置文件、改数据卷里的文件，也不要用 `acornfox env set` 绕过：这样改平台不知道，这里显示的值就和实际对不上，以后重装或升级还可能被盖掉。用户坚持要换某一项时，停下说明现在没有稳妥的改法，由用户决定怎么办，不要替他动手。应用自己后台里能改的（例如 New API 的管理员密码）由用户在应用里改；改了以后这里显示的仍是安装时的值。
+
+**几种情况：**
+
+- 清单没存（`manifest.saved` 是 `false`，`notes` 里有“清单没存，分不出类别”）：这个应用是 v0.5.1 之前装的，那时不保存清单，升级后本机也找不到它那一版的应用包，所以补不上。应用照常运行，不用处理。这时 `class` 都是空，自定义变量分不出哪些是密码，**一律按密码遮住**（用户名也会被遮住）。照实告诉用户“这个应用装得早，只能列出保存的值，分不出类别”，不要猜。
+- `origin` 是 `install_time`：旧版本装的应用，那时不记每个值是谁给的，分不出哪些是用户改过的。照实说“装时的值”，不要说成“默认值”或“用户填的”。
+- `from_catalog` 是 `true` 但 `vars` 是空：应用还在安装，等安装任务结束再查。
+- `CAT-INST-22`：没有这个应用，`acornfox --json apps` 看名字。
+- `CAT-INST-20`：保存的参数解不开。不要自己想办法，把原始输出交给用户。
+- 这里显示的是**安装时保存的值**，不是从容器里现读的。用户怀疑应用里实际的值和它不一样时，照实说明这一点。
 
 ### 私有目录
 
@@ -903,6 +1028,7 @@ acornfox --app 应用名 start --json     # 等到观察状态是 running 才返
 acornfox --app 应用名 restart --json   # 同上
 acornfox rollback --json --app APP [--to N]   # 回到上一个可回退的版本，或第 N 版（只换程序，不动数据）
 acornfox stats APP --json       # 该应用的 CPU、内存、网络（不带应用名则是整台服务器）
+acornfox stats APP --history 1h --json   # v0.5.1 起：该应用近 1 小时的 CPU、内存（24h 是近 24 小时）；只读。历史只存在内存里，服务重启后从头记，返回的 ranges 为空说明服务端版本旧、没有历史
 acornfox domain add example.com --json
 acornfox domain list --json
 ```
@@ -974,17 +1100,59 @@ acornfox public-console enable 域名 --reset-password --json    # 忘记密码�
 acornfox public-console disable --json                        # 关闭：移除路由，公网登录的会话全部失效
 ```
 
-### 局域网打开控制台（可选）
+### 局域网打开控制台
 
-只适合放在家里、公司内网的 Linux 机器。**公网云服务器不要开**，用上面的公网访问（带 HTTPS）。
+家里、办公室局域网里的 Linux 服务器专用：局域网里的电脑、手机用浏览器打开 `http://服务器局域网地址:18802`。**云主机、公网服务器开不了**（`LAN-CONSOLE-01`），用上面的 SSH 隧道或公网访问。
+
+v0.5.1 起的规矩（更早的版本是 `enable` 时生成一个密码，只显示一次）：
+
+- 局域网服务器**第一次安装时默认已经打开**（安装时加 `--no-lan-console` 才不开）；重装、升级不会自动打开。
+- **第一次打开时在浏览器里设密码**（至少 8 位），局域网里谁先打开谁设。所以装完要提醒用户现在就去设。
+- 登录时勾“记住这台设备 90 天”，90 天内不用再输密码。
+- 只认局域网来源的访问，别的来源一律 403（`LAN-CONSOLE-02`）。局域网里不加密，只在可信的网络里用。
+
+#### 最低路径（照着做，不用判断）
 
 ```bash
-acornfox lan-console enable --json   # 返回 url 和 password（密码只显示这一次）
 acornfox lan-console status --json
-acornfox lan-console disable --json
 ```
 
-把 `url` 告诉用户；密码请用户自己记下，不要在对话里复述。
+按返回值转述，不要自己发挥：
+
+| 返回 | 对用户说什么、做什么 |
+| --- | --- |
+| `enabled: false` | 没开。用户想开，先确认这台机器在他自己的局域网里，再运行 `acornfox lan-console enable --json`（写操作） |
+| `enabled: true`，`password_set: false` | 把 `url` 给用户，请他**现在就**用局域网里的电脑打开设密码（`LAN-CONSOLE-03`） |
+| `enabled: true`，`password_set: true` | 把 `url` 给用户；把 `password_set_at`、`password_set_from` 念给他，问“是不是你设的”。`password_set_at` 是 UTC 时间（结尾带 `Z`），先换成用户当地时间再念（国内加 8 小时） |
+| `generated_password: true` | 旧版本开的，还在用当时生成的密码，照常能用 |
+
+返回里的 `devices` 是现在记住了几台设备，用户问起再说；要看是哪几台用下面的 `devices`。
+
+其他命令：
+
+```bash
+acornfox lan-console reset-password --json   # 写操作：清掉密码，所有登录和记住的设备一起作废；之后请用户重新打开 url 设密码
+acornfox lan-console devices --json          # 只读：记住的设备（编号、名称、上次使用时间和地址、到期日）
+acornfox lan-console forget 设备编号 --json    # 写操作：让一台设备失效（forget --all 是全部）；重复执行不出错
+# 用户只说了“那台手机”“那台 iPhone”没给编号：先 devices --json，按 name 找；只有一台对得上就直接 forget 它，
+# 对得上的不止一台就把这几台的名称、上次使用时间和地址列给用户，问是哪一台
+acornfox lan-console disable --json          # 写操作：关闭，密码、登录、记住的设备全部清掉
+```
+
+#### 必须先问用户的
+
+- `enable`：开之前问。云主机上不要尝试，也不要为了开它去改安全组、防火墙或 `--public-host`。
+- `reset-password`、`forget --all`、`disable`：会让所有人掉线，先问。例外：用户自己说了“忘了密码”或“设密码的不是我”，这句话就是同意，直接运行 `reset-password`，不用再问一遍；做完用 `status --json` 确认 `password_set` 是 `false`，再请用户现在就打开 `url` 重新设。
+- **不要替用户设密码，不要让用户把密码发到对话里。** 密码只在浏览器里输入。
+
+#### 出错先看哪里
+
+| 现象 | 原因和做法 |
+| --- | --- |
+| `enable` 返回 `LAN-CONSOLE-01` | 云主机或公网服务器，或服务刚启动还没判断出来。局域网机器等十几秒再试一次；云主机改用 `acornfox open` |
+| 浏览器里 403，页面写着 `LAN-CONSOLE-02` | 访问的人不在局域网里。从外面进用 `acornfox open` |
+| `acornfox doctor` 警告 `LAN-CONSOLE-03` | 开着但没设密码。请用户现在去设，或者 `disable` |
+| 浏览器打不开 `url` | 先 `status` 看开没开；再看电脑和服务器是不是同一个局域网、服务器防火墙有没有拦 18802 |
 
 ## 升级、卸载
 

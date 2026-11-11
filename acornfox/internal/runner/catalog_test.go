@@ -24,9 +24,13 @@ func (c *catalogFake) LoadImage(ctx context.Context, req LoadImageRequest) (Load
 	c.loaded = append(c.loaded, req)
 	return LoadImageResponse{Loaded: []string{"x:y"}}, nil
 }
-func (c *catalogFake) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) error {
+func (c *catalogFake) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) (WriteFilesResult, error) {
 	c.wrote = append(c.wrote, req)
-	return nil
+	res := WriteFilesResult{}
+	for _, f := range req.Files {
+		res.Written = append(res.Written, f.Path)
+	}
+	return res, nil
 }
 
 func goodWrite() WriteFilesRequest {
@@ -50,6 +54,18 @@ func TestValidateWriteFiles(t *testing.T) {
 		func(r *WriteFilesRequest) { r.Files = nil },
 		func(r *WriteFilesRequest) { r.Files[0].Content = make([]byte, MaxVolumeFileBytes+1) },
 		func(r *WriteFilesRequest) { r.Image = "" },
+		// a backup must be a clean relative path of its own, and only with Overwrite
+		func(r *WriteFilesRequest) { r.Files[0].Backup = "../config.yaml.bak" },
+		func(r *WriteFilesRequest) { r.Files[0].Backup = "config.yaml" },
+		func(r *WriteFilesRequest) { r.Files[0].Backup = "x.bak"; r.Files[0].Overwrite = false },
+		func(r *WriteFilesRequest) {
+			r.Files[0].Backup = "a.bak"
+			r.Files = append(r.Files, VolumeFile{Path: "b.yaml", Overwrite: true, Backup: "a.bak"})
+		},
+		func(r *WriteFilesRequest) {
+			r.Files[0].Backup = "b.yaml"
+			r.Files = append(r.Files, VolumeFile{Path: "b.yaml", Overwrite: true})
+		},
 	}
 	for i, mut := range bad {
 		r := goodWrite()
@@ -58,6 +74,47 @@ func TestValidateWriteFiles(t *testing.T) {
 		if ValidateWriteFiles(r) == nil {
 			t.Errorf("case %d accepted", i)
 		}
+	}
+}
+
+func TestValidateWriteFilesBackup(t *testing.T) {
+	r := goodWrite()
+	r.Files[0].Backup = "config.yaml.bak-20261111-010203"
+	if err := ValidateWriteFiles(r); err != nil {
+		t.Fatalf("good backup refused: %v", err)
+	}
+}
+
+// The copy of an existing file keeps its content, mode and owner and goes to
+// the backup path; what is not a regular file, or too large, is not copied.
+func TestBackupFromTar(t *testing.T) {
+	mk := func(h tar.Header, body string) []byte {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		h.Size = int64(len(body))
+		if err := tw.WriteHeader(&h); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = tw.Write([]byte(body))
+		_ = tw.Close()
+		return buf.Bytes()
+	}
+	f := VolumeFile{Path: "config.yaml", Backup: "config.yaml.bak-1", Overwrite: true, UID: 1, GID: 1}
+	b, ok, err := backupFromTar(bytes.NewReader(mk(tar.Header{Typeflag: tar.TypeReg, Name: "config.yaml", Mode: 0o100600, Uid: 10000, Gid: 10000}, "model: x\n# mine\n")), f, 1<<20)
+	if err != nil || !ok {
+		t.Fatalf("regular file not copied: %v %v", ok, err)
+	}
+	if b.Path != "config.yaml.bak-1" || string(b.Content) != "model: x\n# mine\n" || b.Mode != 0o600 || b.UID != 10000 || b.GID != 10000 || !b.Overwrite {
+		t.Fatalf("copy %+v", b)
+	}
+	if _, ok, err := backupFromTar(bytes.NewReader(mk(tar.Header{Typeflag: tar.TypeSymlink, Name: "config.yaml", Linkname: "/etc/passwd"}, "")), f, 1<<20); ok || err != nil {
+		t.Fatalf("symlink copied: %v %v", ok, err)
+	}
+	if _, ok, err := backupFromTar(bytes.NewReader(mk(tar.Header{Typeflag: tar.TypeReg, Name: "config.yaml", Mode: 0o644}, "0123456789")), f, 4); ok || err != nil {
+		t.Fatalf("too large copied: %v %v", ok, err)
+	}
+	if _, _, err := backupFromTar(bytes.NewReader(nil), f, 4); err == nil {
+		t.Fatal("empty archive accepted")
 	}
 }
 
@@ -99,6 +156,42 @@ func TestImageMatchesDigest(t *testing.T) {
 	}
 }
 
+func TestImageArchFits(t *testing.T) {
+	for _, c := range []struct {
+		have, want string
+		ok         bool
+	}{
+		{"amd64", "amd64", true},
+		{"amd64", "arm64", false},
+		{"arm64", "amd64", false},
+		{"amd64", "", true}, // an older server does not say
+		{"", "arm64", true}, // an image that does not say
+	} {
+		if imageArchFits(c.have, c.want) != c.ok {
+			t.Errorf("%q on %q: want %v", c.have, c.want, c.ok)
+		}
+	}
+}
+
+func TestValidateAdoptArch(t *testing.T) {
+	d := "sha256:" + string(bytes.Repeat([]byte("a"), 64))
+	good := AdoptImageRequest{App: "hermes", DeploymentID: "0123456789ab", Refs: []string{"x/y:1"}, Digest: d}
+	for _, arch := range []string{"", "amd64", "arm64", "riscv64"} {
+		r := good
+		r.Arch = arch
+		if err := validateAdopt(r); err != nil {
+			t.Errorf("arch %q refused: %v", arch, err)
+		}
+	}
+	for _, arch := range []string{"AMD64", "linux/arm64", "a", "arm64 ", "x86-64", string(bytes.Repeat([]byte("a"), 17))} {
+		r := good
+		r.Arch = arch
+		if validateAdopt(r) == nil {
+			t.Errorf("arch %q accepted", arch)
+		}
+	}
+}
+
 func TestServerCatalogRoutes(t *testing.T) {
 	api := &catalogFake{fakeAPI: &fakeAPI{}}
 	cli := startTestServer(t, NewServer(api, "/var/lib/acornfox/uploads"))
@@ -123,11 +216,11 @@ func TestServerCatalogRoutes(t *testing.T) {
 	}
 	bad := goodWrite()
 	bad.Files[0].Path = "../x"
-	if err := cli.WriteVolumeFiles(ctx, bad); !errors.As(err, &re) || re.Status != http.StatusBadRequest {
+	if _, err := cli.WriteVolumeFiles(ctx, bad); !errors.As(err, &re) || re.Status != http.StatusBadRequest {
 		t.Fatalf("bad write: %v", err)
 	}
-	if err := cli.WriteVolumeFiles(ctx, goodWrite()); err != nil || len(api.wrote) != 1 {
-		t.Fatalf("write: %v %d", err, len(api.wrote))
+	if res, err := cli.WriteVolumeFiles(ctx, goodWrite()); err != nil || len(api.wrote) != 1 || !res.OK || len(res.Written) != 1 || res.Written[0] != "config.yaml" {
+		t.Fatalf("write: %v %d %+v", err, len(api.wrote), res)
 	}
 	if _, err := cli.AdoptImage(ctx, AdoptImageRequest{App: "hermes", DeploymentID: "0123456789ab", Refs: []string{"a/b:c"}, Digest: "sha256:short"}); !errors.As(err, &re) {
 		t.Fatalf("bad digest: %v", err)
@@ -145,7 +238,7 @@ func TestServerCatalogRoutes(t *testing.T) {
 
 	// A runner API without the app-center operations answers 501.
 	plain := startTestServer(t, NewServer(&fakeAPI{}, "/var/lib/acornfox/uploads"))
-	if err := plain.WriteVolumeFiles(ctx, goodWrite()); !errors.As(err, &re) || re.Status != http.StatusNotImplemented {
+	if _, err := plain.WriteVolumeFiles(ctx, goodWrite()); !errors.As(err, &re) || re.Status != http.StatusNotImplemented {
 		t.Fatalf("unsupported: %v", err)
 	}
 }

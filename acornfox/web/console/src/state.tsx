@@ -5,7 +5,7 @@ import { api } from './lib/api'
 import { usePoll } from './lib/hooks'
 import { installingApps } from './lib/catalog'
 import type { AppView, CatalogView, Resources, ServerStatus, Session, TaskView } from './lib/types'
-import { applyTheme, loadTheme, type Theme } from './lib/theme'
+import { applyAccent, applyTheme, loadAccent, loadTheme, type Accent, type Theme } from './lib/theme'
 
 // catalog：私有目录的编号；没有或 public 是公共目录。
 export type InstallTarget = { kind: 'app' | 'recipe'; id: string; taskId?: string; catalog?: string }
@@ -26,6 +26,8 @@ export interface ConsoleState {
   status: ServerStatus | null
   theme: Theme
   setTheme: (t: Theme) => void
+  accent: Accent
+  setAccent: (a: Accent) => void
   install: (t: InstallTarget) => void
 }
 
@@ -54,6 +56,11 @@ export function ConsoleProvider({ session, install, children }: {
     applyTheme(t)
     setThemeRaw(t)
   }, [])
+  const [accent, setAccentRaw] = React.useState<Accent>(loadAccent)
+  const setAccent = React.useCallback((a: Accent) => {
+    applyAccent(a)
+    setAccentRaw(a)
+  }, [])
 
   const taskList = tasks.data || []
   const installing = React.useMemo(() => installingApps(taskList), [taskList])
@@ -74,6 +81,8 @@ export function ConsoleProvider({ session, install, children }: {
     status: status.data,
     theme,
     setTheme,
+    accent,
+    setAccent,
     install,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

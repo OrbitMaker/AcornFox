@@ -8,13 +8,19 @@
 // a schema cannot express (references between files, licence obligations,
 // safe defaults). Every problem carries a stable code (CAT-LINT-*) so that a
 // workbench can branch on it.
+//
+// Around that sit: the feature table (features.go), from which lint works out
+// the lowest platform version a manifest needs; the variable report (vars.go),
+// which classifies every variable of a manifest for whoever checks an app
+// before it is listed; and
+// the gaps register check (gaps.go).
 package catalog
 
 import (
 	"embed"
 )
 
-//go:embed schema/manifest.schema.json schema/recipe.schema.json
+//go:embed schema/manifest.schema.json schema/recipe.schema.json schema/gaps.schema.json
 var schemaFS embed.FS
 
 // Manifest is the part of an app manifest the platform reads. Unknown fields
@@ -87,6 +93,11 @@ type Image struct {
 	// when it matches them; without ArtifactSHA256 the gateway is not used.
 	ArtifactSHA256 string `yaml:"artifact_sha256" json:"artifact_sha256,omitempty"`
 	ArtifactSize   int64  `yaml:"artifact_size" json:"artifact_size,omitempty"`
+	// Artifacts names one gateway archive per CPU architecture (key "amd64"
+	// or "arm64"), from platform 0.5.1 on. A manifest writes either this or
+	// the single archive above, which stands for amd64 only. Read the image
+	// archive through ArtifactFor, never these fields directly (arch.go).
+	Artifacts map[string]ArchArtifact `yaml:"artifacts" json:"artifacts,omitempty"`
 }
 
 type Container struct {
@@ -225,6 +236,11 @@ type Recipe struct {
 	Apps     []RecipeApp `yaml:"apps" json:"apps"`
 	Links    []Link      `yaml:"links" json:"links,omitempty"`
 	Delivery Delivery    `yaml:"delivery" json:"delivery"`
+	// MinPlatform is the lowest platform version that can install the recipe.
+	// A recipe file may leave it out; build works it out (what the recipe
+	// writes and what its apps need) and always fills it in for the recipes
+	// it lists under recipes_v2.
+	MinPlatform string `yaml:"min_platform" json:"min_platform,omitempty"`
 }
 
 type RecipeApp struct {

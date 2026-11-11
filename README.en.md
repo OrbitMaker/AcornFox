@@ -25,7 +25,7 @@ AcornFox is an open-source deployment platform for your own Linux server. Ask an
 
 - **Deploy from anywhere**: a local folder, a Git repository or a Docker image
 - **Built for AI coding tools**: deploy by asking in plain language
-- **Structured diagnoses**: a failed deploy says which step stopped, why and what to change, so the AI can fix it
+- **Structured diagnoses**: a failed deploy says which step stopped, why and what to change, so the AI can fix it; `acornfox faults CODE` explains any fault code
 - **Add-on services**: add PostgreSQL, MySQL or Redis with one command
 - **Logs and metrics**: follow logs live and see resource usage
 - **Automatic HTTPS**: certificates for your domains (in mainland China the domain needs an ICP filing)
@@ -59,7 +59,7 @@ The AI installs the Skill first. The Skill then works out separately whether you
 | --- | --- |
 | System | Ubuntu 22.04 or 24.04, Debian 12 or 13 (x86_64; fresh install, self-check and deployment tested on all four). Ubuntu 24.04 or Debian 13 recommended. arm64 is not tested yet |
 | Size | At least 2 CPU cores and 2 GB of memory; root or sudo required |
-| Ports | 18800, 18801, 18808 (used by AcornFox itself, local only) and 18810-18899 (app ports) must be free; the installer stops otherwise and this cannot be skipped. 80 and 443 should preferably be free; if BaoTa, 1Panel or Nginx already uses them, see the note below |
+| Ports | 18800, 18801, 18808 (used by AcornFox itself, local only) and 18810-18899 (app ports) must be free; the installer stops otherwise and this cannot be skipped. 80 and 443 should preferably be free; if BaoTa, 1Panel or Nginx already uses them, see the note below. 18802 is the LAN console; if it is in use, the LAN console is simply not opened |
 
 > **When buying a cloud server in mainland China, choose Ubuntu 24.04 (or Debian 13).** Alibaba Cloud Linux (Alibaba Cloud's default), OpenCloudOS / TencentOS (Tencent Cloud's default), veLinux (Volcano Engine's default), CentOS, Rocky and similar systems are not supported; the installer stops with fault code `INSTALL-OS-01`. Ubuntu or Debian versions outside the list above (for example Ubuntu 20.04 or Debian 11) stop with `INSTALL-OS-02`; switch to a supported version.
 
@@ -77,6 +77,8 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.
 ```
 
 When it finishes, the installer shows an admin token (also saved in `/root/.acornfox-token`). Keep it safe.
+
+If the server is on your home or office network (a private address, not a cloud server), the first install opens the LAN console at `http://SERVER_LAN_ADDRESS:18802`; you set its password in the browser the first time you open it. To leave it closed, add `--no-lan-console`: `curl … | sudo bash -s -- --no-lan-console`. It is never opened on cloud servers.
 
 - On Alibaba Cloud, Tencent Cloud and Volcano Engine (any region), the installer uses that provider's internal package sources first (system packages and the Docker installer), so nothing goes over the public internet or counts against traffic, and falls back to the next source if they cannot be reached. Huawei Cloud and other servers in mainland China use domestic public mirrors such as Huawei's.
 - Afterwards, as the installer reminds you, allow inbound TCP 18810-18899 (app ports) in the security group, plus 80 and 443 if you bind a domain.
@@ -130,7 +132,7 @@ acornfox open new-api                              # open it from your computer 
 - Large images (such as Hermes Agent's) come through the AcornFox download gateway, with progress shown and resumable downloads; if the gateway fails, the image is pulled from public registries.
 - Installed apps listen only on the server itself by default. Open one with `acornfox open APP` on your computer, or, if the server is on your local network, switch it to LAN access in the console (this opens the port on all of the server's network interfaces; the console asks you to confirm).
 - The first-login password is masked in the output; see it in the console's app details or with `acornfox install status TASK_ID --show-secrets`.
-- `acornfox delete APP` keeps the app's data by default. `acornfox install APP --reuse-data` reinstalls it on the old data with the same accounts and passwords. Upgrading an installed app to a newer catalog version is done the same way in this release: delete, then reinstall with `--reuse-data`.
+- `acornfox delete APP` keeps the app's data by default. `acornfox install APP --reuse-data` reinstalls it on the old data with the same accounts and passwords. Upgrading an installed app to a newer catalog version is done the same way in this release: delete, then reinstall with `--reuse-data`. From v0.5.1 the reinstall also keeps the settings you had changed, the model source and the config files in the data, so you do not have to repeat the earlier options; `acornfox apps vars APP` shows the settings an app was installed with.
 
 ## AI coding tool integration
 
@@ -188,7 +190,13 @@ acornfox domain add example.com --app my-app # bind a domain (automatic HTTPS)
 
 # App center
 acornfox install new-api                     # install an app from the catalog
+acornfox install status TASK_ID --wait       # wait until the install finishes (up to 90 seconds; run again if not done)
+acornfox apps vars new-api                   # the settings an app was installed with
 acornfox open new-api                        # open a local-only app through an SSH tunnel
+
+# When something goes wrong
+acornfox faults CAT-INST-24                  # what a fault code means and what to do (read-only, works offline)
+sudo acornfox doctor                         # self-check on the server
 ```
 
 ## Architecture
@@ -240,6 +248,7 @@ The documents below are in Chinese.
 - [FAQ](docs/user-guide.md#常见问题)
 - [AI Skill](skills/acornfox/SKILL.md)
 - [Capabilities](docs/capabilities.md)
+- [Fault codes](docs/faults.md)
 
 What AcornFox connects to and what it sends is described at [acornfox.com/en/privacy.html](https://acornfox.com/en/privacy.html).
 
@@ -265,6 +274,7 @@ What the upgrade does:
 - If the migration fails, the new version will not start, or the upgrade is interrupted, everything is restored to how it was before (program and database, as if the upgrade never happened)
 - App containers keep running throughout; the CLI and console are briefly unavailable during the upgrade
 - When the web entry point (the Caddy container) has to be recreated, app addresses are briefly unreachable, for example when upgrading from v0.3.x (the system Caddy is disabled and replaced by a Caddy container)
+- Upgrading never opens the LAN console; one that was already open keeps working
 
 AcornFox itself only upgrades and never goes back to an older release: there is no manual rollback, and asking for an older version is refused. Rolling back your own deployed apps with `acornfox rollback` works as before. See the [user guide](docs/user-guide.md#只能升级).
 

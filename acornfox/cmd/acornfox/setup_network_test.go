@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acornfox/acornfox/internal/hostcheck"
@@ -65,25 +66,25 @@ func TestSetupNetworkFollowsInstallEnv(t *testing.T) {
 func TestGatewayBaseSharedByDoctorAndPages(t *testing.T) {
 	dir := t.TempDir()
 	env := filepath.Join(dir, "install.env")
-	old, oldProbe := linuxInstallEnv, doctorClockProbe
+	old, oldProbe := linuxInstallEnv, doctorGatewayProbes
 	linuxInstallEnv = env
-	t.Cleanup(func() { linuxInstallEnv, doctorClockProbe = old, oldProbe })
+	t.Cleanup(func() { linuxInstallEnv, doctorGatewayProbes = old, oldProbe })
 	t.Setenv("ACORNFOX_GATEWAY", "")
 	os.Unsetenv("ACORNFOX_GATEWAY")
 	dataDir := t.TempDir()
 
 	probed := []string{}
-	doctorClockProbe = func(gw string) hostcheck.ClockProbe {
+	doctorGatewayProbes = func(gw string) (hostcheck.ClockProbe, hostcheck.GatewayProbe) {
 		probed = append(probed, gw)
 		return hostcheck.ClockProbe{Sync: func(context.Context) (hostcheck.SyncStatus, error) {
 			return hostcheck.SyncStatus{SyncKnown: true, Synchronized: true}, nil
-		}}
+		}}, hostcheck.GatewayProbe{Base: gw}
 	}
 	check := func(name, want string) {
 		t.Helper()
 		probed = probed[:0]
 		r := doctorReport{OK: true}
-		doctorClock(context.Background(), &r, dataDir)
+		doctorClockAndGateway(context.Background(), &r, dataDir)
 		if len(probed) != 1 || probed[0] != want {
 			t.Fatalf("%s: doctor probed %q, want %q", name, probed, want)
 		}
@@ -115,4 +116,68 @@ func TestGatewayBaseSharedByDoctorAndPages(t *testing.T) {
 	// ACORNFOX_GATEWAY wins.
 	t.Setenv("ACORNFOX_GATEWAY", "https://gw.example.test")
 	check("env", "https://gw.example.test")
+}
+
+// A user who may not read the data directory (doctor without sudo) cannot see
+// whether network.json turned the gateway off, so doctor must not contact
+// it: the clock is judged by time sync alone and the gateway line says to use
+// sudo. Seen on a test machine: with the gateway turned off, `acornfox
+// doctor` run by a member of acornfox-users still sent its HEAD.
+func TestDoctorWithoutAccessToTheSettingDoesNotContactTheGateway(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every file; run as a normal user")
+	}
+	old, oldProbe := linuxInstallEnv, doctorGatewayProbes
+	linuxInstallEnv = filepath.Join(t.TempDir(), "install.env")
+	t.Cleanup(func() { linuxInstallEnv, doctorGatewayProbes = old, oldProbe })
+	t.Setenv("ACORNFOX_GATEWAY", "")
+	os.Unsetenv("ACORNFOX_GATEWAY")
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.SaveNetwork(dataDir, platform.Network{Gateway: "off"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dataDir, 0o100); err != nil { // like /var/lib/acornfox to a stranger: no read
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	if err := os.Chmod(platform.NetworkFile(dataDir), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(platform.NetworkFile(dataDir), 0o600) })
+
+	var probed []string
+	doctorGatewayProbes = func(gw string) (hostcheck.ClockProbe, hostcheck.GatewayProbe) {
+		probed = append(probed, gw)
+		return hostcheck.ClockProbe{Sync: func(context.Context) (hostcheck.SyncStatus, error) {
+			return hostcheck.SyncStatus{SyncKnown: true, Synchronized: true}, nil
+		}}, hostcheck.GatewayProbe{Base: gw}
+	}
+	if gatewaySettingReadable(dataDir) {
+		t.Fatal("the setting must count as unreadable")
+	}
+	r := doctorReport{OK: true}
+	doctorClockAndGateway(context.Background(), &r, dataDir)
+	if len(probed) != 1 || probed[0] != "" {
+		t.Fatalf("doctor must not be given a gateway to contact: %q", probed)
+	}
+	if len(r.Items) != 2 || r.Items[0].Check != "SETUP-CLOCK-01" || r.Items[1].Check != "SETUP-GW-01" ||
+		!r.Items[1].OK || !strings.Contains(r.Items[1].Text, "sudo acornfox doctor") {
+		t.Fatalf("items %+v", r.Items)
+	}
+
+	// ACORNFOX_GATEWAY set: known without the file.
+	t.Setenv("ACORNFOX_GATEWAY", "")
+	if !gatewaySettingReadable(dataDir) {
+		t.Fatal("ACORNFOX_GATEWAY decides by itself")
+	}
+	os.Unsetenv("ACORNFOX_GATEWAY")
+	// No file at all (readable directory): the default gateway, contacted.
+	_ = os.Chmod(dataDir, 0o700)
+	_ = os.Remove(platform.NetworkFile(dataDir))
+	if !gatewaySettingReadable(dataDir) {
+		t.Fatal("a missing network.json is known: the default gateway")
+	}
 }

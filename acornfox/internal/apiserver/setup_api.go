@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/acornfox/acornfox/internal/faults"
 	"github.com/acornfox/acornfox/internal/setup"
 )
 
@@ -106,7 +107,10 @@ func (s *server) setupAction(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusAccepted, s.setup.Status())
 }
 
-// GET /v1/setup/faults: the fault catalog (codes, causes, next steps).
+// GET /v1/setup/faults: every fault code in the short shape the console's
+// runtime page joins its check results to (code, title, causes, next,
+// needs_user). The setup codes read exactly as internal/setup Faults; the
+// full catalog is internal/faults (GET /v1/faults).
 func (s *server) getSetupFaults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"faults": setup.Faults})
+	writeJSON(w, http.StatusOK, map[string]any{"faults": faults.SetupDefs()})
 }

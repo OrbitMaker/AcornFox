@@ -117,7 +117,9 @@ func (s *newAPISession) call(ctx context.Context, method, p string, body any, ou
 // IssueToken creates an unlimited, non-expiring token named name and returns
 // its value ("sk-…") and id. It spends from the user's own New API, whose
 // channels and quotas the user controls; the token is revoked when the app
-// it was issued for is removed (or its install fails).
+// it was issued for is removed with its data (or its install fails). An app
+// deleted with its data kept keeps its token, which a later install on that
+// data takes over (CheckToken checks it is still the same token).
 func (a *newAPIAdapter) IssueToken(ctx context.Context, base, user, pass, name string) (string, int, error) {
 	s, err := a.login(ctx, base, user, pass)
 	if err != nil {
@@ -163,6 +165,87 @@ func (a *newAPIAdapter) IssueToken(ctx context.Context, base, user, pass, name s
 		k = "sk-" + k
 	}
 	return k, id, nil
+}
+
+// Checking a token without revealing it: GET /api/token/{id} answers the
+// token with its value masked ("abcd**********wxyz": the first and last 4
+// characters) plus its name and status (1 = enabled), or success false
+// ("record not found") when there is no such token. Unlike POST
+// /api/token/{id}/key (and login), it is not in New API's limit for
+// critical calls (20 per 20 minutes from one address, which every call
+// from this server shares), so a check costs one login only.
+
+// tokenInfo is GET /api/token/{id} (the value masked).
+type tokenInfo struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Key    string `json:"key"`
+	Status int    `json:"status"`
+}
+
+// tokenStatusEnabled is New API's status of a usable token.
+const tokenStatusEnabled = 1
+
+func (s *newAPISession) getToken(ctx context.Context, id int) (tokenInfo, error) {
+	var t tokenInfo
+	if err := s.call(ctx, http.MethodGet, "/api/token/"+strconv.Itoa(id), nil, &t); err != nil {
+		return tokenInfo{}, fmt.Errorf("查令牌失败：%w", err)
+	}
+	return t, nil
+}
+
+// CheckToken reports whether token id is still the token whose value is
+// want (the masked value New API shows matches it), and its status. ok is
+// false, with no error, when the gateway has no such token or it is another
+// one now.
+func (a *newAPIAdapter) CheckToken(ctx context.Context, base, user, pass string, id int, want string) (ok bool, status int, err error) {
+	s, err := a.login(ctx, base, user, pass)
+	if err != nil {
+		return false, 0, err
+	}
+	t, err := s.getToken(ctx, id)
+	if err != nil {
+		return false, 0, nil // gone (or unreadable): not usable
+	}
+	return maskedTokenMatch(t.Key, want), t.Status, nil
+}
+
+// RevokeIfSame deletes token id only when it is still the token whose value
+// is want: a gateway set up anew may use the number for another app's
+// token. revoked is false, with no error, when it is gone or another one.
+func (a *newAPIAdapter) RevokeIfSame(ctx context.Context, base, user, pass string, id int, want string) (revoked bool, err error) {
+	s, err := a.login(ctx, base, user, pass)
+	if err != nil {
+		return false, err
+	}
+	t, err := s.getToken(ctx, id)
+	if err != nil || !maskedTokenMatch(t.Key, want) {
+		return false, nil
+	}
+	if err := s.call(ctx, http.MethodDelete, "/api/token/"+strconv.Itoa(id), nil, nil); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// maskedTokenMatch reports whether the value New API shows for a token
+// (masked like "abcd**********wxyz", with or without "sk-") is full. At least
+// 8 characters must be shown to tell: with fewer it says no. A value shown
+// unmasked must be equal.
+func maskedTokenMatch(masked, full string) bool {
+	masked, full = strings.TrimPrefix(masked, "sk-"), strings.TrimPrefix(full, "sk-")
+	if masked == "" || full == "" {
+		return false
+	}
+	i := strings.Index(masked, "*")
+	if i < 0 {
+		return masked == full
+	}
+	pre, suf := masked[:i], masked[strings.LastIndex(masked, "*")+1:]
+	if len(pre)+len(suf) < 8 || len(full) <= len(pre)+len(suf) {
+		return false
+	}
+	return strings.HasPrefix(full, pre) && strings.HasSuffix(full, suf)
 }
 
 // DisableRegistration turns off self-service sign-up in a freshly set up New

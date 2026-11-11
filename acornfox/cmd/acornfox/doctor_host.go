@@ -2,13 +2,16 @@ package main
 
 // Linux server checks of `acornfox doctor` besides Docker: whether the
 // acornfox-server service answers, free disk space of the data directory and
-// Docker's data root, the ports AcornFox needs and the clock (fault codes
-// SETUP-SVC-01, SETUP-DISK-01, SETUP-PORT-01..05 and SETUP-CLOCK-01 in
-// internal/setup).
+// Docker's data root, the ports AcornFox needs, the clock, the download
+// gateway and the app catalog sync (fault codes SETUP-SVC-01, SETUP-DISK-01,
+// SETUP-PORT-01..05, SETUP-CLOCK-01, SETUP-GW-01 and SETUP-SYNC-01; the full
+// entries are in internal/faults, `acornfox faults <code>`).
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -30,9 +33,14 @@ const (
 	linuxAppPortMax = 18899
 )
 
-// doctorClockProbe builds the clock check's readers for the download
-// gateway's address ("" when the gateway is off); tests replace it.
-var doctorClockProbe = hostcheck.DefaultClockProbe
+// doctorGatewayProbes builds the readers of the clock check and the download
+// gateway check for the gateway's address ("" when the gateway is off); the
+// two share one HEAD request to the gateway. Tests replace it.
+var doctorGatewayProbes = hostcheck.DefaultGatewayProbes
+
+// doctorCatalogStatus asks acornfox-server for the app catalog's sync
+// status; ok is false when it cannot be asked (tests replace it).
+var doctorCatalogStatus = queryCatalogSync
 
 // defaultDockerRoot is used when Docker does not answer.
 const defaultDockerRoot = hostcheck.DefaultDockerRoot
@@ -80,15 +88,87 @@ func linuxHostChecks(ctx context.Context, r *doctorReport, dc *dockerclient.Clie
 	}
 	doctorDisk(r, platform.DefaultPaths().DataDir, dockerRoot, hostcheck.FreeBytes, hostcheck.Device)
 	doctorPorts(r, "/proc", portCheckContainers(ctx, dc), os.Geteuid() == 0, use)
-	doctorClock(ctx, r, platform.DefaultPaths().DataDir)
+	doctorClockAndGateway(ctx, r, platform.DefaultPaths().DataDir)
+	if svc.err == nil {
+		doctorCatalog(ctx, r, socket)
+	}
+	doctorLANConsole(r, use.LANNoPassword)
 }
 
-// doctorClock compares the clock with the download gateway's (the one that
-// refuses requests more than 300 seconds off), taking the gateway's address
-// the same way the app center does (gatewayBase); no gateway, no network:
-// only the time sync status is read.
-func doctorClock(ctx context.Context, r *doctorReport, dataDir string) {
-	hostcheck.CheckClock(ctx, r, doctorClockProbe(gatewayBase(dataDir)))
+// doctorClockAndGateway checks the clock and the download gateway this
+// server uses (gatewayBase: the same address as the app center) with one
+// HEAD request to the gateway, at most 5 seconds.
+//
+// A user who may not read the data directory (not root, not the service
+// account) cannot see whether network.json turned the gateway off. doctor
+// then does not contact the gateway at all: the clock is judged by the
+// system's time sync alone, and the gateway line says to run it with sudo.
+// Turning the gateway off must stop every self check from contacting it.
+func doctorClockAndGateway(ctx context.Context, r *doctorReport, dataDir string) {
+	if !gatewaySettingReadable(dataDir) {
+		clock, _ := doctorGatewayProbes("")
+		hostcheck.CheckClock(ctx, r, clock)
+		r.add(true, "SETUP-GW-01", "下载网关：当前用户读不到这台服务器的网关设置（数据目录里的 network.json，可能已经关掉），这一项没查，也不联系网关；要查用 sudo acornfox doctor")
+		return
+	}
+	clock, gw := doctorGatewayProbes(gatewayBase(dataDir))
+	hostcheck.CheckClock(ctx, r, clock)
+	hostcheck.CheckGateway(ctx, r, gw)
+}
+
+// gatewaySettingReadable reports whether this process can tell the gateway
+// setting: ACORNFOX_GATEWAY is set, or network.json can be read, or it is
+// known not to exist. Only a permission error leaves it unknown.
+func gatewaySettingReadable(dataDir string) bool {
+	if _, ok := os.LookupEnv("ACORNFOX_GATEWAY"); ok {
+		return true
+	}
+	_, err := os.ReadFile(platform.NetworkFile(dataDir))
+	return !errors.Is(err, fs.ErrPermission)
+}
+
+// doctorCatalog reports the app catalog's last sync as acornfox-server
+// recorded it. Nothing is added when the server cannot be asked (its own
+// line already says so) or has no app center.
+func doctorCatalog(ctx context.Context, r *doctorReport, socket string) {
+	s, ok := doctorCatalogStatus(ctx, socket)
+	if !ok {
+		return
+	}
+	hostcheck.CheckCatalogSync(r, s, time.Now())
+}
+
+// queryCatalogSync reads GET /v1/catalog of acornfox-server.
+func queryCatalogSync(ctx context.Context, socket string) (hostcheck.CatalogSync, bool) {
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c, err := client.Connect(qctx, client.Target{URL: unixURL(socket)})
+	if err != nil {
+		return hostcheck.CatalogSync{}, false
+	}
+	defer c.Close()
+	ac, ok := any(c).(client.AppCenterAPI)
+	if !ok {
+		return hostcheck.CatalogSync{}, false
+	}
+	l, err := ac.Catalog(qctx)
+	if err != nil {
+		return hostcheck.CatalogSync{}, false
+	}
+	return hostcheck.CatalogSync{
+		At: l.Sync.At, OK: l.Sync.OK, Skipped: l.Sync.Skipped, Code: l.Sync.Code, Message: l.Sync.Message,
+		Source: l.Sync.Source, Serial: l.Serial, Origin: l.Origin,
+	}, true
+}
+
+// doctorLANConsole warns while the LAN console is open without a password:
+// the first visitor from the local network sets it, so it should not stay
+// that way. noPassword is the address to open ("" = nothing to report).
+func doctorLANConsole(r *doctorReport, noPassword string) {
+	if noPassword == "" {
+		return
+	}
+	r.warn("LAN-CONSOLE-03", "局域网控制台：开着（%s）但还没设密码，局域网里谁先打开谁设。现在就用局域网里的电脑打开它设一个；不用就运行 acornfox lan-console disable", noPassword)
 }
 
 // doctorService checks that acornfox-server answers on its API socket and that
@@ -124,6 +204,9 @@ type serverPortUse struct {
 	// console port when it is open. A user who is not root cannot see who
 	// holds a port; these are then counted as AcornFox's own.
 	Own map[int]bool
+	// LANNoPassword is the LAN console's address when it is open and nobody
+	// has set a password yet ("" otherwise): whoever opens it first sets it.
+	LANNoPassword string
 }
 
 // queryServerPortUse asks acornfox-server for bound domains, the public
@@ -146,8 +229,15 @@ func queryServerPortUse(ctx context.Context, socket string, healthy bool) server
 			if lanPort == 0 {
 				lanPort = publicconsole.DefaultLANPort
 			}
+			if !lc.PasswordSet {
+				out.LANNoPassword = lc.URL
+				if out.LANNoPassword == "" {
+					out.LANNoPassword = fmt.Sprintf("端口 %d", lanPort)
+				}
+			}
 		}
-		out.Own = ownServerPorts(apps, lanPort)
+		own := ownServerPorts(apps, lanPort)
+		out.Own = own
 	}
 	if appsErr != nil {
 		return out

@@ -161,18 +161,41 @@ func TestLintEmptyDir(t *testing.T) {
 	}
 }
 
+// catalogRepoSchemaDir finds the catalog repository's schema/ directory: the
+// directory named by ACORNFOX_CATALOG_REPO, else a checkout called "catalog"
+// next to this repository, else one next to the Go module (for a test
+// machine that only has the module directory).
+func catalogRepoSchemaDir() (string, bool) {
+	var candidates []string
+	if dir := os.Getenv("ACORNFOX_CATALOG_REPO"); dir != "" {
+		candidates = append(candidates, filepath.Join(dir, "schema"))
+	}
+	candidates = append(candidates,
+		filepath.Join("..", "..", "..", "..", "catalog", "schema"),
+		filepath.Join("..", "..", "..", "catalog", "schema"))
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && st.IsDir() {
+			return c, true
+		}
+	}
+	return "", false
+}
+
 func TestEmbeddedSchemasMatchCatalogCopy(t *testing.T) {
-	// The public catalog repository keeps a copy of schema/. When it is
-	// checked out next to this repository (../../catalog), they must match.
-	for _, f := range []string{"manifest.schema.json", "recipe.schema.json"} {
-		other := filepath.Join("..", "..", "..", "..", "catalog", "schema", f)
-		b2, err := os.ReadFile(other)
+	// The catalog repository keeps a copy of schema/ for editors and CI.
+	// When it is checked out nearby, the copies must match byte for byte.
+	dir, ok := catalogRepoSchemaDir()
+	if !ok {
+		t.Skip("附近没有目录仓库（可用环境变量 ACORNFOX_CATALOG_REPO 指定），跳过")
+	}
+	for _, f := range []string{"manifest.schema.json", "recipe.schema.json", "gaps.schema.json"} {
+		b2, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
-			t.Skipf("没有目录仓库的副本（%v），跳过", err)
+			t.Fatalf("目录仓库 %s 里没有 %s：格式定义改了要同步过去（%v）", dir, f, err)
 		}
 		b1, _ := schemaFS.ReadFile("schema/" + f)
 		if string(b1) != string(b2) {
-			t.Fatalf("%s 和目录仓库里的副本不一致", f)
+			t.Fatalf("%s 和目录仓库 %s 里的副本不一致", f, dir)
 		}
 	}
 }
@@ -201,6 +224,11 @@ func TestPlatformVarTable(t *testing.T) {
 		}
 		if v.Secret && v.UserCanSet {
 			t.Fatalf("%s: a secret the user can change", v.Name)
+		}
+		if v.Since != BasePlatform {
+			// The first batch shipped with the first release. A later variable
+			// carries the version that first has it; then relax this line.
+			t.Fatalf("%s: since %q, want %s", v.Name, v.Since, BasePlatform)
 		}
 	}
 	// the first batch of platform variables

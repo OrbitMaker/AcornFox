@@ -22,11 +22,18 @@ import (
 //	GET  /v1/catalog/platform-vars       platform variables apps can use, with this machine's values
 //	POST /v1/catalog/install             start an install task (202); "platform" changes user_can_set variables
 //	GET  /v1/catalog/install             recent tasks
-//	GET  /v1/catalog/install/{task}      one task's progress
+//	GET  /v1/catalog/install/{task}      one task's progress; both carry "timing", the verdict on
+//	                                     the step times by this server's clock (done, slow, stuck,
+//	                                     say, next_command, must_tell: internal/installtiming)
 //	GET  /v1/apps/{app}/first-login      first-login info; ?reveal=true shows secrets
+//	GET  /v1/apps/{app}/vars             the variables the app was installed with (read-only);
+//	                                     ?reveal=true shows secrets in full
 //
 // Errors carry the CAT-INST-* or CAT-CONN-* code:
-// {"error":{"code","message","hint","task_id","gateway_code","retry_after"}}.
+// {"error":{"code","message","hint","task_id","gateway_code","retry_after","needs_platform"}}.
+// needs_platform (the AcornFox version to upgrade to) is there exactly when
+// upgrading is the cure: CAT-INST-08, and the CAT-INST-29 of a manifest that
+// asks for a newer platform.
 // The connection code is never logged: it only travels in the request body.
 // All routes sit on the trusted socket and on the console entry, which
 // requires a logged-in session; nothing here is reachable anonymously.
@@ -42,6 +49,7 @@ func (s *server) registerCatalog(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/catalog/install", s.catalogTasks)
 	mux.HandleFunc("GET /v1/catalog/install/{task}", s.catalogTask)
 	mux.HandleFunc("GET /v1/apps/{app}/first-login", s.appFirstLogin)
+	mux.HandleFunc("GET /v1/apps/{app}/vars", s.appVars)
 }
 
 // wireAppCenter gives the engine the server's own operations.
@@ -97,6 +105,8 @@ type catalogErrorBody struct {
 		GatewayCode string `json:"gateway_code,omitempty"`
 		RetryAfter  int    `json:"retry_after,omitempty"`
 		Diagnosis   any    `json:"diagnosis,omitempty"`
+		// NeedsPlatform: upgrade AcornFox to this version first.
+		NeedsPlatform string `json:"needs_platform,omitempty"`
 	} `json:"error"`
 }
 
@@ -105,6 +115,7 @@ func writeFault(w http.ResponseWriter, err error) {
 	var b catalogErrorBody
 	b.Error.Code, b.Error.Message, b.Error.Hint, b.Error.TaskID, b.Error.Diagnosis = f.Code, f.Message, f.Hint, f.TaskID, f.Diagnosis
 	b.Error.GatewayCode, b.Error.RetryAfter = f.GatewayCode, f.RetryAfter
+	b.Error.NeedsPlatform = f.NeedsPlatform
 	if f.RetryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(f.RetryAfter))
 	}
@@ -233,6 +244,23 @@ func (s *server) appFirstLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	reveal := r.URL.Query().Get("reveal") == "true"
 	v, err := s.appCenter.FirstLogin(r.Context(), r.PathValue("app"), reveal)
+	if err != nil {
+		writeFault(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, v)
+}
+
+// appVars lists the variables an app was installed with. It sits on the same
+// entries as first-login (the trusted socket and the logged-in console) and
+// shows secrets in full only with ?reveal=true.
+func (s *server) appVars(w http.ResponseWriter, r *http.Request) {
+	if !s.appCenterOn(w) {
+		return
+	}
+	reveal := r.URL.Query().Get("reveal") == "true"
+	v, err := s.appCenter.AppVars(r.Context(), r.PathValue("app"), reveal)
 	if err != nil {
 		writeFault(w, err)
 		return

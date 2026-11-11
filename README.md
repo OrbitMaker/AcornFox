@@ -25,7 +25,7 @@ AcornFox 服务装在 Mac、Windows 电脑本机运行，这一版不提供。�
 - **部署**：本地目录（带 Dockerfile）、公开 Git 仓库或现成的 Docker 镜像
 - **应用中心**：从预先配好的目录装应用，这一版有 New API 和 Hermes 智能体，见下面“应用中心”
 - **AI 工作台**：Claude Code、Codex 等照着 AcornFox Skill 完成安装、部署和排错
-- **诊断**：部署失败时返回带编号的诊断和日志片段
+- **诊断**：部署失败时返回带编号的诊断和日志片段；任何故障编号都能用 `acornfox faults 编号` 查原因和处理办法
 - **数据库**：一条命令加 PostgreSQL、MySQL 或 Redis
 - **版本**：每次部署都有记录，可以回退应用到之前的版本
 - **HTTPS**：绑定域名后自动申请证书（国内服务器的域名要已备案）
@@ -51,7 +51,7 @@ AI 会先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国�
 | --- | --- |
 | 系统 | Ubuntu 22.04、24.04，Debian 12、13（x86_64），推荐 Ubuntu 24.04 或 Debian 13。这四个版本都实测过全新安装、自检和部署。arm64 还没测过 |
 | 配置 | 建议 2 核 2 GB 以上，需要 root 或 sudo |
-| 端口 | 18800、18801、18808（AcornFox 自己用，只听本机）和 18810-18899（应用端口）必须空着，被占时安装脚本会停下，不能跳过。80、443 最好空着；已被宝塔、1Panel、Nginx 占用时可以共存，见下面的说明 |
+| 端口 | 18800、18801、18808（AcornFox 自己用，只听本机）和 18810-18899（应用端口）必须空着，被占时安装脚本会停下，不能跳过。80、443 最好空着；已被宝塔、1Panel、Nginx 占用时可以共存，见下面的说明。18802 是局域网控制台，被占时只是不开 |
 
 > **买国内云服务器时，系统请选 Ubuntu 24.04（或 Debian 13）。** 阿里云默认的 Alibaba Cloud Linux、腾讯云默认的 OpenCloudOS / TencentOS、火山引擎默认的 veLinux，以及 CentOS、Rocky 等系统装不上 AcornFox，安装脚本会停下并提示“……不能安装 AcornFox”（故障编号 `INSTALL-OS-01`）。Ubuntu、Debian 的版本不在上面列表里（例如 Ubuntu 20.04、Debian 11）时提示“……不在支持列表”（故障编号 `INSTALL-OS-02`），请换成支持的版本。
 
@@ -69,6 +69,8 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 ```
 
 安装完成后会显示管理员令牌（也保存在 `/root/.acornfox-token`），请妥善保存。
+
+服务器在家里或办公室的局域网里（私网地址、不是云主机）时，第一次安装会默认打开局域网控制台（`http://服务器局域网地址:18802`），第一次打开时在浏览器里自己设密码；不想打开就加 `--no-lan-console`：`curl … | sudo bash -s -- --no-lan-console`。云服务器不会打开。
 
 - 服务器在阿里云、腾讯云、火山引擎上时（不论哪个地域），安装脚本先用这家云的内网软件源（系统软件源和 Docker 安装包），不走公网、不耗流量，连不上再换下一个；在华为云和其他国内服务器上用华为等国内公共镜像站。
 - 装完后按脚本最后的提示，在云厂商控制台的安全组放行入方向 TCP 18810-18899（应用端口）；要绑域名再放行 80 和 443。
@@ -133,7 +135,7 @@ acornfox status
 - 公网服务器：在你自己的电脑上运行 `acornfox open 应用名`，它像打开控制台一样开一条 SSH 隧道，看完按 Ctrl+C 关闭。
 - 服务器在你的局域网里：页面上点“让局域网里的电脑能打开”，确认后用局域网地址打开（会在服务器所有网卡上开放这个端口）。
 
-**要升级应用怎么办。** 这一版没有应用的原地升级。目录里有新版本时，先 `acornfox delete 应用名`（默认保留数据），再用原来的安装命令加 `--reuse-data` 重装，接上旧数据。
+**要升级应用怎么办。** 这一版没有应用的原地升级。目录里有新版本时，先 `acornfox delete 应用名`（默认保留数据），再用原来的安装命令加 `--reuse-data` 重装，接上旧数据。v0.5.1 起，账号密码、以前改过的设置、大模型来源和数据里的配置文件都照原来的接上，不用再把以前的参数写一遍；`acornfox apps vars 应用名` 可以看一个应用是用什么设置装的。
 
 详细说明（大模型来源、令牌额度、平台变量、故障编号）见 [使用手册的“应用中心”](docs/user-guide.md#应用中心)。
 
@@ -194,7 +196,13 @@ acornfox domain add example.com --app my-app # 绑定域名（自动 HTTPS）
 # 应用中心
 acornfox catalog list                       # 看目录里的应用和配方
 acornfox install hermes-agent --llm local   # 装 Hermes，接本机 New API
+acornfox install status 任务编号 --wait      # 等到装好或失败再返回（最多等 90 秒，没装完再运行一次）
+acornfox apps vars new-api                  # 看一个应用是用什么设置装的
 acornfox open new-api                       # 在自己电脑上打开只本机的应用
+
+# 出了问题
+acornfox faults CAT-INST-24                 # 一个故障编号是什么意思、怎么处理（只读，不连服务器）
+sudo acornfox doctor                        # 在服务器上自检
 ```
 
 ## 架构
@@ -247,6 +255,7 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 - [常见问题](docs/user-guide.md#常见问题)
 - [AI 工作台 Skill](skills/acornfox/SKILL.md)
 - [能力清单](docs/capabilities.md)
+- [故障目录](docs/faults.md)
 - [发行说明](docs/release-notes/)
 
 ## 升级
@@ -272,6 +281,7 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 - 应用容器在升级过程中一直运行；升级期间命令行和控制台会暂时连不上
 - 网址入口（Caddy 容器）需要重建时，应用网址会短暂打不开，例如从 v0.3.x 升级（系统里的 Caddy 会被停用，换成 Caddy 容器）
 - 从 v0.4.x 升级到 v0.5.0 后，控制台换成新版，旧控制台已经去掉
+- 升级不会打开局域网控制台；原来开着的照常能用
 
 AcornFox 本身只能升级，不能回到旧版本：没有手动回滚，指定比现在旧的版本也会被拒绝。应用自己的版本照常可以用 `acornfox rollback 应用名` 回退。详见 [使用手册](docs/user-guide.md#只能升级)。
 

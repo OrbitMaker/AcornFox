@@ -113,7 +113,7 @@ func TestCatalogSourcesCommand(t *testing.T) {
 }
 
 func (f *fakePrivateAPI) PlatformVars(context.Context) (client.PlatformVars, error) {
-	raw := json.RawMessage(`{"vars":[{"name":"tz","label":"时区","standalone":"本机时区","cloud":"账号时区","user_can_set":true,"value":"Asia/Tokyo","available":true},
+	raw := json.RawMessage(`{"vars":[{"name":"tz","label":"时区","standalone":"本机时区","cloud":"账号时区","user_can_set":true,"since":"0.5.0","value":"Asia/Tokyo","available":true},
 {"name":"llm.api_key","label":"平台为这个应用发的 Key","standalone":"即将开放","cloud":"每个实例一把","user_can_set":false,"secret":true,"issued":true,"via_param":true,"available":false,"note":"平台 Key 即将开放"}]}`)
 	var v client.PlatformVars
 	_ = json.Unmarshal(raw, &v)
@@ -128,7 +128,13 @@ func TestCatalogPlatformVarsCommand(t *testing.T) {
 	if code != exitOK || m["ok"] != true || len(m["vars"].([]any)) != 2 {
 		t.Fatalf("exit %d out %s", code, out)
 	}
+	if m["vars"].([]any)[0].(map[string]any)["since"] != "0.5.0" {
+		t.Fatalf("--json 要原样带出 since：%s", out)
+	}
 	code, out, _ = h.run("catalog", "platform-vars")
+	if !strings.Contains(out, "AcornFox 0.5.0 起有") {
+		t.Fatalf("要显示从哪个版本起有：%s", out)
+	}
 	if code != exitOK || !strings.Contains(out, "platform.tz  时区：Asia/Tokyo") || !strings.Contains(out, "--set platform.tz=") ||
 		!strings.Contains(out, "暂无：平台 Key 即将开放") || !strings.Contains(out, "不能改") {
 		t.Fatalf("exit %d out %s", code, out)

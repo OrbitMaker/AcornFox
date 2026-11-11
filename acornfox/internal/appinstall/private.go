@@ -451,7 +451,7 @@ func (c *Catalog) Sources() []SourceView {
 	st := c.Status()
 	pub := SourceView{ID: PublicSource, Kind: "public", Name: "公共目录", LastSync: st.At, Code: st.Code, Message: st.Message}
 	if idx, origin, err := c.Index(); err == nil {
-		pub.Serial, pub.Origin, pub.Apps, pub.Recipes = idx.Serial, origin, len(idx.Apps), len(idx.Recipes)
+		pub.Serial, pub.Origin, pub.Apps, pub.Recipes = idx.Serial, origin, len(idx.Apps), len(idx.AllRecipes())
 	}
 	out := []SourceView{pub}
 	keys := c.keys()
@@ -463,7 +463,7 @@ func (c *Catalog) Sources() []SourceView {
 			Code: s.Code, Message: s.Message, Disconnected: s.Disconnected, DisconnectedAt: s.DisconnectedAt}
 		if !s.Disconnected {
 			if idx := catalog.LoadIndex(c.privateIndexDir(s.ID), s.ID, keys); idx != nil {
-				v.Serial, v.Apps, v.Recipes = idx.Serial, len(idx.Apps), len(idx.Recipes)
+				v.Serial, v.Apps, v.Recipes = idx.Serial, len(idx.Apps), len(idx.AllRecipes())
 			}
 		}
 		out = append(out, v)

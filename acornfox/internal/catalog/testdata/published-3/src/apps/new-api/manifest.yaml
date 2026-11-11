@@ -1,0 +1,123 @@
+# New API：大模型接口网关。原样安装上游镜像，不改代码。
+id: new-api
+schema: 2
+source: upstream
+maintainer: acornfox
+
+app:
+  name: New API
+  summary: 把多家大模型合成一个 OpenAI 兼容的接口，统一管理 Key、令牌和额度
+  category: ai-gateway
+  tags: [ai, llm, gateway]
+  icon: icon.svg
+  homepage: https://github.com/QuantumNous/new-api
+  license: AGPL-3.0-only
+  # AGPL：原样分发，镜像内自带 LICENSE、NOTICE；源码地址如下。不得去掉页面里的原项目署名。
+  source_code: https://github.com/QuantumNous/new-api
+
+lifecycle:
+  min_platform: "0.5.0"
+  status: active
+
+resources:
+  memory_mb: { min: 256, recommended: 512 }
+  cpu: { min: 0.5 }
+  # 实测镜像在 Docker 里占 327 MB（containerd 镜像存储），加上数据
+  disk_mb: { min: 512 }
+  platforms: [linux/amd64, linux/arm64]
+  gpu: none
+
+release:
+  version: v1.0.0-rc.48
+  images:
+    - name: app
+      repository: calciumion/new-api
+      tag: v1.0.0-rc.48
+      digest: sha256:51401a46510bf110ffafdf2cd7177e0b80bbcf02439e69b665c696f330e87ae5
+      size_mb: 78
+
+endpoints:
+  - name: web
+    port: 3000
+    protocol: http
+    primary: true
+    health:
+      path: /api/status
+      expect_json: { success: true }
+      timeout_s: 60
+
+# 它保存上游 Key 和计费数据：默认只本机能打开，用户要对外时提示走 HTTPS。
+exposure:
+  default: local
+
+volumes:
+  - name: data
+    path: /data
+    backup: true
+
+params:
+  - key: admin_username
+    type: string
+    default: admin
+    pattern: "^[A-Za-z0-9_]{1,12}$"
+    label: 管理员用户名
+    editable: never
+  - key: admin_password
+    type: secret
+    generate: { length: 20 }
+    label: 管理员密码
+    hint: 留空就自动生成，装好后在应用详情里查看
+    editable: never
+  - key: session_secret
+    type: secret
+    generate: { length: 64, charset: hex }
+    hidden: true
+    editable: never
+
+env:
+  - { key: SESSION_SECRET, from: params.session_secret, secret: true }
+  - { key: SQLITE_PATH, value: /data/one-api.db }
+  # 时区、下载源这类底层的东西不写死，用平台变量（acornfox catalog platform-vars）
+  - { key: TZ, from: platform.tz }
+
+# 新版第一次打开网页时走初始化向导，接口匿名可调：谁先打开谁当管理员。
+# 所以健康检查通过后，安装任务立刻替用户初始化，再调一次会被拒绝。
+init:
+  - name: setup-admin
+    when: after_healthy
+    http:
+      method: POST
+      path: /api/setup
+      json:
+        username: "{{params.admin_username}}"
+        password: "{{params.admin_password}}"
+        confirmPassword: "{{params.admin_password}}"
+        SelfUseModeEnabled: true
+        DemoSiteEnabled: false
+      expect_json: { success: true }
+
+first_login:
+  - { label: 账号, from: params.admin_username }
+  - { label: 密码, from: params.admin_password, secret: true }
+
+# 本机其他应用可以把它当作大模型网关用（例如 Hermes 智能体）。
+# 发令牌的具体步骤由平台内置的 new-api 适配器完成：登录拿访问令牌 → 建令牌 → 取令牌值。
+provides:
+  - kind: llm_gateway
+    adapter: new-api
+    endpoint: web
+    base_path: /v1
+
+delivery:
+  tier: auto
+  minutes: 1
+  user_steps:
+    - 登录后在“渠道”里新建一个渠道，填上游的 Key 和模型，点“测试”
+    - 在“令牌”里新建一把令牌，客户端的接口地址填 http://服务器:端口/v1
+
+upgrade:
+  from: ">=v1.0.0-rc.40"
+  breaking: false
+
+uninstall:
+  data: [volumes.data]

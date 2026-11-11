@@ -9,6 +9,7 @@
   "properties": {
     "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$" },
     "schema": { "const": 1 },
+    "min_platform": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "最低平台版本。可以不写：打包时按配方用到的写法和成员应用的最低版本自动算。写了就不能比算出来的低（catalog lint 报 CAT-LINT-17）" },
     "title": { "type": "string", "minLength": 2, "maxLength": 30 },
     "summary": { "type": "string", "minLength": 4, "maxLength": 80 },
     "keywords": { "type": "array", "items": { "type": "string" } },

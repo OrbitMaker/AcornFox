@@ -7,6 +7,11 @@ package main
 // ACORNFOX_TEST_CATALOG_PUBKEYS (base64url, comma separated). A normal build
 // does not contain this file, so neither the variable nor any test key has an
 // effect there. Used by the end-to-end tests of private catalogs.
+//
+// The same builds also read ACORNFOX_TEST_APP_ARCH (amd64 or arm64): the CPU
+// architecture the app center acts for (which image archive it fetches,
+// which apps it can install) instead of this machine's. Used to walk the
+// "no archive for this architecture" path on an amd64 test machine.
 
 import (
 	"crypto/ed25519"
@@ -31,4 +36,14 @@ func testCatalogKeys() []ed25519.PublicKey {
 		out = append(out, k)
 	}
 	return out
+}
+
+func testAppArch() string {
+	switch a := strings.TrimSpace(os.Getenv("ACORNFOX_TEST_APP_ARCH")); a {
+	case "", "amd64", "arm64":
+		return a
+	default:
+		fmt.Fprintln(os.Stderr, "ACORNFOX_TEST_APP_ARCH: only amd64 or arm64, ignored:", a)
+		return ""
+	}
 }

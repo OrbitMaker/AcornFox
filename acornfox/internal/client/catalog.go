@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/acornfox/acornfox/internal/installtiming"
 )
 
 // App center (GET/POST /v1/catalog…). The methods live outside API so the
@@ -52,6 +54,48 @@ type PlatformVarsAPI interface {
 	PlatformVars(ctx context.Context) (PlatformVars, error) // GET /v1/catalog/platform-vars
 }
 
+// AppVarsAPI is implemented by *Client: the variables an installed catalog
+// app was configured with (separate interface so existing fakes keep
+// compiling).
+type AppVarsAPI interface {
+	AppVars(ctx context.Context, app string, reveal bool) (AppVars, error) // GET /v1/apps/{app}/vars
+}
+
+// AppVars mirrors GET /v1/apps/{app}/vars (--json prints the server's answer
+// as is).
+type AppVars struct {
+	App         string    `json:"app"`
+	FromCatalog bool      `json:"from_catalog"`
+	CatalogID   string    `json:"catalog_id"`
+	Version     string    `json:"version"`
+	Source      SourceRef `json:"source"`
+	Manifest    struct {
+		Saved       bool   `json:"saved"`
+		Source      string `json:"source"`
+		SourceLabel string `json:"source_label"`
+	} `json:"manifest"`
+	Revealed  bool `json:"revealed"`
+	CanChange bool `json:"can_change"`
+	Vars      []struct {
+		Name          string `json:"name"`
+		Layer         string `json:"layer"`
+		LayerLabel    string `json:"layer_label"`
+		Class         string `json:"class"`
+		ClassLabel    string `json:"class_label"`
+		Label         string `json:"label"`
+		Value         string `json:"value"`
+		Secret        bool   `json:"secret"`
+		Masked        bool   `json:"masked"`
+		Origin        string `json:"origin"`
+		OriginLabel   string `json:"origin_label"`
+		Editable      string `json:"editable"`
+		EditableLabel string `json:"editable_label"`
+		Used          *bool  `json:"used"`
+	} `json:"vars"`
+	Notes []string        `json:"notes"`
+	Raw   json.RawMessage `json:"-"`
+}
+
 // PlatformVars mirrors GET /v1/catalog/platform-vars.
 type PlatformVars struct {
 	Vars []PlatformVar   `json:"vars"`
@@ -68,6 +112,7 @@ type PlatformVar struct {
 	Secret     bool   `json:"secret,omitempty"`
 	Issued     bool   `json:"issued,omitempty"`
 	ViaParam   bool   `json:"via_param,omitempty"`
+	Since      string `json:"since,omitempty"`
 	Value      string `json:"value,omitempty"`
 	Available  bool   `json:"available"`
 	Note       string `json:"note,omitempty"`
@@ -133,6 +178,9 @@ type CatalogList struct {
 			Min         int `json:"min"`
 			Recommended int `json:"recommended"`
 		} `json:"memory_mb"`
+		// NeedsPlatform: upgrade AcornFox to this version before installing
+		// ("" when this server can install it).
+		NeedsPlatform string `json:"needs_platform"`
 	} `json:"apps"`
 	Recipes []struct {
 		ID      string `json:"id"`
@@ -141,8 +189,9 @@ type CatalogList struct {
 		Apps    []struct {
 			App string `json:"app"`
 		} `json:"apps"`
-		Source  SourceRef `json:"source"`
-		Command string    `json:"command"`
+		Source        SourceRef `json:"source"`
+		Command       string    `json:"command"`
+		NeedsPlatform string    `json:"needs_platform"`
 	} `json:"recipes"`
 	Raw json.RawMessage `json:"-"`
 }
@@ -165,7 +214,9 @@ type CatalogApp struct {
 	Installed  []string  `json:"installed"`
 	Source     SourceRef `json:"source"`
 	Command    string    `json:"command"`
-	MemoryMB   struct {
+	// NeedsPlatform as in the list ("" when installable on this server).
+	NeedsPlatform string `json:"needs_platform"`
+	MemoryMB      struct {
 		Min         int `json:"min"`
 		Recommended int `json:"recommended"`
 	} `json:"memory_mb"`
@@ -225,11 +276,14 @@ type InstallTask struct {
 	Step        string `json:"step,omitempty"`
 	KeepVolumes bool   `json:"keep_volumes_on_failure,omitempty"`
 	Steps       []struct {
-		App     string `json:"app"`
-		Name    string `json:"name"`
-		Label   string `json:"label"`
-		Status  string `json:"status"`
-		Message string `json:"message,omitempty"`
+		App        string                  `json:"app"`
+		Name       string                  `json:"name"`
+		Label      string                  `json:"label"`
+		Status     string                  `json:"status"`
+		Message    string                  `json:"message,omitempty"`
+		StartedAt  *time.Time              `json:"started_at,omitempty"`
+		FinishedAt *time.Time              `json:"finished_at,omitempty"`
+		Progress   *installtiming.Progress `json:"progress,omitempty"`
 	} `json:"steps"`
 	Apps []struct {
 		App       string   `json:"app"`
@@ -244,16 +298,32 @@ type InstallTask struct {
 		GatewayToken *struct {
 			Provider string `json:"provider"`
 		} `json:"gateway_token,omitempty"`
+		// Installed on old data (reuse_data): the old volumes taken over,
+		// what was carried over, one line each (also, after any install,
+		// what became of tokens an old app of the name left), and the old
+		// app's gateway token when it was taken over (also no quota and no
+		// expiry).
+		ReusedVolumes []string `json:"reused_volumes,omitempty"`
+		Carried       []string `json:"carried,omitempty"`
+		TakenToken    *struct {
+			Provider string `json:"provider"`
+		} `json:"taken_gateway_token,omitempty"`
 	} `json:"apps"`
 	Fault *struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		Hint      string `json:"hint,omitempty"`
-		Diagnosis any    `json:"diagnosis,omitempty"`
+		Code          string `json:"code"`
+		Message       string `json:"message"`
+		Hint          string `json:"hint,omitempty"`
+		Diagnosis     any    `json:"diagnosis,omitempty"`
+		NeedsPlatform string `json:"needs_platform,omitempty"`
 	} `json:"fault,omitempty"`
-	FirstLogin []FirstLogin    `json:"first_login,omitempty"`
-	UserSteps  []string        `json:"user_steps,omitempty"`
-	Raw        json.RawMessage `json:"-"`
+	FirstLogin []FirstLogin `json:"first_login,omitempty"`
+	UserSteps  []string     `json:"user_steps,omitempty"`
+	CreatedAt  time.Time    `json:"created_at"`
+	FinishedAt *time.Time   `json:"finished_at,omitempty"`
+	// Timing is the server's verdict on the step times (v0.5.1 on; nil from
+	// an older server).
+	Timing *installtiming.Verdict `json:"timing,omitempty"`
+	Raw    json.RawMessage        `json:"-"`
 }
 
 // FirstLogin mirrors the first-login information of one app.
@@ -355,6 +425,18 @@ func (c *Client) PlatformVars(ctx context.Context) (PlatformVars, error) {
 	return v, err
 }
 
+// AppVars calls GET /v1/apps/{app}/vars.
+func (c *Client) AppVars(ctx context.Context, app string, reveal bool) (AppVars, error) {
+	var v AppVars
+	p := "/v1/apps/" + url.PathEscape(app) + "/vars"
+	if reveal {
+		p += "?reveal=true"
+	}
+	raw, err := c.getRaw(ctx, http.MethodGet, p, nil, &v)
+	v.Raw = raw
+	return v, err
+}
+
 // CatalogAppFrom calls GET /v1/catalog/apps/{id}?catalog=… ("" = any).
 func (c *Client) CatalogAppFrom(ctx context.Context, id, catalog string) (CatalogApp, error) {
 	if catalog == "" {
@@ -369,4 +451,5 @@ func (c *Client) CatalogAppFrom(ctx context.Context, id, catalog string) (Catalo
 var (
 	_ AppCenterAPI      = (*Client)(nil)
 	_ PrivateCatalogAPI = (*Client)(nil)
+	_ AppVarsAPI        = (*Client)(nil)
 )

@@ -269,6 +269,38 @@ func TestServerErrorGatewayFields(t *testing.T) {
 	}
 }
 
+// needs_platform (upgrade AcornFox to this version first) reaches the
+// diagnosis; the app's variables are fetched with reveal only when asked.
+func TestServerErrorNeedsPlatformAndAppVars(t *testing.T) {
+	var gotQuery []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/apps/new-api/vars" {
+			gotQuery = append(gotQuery, r.URL.RawQuery)
+			_, _ = w.Write([]byte(`{"app":"new-api","from_catalog":true,"can_change":false,"vars":[{"name":"platform.tz","value":"UTC","origin":"platform","used":true}],"notes":["x"]}`))
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"CAT-INST-08","message":"要求 AcornFox 0.6.0 以上","needs_platform":"0.6.0"}}`))
+	}))
+	defer ts.Close()
+	c := newDirectClient(t, ts)
+	_, err := c.Install(context.Background(), InstallRequest{App: "dify"})
+	var e *Error
+	if !asError(err, &e) || e.Diag.Code != "CAT-INST-08" || e.Diag.NeedsPlatform != "0.6.0" {
+		t.Fatalf("got %+v", err)
+	}
+	v, err := c.AppVars(context.Background(), "new-api", false)
+	if err != nil || !v.FromCatalog || len(v.Vars) != 1 || v.Vars[0].Used == nil || !*v.Vars[0].Used || len(v.Raw) == 0 {
+		t.Fatalf("vars %+v %v", v, err)
+	}
+	if _, err := c.AppVars(context.Background(), "new-api", true); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotQuery) != 2 || gotQuery[0] != "" || gotQuery[1] != "reveal=true" {
+		t.Fatalf("queries %v", gotQuery)
+	}
+}
+
 func TestDeploymentAndEvents(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("after") != "5" {

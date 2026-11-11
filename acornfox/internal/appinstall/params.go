@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"path"
@@ -53,6 +54,11 @@ const (
 	minUserSecret = 8
 )
 
+// secretRand is where generated passwords and keys take their randomness
+// from: crypto/rand. A test that pins the engine's output byte for byte
+// swaps it for a fixed stream; nothing else may.
+var secretRand io.Reader = rand.Reader
+
 // generateSecret returns length characters from charset ("alnum" default,
 // "hex") using crypto/rand.
 func generateSecret(length int, charset string) (string, error) {
@@ -66,7 +72,7 @@ func generateSecret(length int, charset string) (string, error) {
 	out := make([]byte, length)
 	max := big.NewInt(int64(len(cs)))
 	for i := range out {
-		n, err := rand.Int(rand.Reader, max)
+		n, err := rand.Int(secretRand, max)
 		if err != nil {
 			return "", err
 		}

@@ -654,7 +654,7 @@ refresh_install_env_cloud() {
 #   18800 控制台、18801 公网控制台网关、18808 Caddy 管理网关（都只听本机，被占服务就起不来）
 #   18810-18899 应用端口（Caddy 容器用宿主网络直接监听；被占的端口一旦分给应用，Caddy 整份配置都加载不了）
 #   80、443 绑定域名、HTTPS 和公网控制台时才用
-#   18802 局域网控制台，默认不开
+#   18802 局域网控制台：局域网服务器全新安装时默认开，其余情况默认不开（升级不会自动打开）
 # 自己的进程（acornfox、Caddy 容器 acornfox-caddy、v0.3.x 装在宿主机上的 Caddy）占着不算冲突。
 
 # port_listeners：每行 "端口 进程名 PID"（只看 TCP 监听）
@@ -786,7 +786,7 @@ check_ports() {
         fi
     fi
     if [ -n "$lan" ]; then
-        log_warn "局域网控制台端口被占用（${lan}）；这个功能默认不开，开启前要先让出 18802"
+        log_warn "局域网控制台端口被占用（${lan}）；局域网控制台这次开不了，要用的话先让出 18802 再运行 acornfox lan-console enable"
     fi
     return 0
 }

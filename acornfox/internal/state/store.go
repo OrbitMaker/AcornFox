@@ -316,8 +316,9 @@ func (s *Store) DeleteApp(ctx context.Context, name string, keepVolumes bool) er
 		// for a later reuse_data install; deleted with its data: nothing to
 		// reuse any more.
 		if keepVolumes {
-			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO kept_catalog_secrets(app, catalog_id, catalog_origin, params_enc, kept_at)
-				SELECT a.name, a.catalog_id, a.catalog_origin, s.params_enc, ? FROM apps a JOIN app_catalog_secrets s ON s.app = a.name
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO kept_catalog_secrets(app, catalog_id, catalog_origin, params_enc, kept_at, manifest, manifest_sha256)
+				SELECT a.name, a.catalog_id, a.catalog_origin, s.params_enc, ?, COALESCE(m.manifest, ''), COALESCE(m.manifest_sha256, '')
+				FROM apps a JOIN app_catalog_secrets s ON s.app = a.name LEFT JOIN app_catalog_manifests m ON m.app = a.name
 				WHERE a.name=? AND a.catalog_id != ''`, formatTime(time.Now().UTC()), name); err != nil {
 				return fmt.Errorf("keep catalog secrets: %w", err)
 			}
@@ -326,6 +327,9 @@ func (s *Store) DeleteApp(ctx context.Context, name string, keepVolumes bool) er
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM app_catalog_secrets WHERE app=?`, name); err != nil {
 			return fmt.Errorf("delete catalog secrets: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM app_catalog_manifests WHERE app=?`, name); err != nil {
+			return fmt.Errorf("delete catalog manifest: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE name=?`, name); err != nil {
 			return fmt.Errorf("delete app: %w", err)

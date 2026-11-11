@@ -318,24 +318,47 @@ func (c *Catalog) App(ctx context.Context, id string) (*App, error) {
 // AppIn is App restricted to one catalog ("" any, "public", or a private
 // catalog id).
 func (c *Catalog) AppIn(ctx context.Context, from, id string) (*App, error) {
-	vs, err := c.selectViews(from)
+	v, ia, err := c.find(from, id)
 	if err != nil {
 		return nil, err
+	}
+	return c.loadApp(ctx, v, ia)
+}
+
+// find returns app id's entry in the index of catalog from ("" any, public
+// first) and the catalog it is in. It reads the index only: nothing is
+// downloaded, so what the index says (min_platform) can be checked before
+// the app package is fetched.
+func (c *Catalog) find(from, id string) (catalogView, catalog.IndexApp, error) {
+	vs, err := c.selectViews(from)
+	if err != nil {
+		return catalogView{}, catalog.IndexApp{}, err
 	}
 	for _, v := range vs {
 		for i := range v.idx.Apps {
 			if v.idx.Apps[i].ID == id {
-				return c.loadApp(ctx, v, v.idx.Apps[i])
+				return v, v.idx.Apps[i], nil
 			}
 		}
 	}
 	if from != "" && from != PublicSource {
-		return nil, fault(CodeUnknown, nil, "私有目录 %s 里没有应用 %s", from, id)
+		return catalogView{}, catalog.IndexApp{}, fault(CodeUnknown, nil, "私有目录 %s 里没有应用 %s", from, id)
 	}
-	return nil, fault(CodeUnknown, nil, "目录里没有应用 %s", id)
+	return catalogView{}, catalog.IndexApp{}, fault(CodeUnknown, nil, "目录里没有应用 %s", id)
 }
 
 func (c *Catalog) loadApp(ctx context.Context, v catalogView, ia catalog.IndexApp) (*App, error) {
+	files, err := c.loadPackage(ctx, v, ia)
+	if err != nil {
+		return nil, err
+	}
+	return parseApp(v, ia, files)
+}
+
+// loadPackage reads (and if needed downloads and verifies) the package of ia
+// and returns its files, manifest.yaml among them. The manifest is not
+// decoded: an install checks its raw bytes first (Engine.checkPackage).
+func (c *Catalog) loadPackage(ctx context.Context, v catalogView, ia catalog.IndexApp) (map[string][]byte, error) {
 	id := ia.ID
 	var b []byte
 	var err error
@@ -361,13 +384,18 @@ func (c *Catalog) loadApp(ctx context.Context, v catalogView, ia catalog.IndexAp
 	if err != nil {
 		return nil, fault(CodePackage, err, "应用 %s 的安装包格式不对", id)
 	}
-	mb, ok := files["manifest.yaml"]
-	if !ok {
+	if _, ok := files[manifestFile]; !ok {
 		return nil, fault(CodePackage, nil, "应用 %s 的安装包里没有 manifest.yaml", id)
 	}
-	m, err := catalog.ParseManifest(mb)
-	if err != nil || m.ID != id || m.Release.Version != ia.Version {
-		return nil, fault(CodePackage, err, "应用 %s 的清单和目录对不上", id)
+	return files, nil
+}
+
+// parseApp decodes the manifest of a loaded package and checks it is the
+// app and version the index named.
+func parseApp(v catalogView, ia catalog.IndexApp, files map[string][]byte) (*App, error) {
+	m, err := catalog.ParseManifest(files[manifestFile])
+	if err != nil || m.ID != ia.ID || m.Release.Version != ia.Version {
+		return nil, fault(CodePackage, err, "应用 %s 的清单和目录对不上", ia.ID)
 	}
 	return &App{Index: ia, Manifest: m, Files: files, Origin: v.origin, OriginName: v.name}, nil
 }
@@ -380,19 +408,77 @@ func (c *Catalog) Recipe(id string) (*catalog.Recipe, error) {
 
 // RecipeIn returns recipe id from one catalog ("" any, "public", or a private
 // catalog id) and the origin it came from ("" public). A recipe's apps come
-// from the same catalog.
+// from the same catalog. Recipes that need a newer platform are found too
+// (the index lists them apart, see catalog.Index.AllRecipes): the caller
+// checks MinPlatform before installing.
 func (c *Catalog) RecipeIn(from, id string) (*catalog.Recipe, string, error) {
 	vs, err := c.selectViews(from)
 	if err != nil {
 		return nil, "", err
 	}
 	for _, v := range vs {
-		for i := range v.idx.Recipes {
-			if v.idx.Recipes[i].ID == id {
-				r := v.idx.Recipes[i]
+		for _, r := range v.idx.AllRecipes() {
+			if r.ID == id {
 				return &r, v.origin, nil
 			}
 		}
 	}
 	return nil, "", fault(CodeUnknown, nil, "目录里没有配方 %s", id)
+}
+
+// manifestFile is the manifest's name inside an app package.
+const manifestFile = "manifest.yaml"
+
+// localManifest returns the manifest.yaml bytes of catalog app id at version
+// from catalog origin ("" public), using only what is already on this
+// machine: the index in use and the built-in snapshot's index name the
+// package (path, sha256, size), and the package is read from the snapshot or
+// the package cache and checked against them. Nothing is downloaded; false
+// when no index here lists that version or its package is not here.
+func (c *Catalog) localManifest(origin, id, version string) ([]byte, bool) {
+	var indexes []*catalog.Index
+	var snapshot fs.FS
+	pkgDir := ""
+	if origin == "" {
+		if idx, _, err := c.Index(); err == nil {
+			indexes = append(indexes, idx)
+		}
+		// The snapshot may still list a version the synced index moved past.
+		if idx, _, err := catalog.LoadWith("", c.cfg.Snapshot, nil); err == nil {
+			indexes = append(indexes, idx)
+		}
+		snapshot, pkgDir = c.cfg.Snapshot, filepath.Join(c.cfg.CacheDir, "packages")
+	} else {
+		if !catalog.ValidCatalogID(origin) {
+			return nil, false
+		}
+		if idx := catalog.LoadIndex(c.privateIndexDir(origin), origin, c.keys()); idx != nil {
+			indexes = append(indexes, idx)
+		}
+		pkgDir = c.privatePackageDir(origin)
+	}
+	for _, idx := range indexes {
+		for _, ia := range idx.Apps {
+			if ia.ID != id || ia.Version != version {
+				continue
+			}
+			b, err := catalog.LoadPackage(nil, snapshot, pkgDir, ia.Package)
+			if err != nil {
+				continue
+			}
+			files, err := catalog.ReadPackage(id, b)
+			if err != nil {
+				continue
+			}
+			raw, ok := files[manifestFile]
+			if !ok {
+				continue
+			}
+			if m, err := catalog.ParseManifest(raw); err != nil || m.ID != id || m.Release.Version != version {
+				continue
+			}
+			return raw, true
+		}
+	}
+	return nil, false
 }

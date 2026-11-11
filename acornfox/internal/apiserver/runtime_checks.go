@@ -11,11 +11,18 @@ package apiserver
 //   - the runtime setup when it stopped (its own code),
 //   - Linux only: free disk space of the data directory and Docker's data
 //     root (SETUP-DISK-01), the ports AcornFox needs (SETUP-PORT-01..05) and
-//     the clock (SETUP-CLOCK-01: network time sync, and the difference from
-//     the download gateway's Date when the gateway is on; at most 3 seconds
-//     each, skipped without network).
+//     the clock (SETUP-CLOCK-01: network time sync, timedatectl at most 3
+//     seconds, and the difference from the download gateway's Date when the
+//     gateway is on),
+//   - Linux only: the download gateway (SETUP-GW-01) and the app catalog's
+//     last sync (SETUP-SYNC-01, from the app center's own status; nothing is
+//     synced). The clock check and the gateway check share one HEAD request
+//     to the gateway's /v1/health (hostcheck.DefaultGatewayProbes).
 //
-// It is read-only and takes a few hundred milliseconds. The service runs as
+// It is read-only. It usually answers within a second; it waits longest on
+// that one HEAD request, at most 5 seconds when the gateway does not answer.
+// The console's home page and runtime page ask about once a minute while
+// they are open, the settings page once when it opens. The service runs as
 // an unprivileged user, so it cannot see who holds a port another user's
 // process listens on: those are reported as SETUP-PORT-05 with the advice to
 // run `sudo acornfox doctor`, never guessed.
@@ -94,9 +101,10 @@ var (
 	runtimeFree     = hostcheck.FreeBytes
 	runtimeDevice   = hostcheck.Device
 	runtimeIsRoot   = func() bool { return os.Geteuid() == 0 }
-	// runtimeClockProbe builds the clock check's readers for the gateway
-	// address ("" when the gateway is off: no time comparison).
-	runtimeClockProbe = hostcheck.DefaultClockProbe
+	// runtimeGatewayProbes builds the readers of the clock check and the
+	// download gateway check for the gateway address ("" when the gateway is
+	// off: no time comparison, nothing sent); the two share one HEAD request.
+	runtimeGatewayProbes = hostcheck.DefaultGatewayProbes
 )
 
 func (s *server) getRuntimeChecks(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +198,14 @@ func (s *server) getRuntimeChecks(w http.ResponseWriter, r *http.Request) {
 		if s.sources != nil {
 			gw = s.sources().Gateway
 		}
-		hostcheck.CheckClock(ctx, rep, runtimeClockProbe(gw))
+		clock, gwProbe := runtimeGatewayProbes(gw)
+		hostcheck.CheckClock(ctx, rep, clock)
+		if s.sources != nil {
+			hostcheck.CheckGateway(ctx, rep, gwProbe)
+		}
+		if cs, ok := s.runtimeCatalogSync(); ok {
+			hostcheck.CheckCatalogSync(rep, cs, time.Now())
+		}
 	}
 
 	v.OK, v.Items = rep.OK, rep.Items
@@ -199,4 +214,19 @@ func (s *server) getRuntimeChecks(w http.ResponseWriter, r *http.Request) {
 		v.Sources = &src
 	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+// runtimeCatalogSync is the app catalog's last sync for the runtime page; ok is
+// false without an app center.
+func (s *server) runtimeCatalogSync() (hostcheck.CatalogSync, bool) {
+	if s.appCenter == nil || s.appCenter.Catalog() == nil {
+		return hostcheck.CatalogSync{}, false
+	}
+	cat := s.appCenter.Catalog()
+	st := cat.Status()
+	cs := hostcheck.CatalogSync{At: st.At, OK: st.OK, Skipped: st.Skipped, Code: st.Code, Message: st.Message, Source: st.Source}
+	if idx, origin, err := cat.Index(); err == nil {
+		cs.Serial, cs.Origin = idx.Serial, origin
+	}
+	return cs, true
 }

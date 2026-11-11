@@ -161,6 +161,9 @@ func (a *app) cmdCatalogPlatformVars(ctx context.Context, args []string) int {
 		}
 		a.out.human("platform.%s  %s：%s  [%s]", x.Name, x.Label, val, can)
 		a.out.human("    单机版：%s；云版：%s", x.Standalone, x.Cloud)
+		if x.Since != "" {
+			a.out.human("    AcornFox %s 起有", x.Since)
+		}
 	}
 	return exitOK
 }

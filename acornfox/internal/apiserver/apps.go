@@ -762,8 +762,12 @@ func (s *server) removeApp(ctx context.Context, app string, deleteVolumes bool) 
 
 // removeAppWarn is removeApp that also returns warnings for the caller: the
 // model-gateway tokens issued for an app installed from the catalog are
-// revoked once the app is gone, and a token that could not be revoked is
-// reported (it keeps working until removed in the gateway).
+// revoked once the app is gone with its data, and a token that could not be
+// revoked is reported (it keeps working until removed in the gateway). An
+// app deleted with its data kept keeps its tokens: they are kept with its
+// saved parameters (and its config files in the data hold them), and an
+// install on that data takes them over (appinstall's reuse.go); one that does
+// not take them over revokes them then.
 func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bool) ([]string, error) {
 	// An app another app is linked to (its model gateway) keeps that app's
 	// container on its network: removing it would fail half-way at the
@@ -778,7 +782,7 @@ func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bo
 		}
 	}
 	var tokens []appinstall.TokenRef
-	if s.appCenter != nil {
+	if s.appCenter != nil && deleteVolumes {
 		toks, err := s.appCenter.GatewayTokens(ctx, app)
 		if err != nil {
 			s.log.Warn("read gateway tokens", "app", app, "err", err)

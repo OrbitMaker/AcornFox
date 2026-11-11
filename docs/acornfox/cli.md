@@ -4,9 +4,11 @@
 
 同一个 `acornfox` 程序既是命令行，也是服务器上的 AcornFox 服务。Linux 服务器用安装脚本安装，装好后服务器上就有这个命令；Mac、Linux 电脑可以另装一个命令行，经 SSH 管理服务器。安装方法见 [使用手册](../user-guide.md)。
 
+标着“v0.5.1 起”的要 0.5.1 以上的 `acornfox`；其中要连服务器的命令，服务器也要是 0.5.1（`install status --wait` 例外，连 0.5.0 的服务器也能用；`faults` 不连服务器）。
+
 ## 全局参数
 
-全局参数可以写在命令前面或后面；`doctor`、`identity` 例外，它们的 `--json` 要写在命令后面（`acornfox doctor --json`）。
+全局参数可以写在命令前面或后面，`acornfox --json doctor` 和 `acornfox doctor --json` 一样。
 
 | 参数 | 作用 |
 | --- | --- |
@@ -15,6 +17,8 @@
 | `--json` | 输出 JSON：成功是 `{"ok":true, …}`，失败带 `diagnosis`（`code`、`message`、`hint`），方便 AI 工作台读取 |
 
 退出码：`0` 成功；`1` 操作做完了但失败（例如部署失败、安装失败）；`2` 参数不对；`3` 连不上服务器；`4` 服务器拒绝。
+
+不加 `--json` 时，出错的输出里有一行 `故障编号：编号（运行 acornfox faults 编号 查处理办法）`；不是故障的通用错误码写成 `错误码：…`（v0.5.1 起）。
 
 有的命令可以直接写应用名，例如 `acornfox logs web`；其余的用 `--app`，例如 `acornfox status --app web`。下面的例子按各命令现在的写法给出。
 
@@ -52,6 +56,7 @@
 | `logs [应用]` | 应用最近的日志（`-f` 持续跟随，`--tail N` 行数） | `acornfox logs web -f` |
 | `logs [应用] --version N` | 第 N 版的运行日志，加 `--build` 看构建日志 | `acornfox logs web --version 6 --build` |
 | `stats [应用]` | 应用的 CPU、内存等资源使用；不带应用名是整台服务器 | `acornfox stats web` |
+| `stats 应用 --history 1h\|24h` | 这个应用近 1 小时或 24 小时的 CPU、内存（每 30 秒记一次，只存在内存里，后台服务重启后从头记；v0.5.1 起） | `acornfox stats web --history 1h` |
 
 ## 运行
 
@@ -84,7 +89,7 @@
 | --- | --- | --- |
 | `domain add 域名` | 给应用绑定域名，自动申请 HTTPS 证书（国内服务器的域名要已备案） | `acornfox domain add app.example.com --app web` |
 | `domain remove 域名`、`domain list` | 解绑、列出域名 | `acornfox domain list --app web` |
-| `lan-console enable` | 在局域网里打开控制台，要密码登录（`disable` 关闭，`status` 查看，`--reset-password` 换密码） | `acornfox lan-console enable` |
+| `lan-console enable` | 在局域网里打开控制台（端口 18802）：第一次打开时在浏览器里设密码，登录时可勾“记住这台设备 90 天”；只给局域网里的地址用，云主机开不了。局域网服务器第一次安装时默认已打开。`status` 看状态和密码是何时从哪设的，`disable` 关闭，`reset-password` 清掉密码重设（所有登录和记住的设备作废），`devices` 看记住的设备，`forget 编号` 或 `forget --all` 让设备失效；`lan-console --help` 看全 | `acornfox lan-console status` |
 | `public-console enable 域名` | 用一个域名开放控制台的公网访问，带 HTTPS（`disable` 关闭，`status` 查看） | `acornfox public-console enable panel.example.com` |
 | `open 应用名` | 在你自己的电脑上打开一个应用：经 SSH 隧道转到本地端口，只本机能打开的应用也能这样开，看完按 Ctrl+C 关闭 | `acornfox open new-api` |
 
@@ -98,7 +103,8 @@
 | `catalog platform-vars` | 平台按这台机器自动填给应用的时区、下载源、默认模型等，以及哪些能改 | `acornfox catalog platform-vars` |
 | `install 应用` | 从目录装一个应用，默认只本机能打开（`--llm local\|own` 选大模型来源，`--set 参数=值` 填参数，`--no-wait` 只提交，`--reuse-data` 接上以前同名应用留下的数据） | `acornfox install hermes-agent --llm local` |
 | `install --recipe 配方` | 装一个配方里的几个应用并连起来 | `acornfox install --recipe hermes-with-new-api` |
-| `install status 任务编号` | 查安装进度和首次登录信息（`--show-secrets` 显示密码） | `acornfox install status 3f9a0c1b2d4e --show-secrets` |
+| `install status 任务编号` | 查安装进度和首次登录信息（`--show-secrets` 显示密码）。加 `--wait` 等到装好或失败再返回（默认最多 90 秒，`--timeout 秒` 最多 600，没装完再运行一次），输出写明装到哪一步、用了多久、算不算比平常慢（`CAT-INST-30`）；v0.5.1 起 | `acornfox install status 3f9a0c1b2d4e --wait` |
+| `apps vars 应用` | 看一个从应用中心装的应用是用什么设置装的：每个变量的值、谁给的、能不能改；密码和 Key 默认只显示后 4 位（`--reveal` 显示全）。只读，v0.5.1 起 | `acornfox apps vars new-api` |
 
 装好的应用默认只本机能打开，在你自己的电脑上用 `acornfox open 应用名` 打开。详细说明见 [使用手册的“应用中心”](../user-guide.md#应用中心)。
 
@@ -106,7 +112,8 @@
 
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
-| `doctor` | 检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟；每个问题带故障编号（`--json` 输出 JSON）。用 sudo 运行看得更全 | `sudo acornfox doctor` |
+| `doctor` | 检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟，以及下载网关能不能连上、应用目录上次同步的情况（这两项 v0.5.1 起，只给警告）；每个问题带故障编号（`--json` 输出 JSON）。用 sudo 运行看得更全 | `sudo acornfox doctor` |
+| `faults [编号]` | 故障目录：一个故障编号是什么、可能的原因和怎么判断、按什么顺序查、怎么处理、什么时候要先问你；不带编号列出全部，`--group 组` 只列一组，`--markdown` 输出全文。只读，不连服务器，Mac 上也能用；v0.5.1 起 | `acornfox faults CAT-INST-27` |
 | `identity show` | 这台机器在下载网关上的安装编号和公钥（还没生成时说明原因，不会生成） | `sudo acornfox identity show` |
 | `identity reset` | 重新生成机器钥匙，安装编号随之改变；不加 `--yes` 只说明会做什么。之后 `sudo systemctl restart acornfox-server` 才生效 | `sudo acornfox identity reset --yes` |
 | `version` | 版本号 | `acornfox version` |
@@ -123,4 +130,6 @@
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
 | `catalog lint 目录` | 检查应用目录的清单和配方，只读 | `acornfox catalog lint .` |
+| `catalog vars 目录` | 列出应用装的时候用到哪些变量、哪些要用户动手（`--app` 只看一个），只读 | `acornfox catalog vars . --app new-api` |
+| `catalog gaps 目录` | 核对目录里登记的“平台还缺的变量”，只读 | `acornfox catalog gaps .` |
 | `catalog build`、`catalog keygen`、`catalog verify` | 打包签名发布目录、生成签名钥匙、校验发布目录；各自加 `-h` 看用法 | `acornfox catalog verify dist --pubkey 公钥` |

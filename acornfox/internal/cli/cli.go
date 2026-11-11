@@ -81,7 +81,7 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.out.usageError("%s", err.Error())
 	}
 	if len(rest) == 0 {
-		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、version、doctor、identity（acornfox help 看说明）")
+		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、version、doctor、identity、faults（acornfox help 看说明）")
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
@@ -149,9 +149,12 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdPublicConsole(ctx, cmdArgs)
 	case "limits":
 		return a.cmdLimits(ctx, cmdArgs)
-	case "doctor", "identity", "uninstall":
+	case "doctor", "identity", "uninstall", "faults":
 		// These run in the acornfox binary itself and only look at this
 		// computer; they reach here only when written after --target or --app.
+		if cmd == "faults" {
+			return a.out.usageError("faults 只查程序里的故障目录，不连服务器，不接受 --target、--app；直接运行 acornfox faults 编号（要 JSON 加 --json）")
+		}
 		if cmd == "uninstall" {
 			return a.out.usageError("uninstall 只管这台机器，不接受 --target、--app；直接运行 acornfox uninstall")
 		}
@@ -171,13 +174,16 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
 本机
   Mac 上只有命令行客户端：用 target add 登记一台 Linux 服务器来管理；Linux 服务器用 install.sh 安装、
   upgrade.sh 升级（见使用文档），装好后服务器上也有这个命令行。
-  doctor                           检查这台服务器：Docker、后台服务、磁盘空间、端口占用（sudo acornfox doctor 看得更全）
+  doctor                           检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟、下载网关、应用目录同步
+                                   （sudo acornfox doctor 看得更全）
   identity show                    这台机器在下载网关上的安装编号和公钥（reset --yes 重新生成）
+  faults [编号]                    故障目录：一个故障编号是什么意思、怎么判定、怎么处理（只读，不连服务器）
 
 服务器
   target add 名称 --ssh 用户@主机   添加服务器（list、use、remove 管理已有的）
   open [应用]                      打开网页控制台；带应用名时在你电脑上打开这个应用（经 SSH 隧道，只本机的应用也能开）
-  lan-console enable               在局域网打开控制台，要密码登录（disable、status）
+  lan-console enable               在局域网打开控制台，第一次打开时在浏览器里设密码（disable、status、
+                                   reset-password 清密码重设、devices 看记住的设备、forget 让设备失效；--help 看全）
   public-console enable 域名        开放控制台公网访问（disable、status）
 
 部署
@@ -193,6 +199,7 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   delete [--volumes]               删除应用（默认保留数据）
   logs [-f]                        查看日志（--version N 看某一版的运行日志，再加 --build 看构建日志）
   stats [应用]                     资源使用（不带应用名则是整台服务器）
+  stats 应用 --history 1h|24h      这个应用近 1 小时或 24 小时的 CPU、内存（只读）
   limits [--memory 26G] [--cpu 8]  整机最多分配给应用的内存和 CPU，及各应用已分配
 
 配置
@@ -205,8 +212,10 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
 应用中心
   catalog list / info 应用 / sync  看目录里的应用和配方、应用详情和参数、让服务器同步目录
   catalog platform-vars            平台按这台机器自动填给应用的时区、下载源、默认模型等（只读）
+  apps vars 应用 [--reveal]         看一个装好的应用是用什么设置装的：每个变量的值、谁给的、能不能改（只读）
   install 应用 [--llm local|own]    从目录装一个应用（--recipe 配方 装一组；--no-wait 只提交；acornfox install -h 看详情）
-  install status 任务编号           查安装进度、首次登录信息（--show-secrets 显示密码）
+  install status 任务编号 [--wait]  查安装进度、首次登录信息（--wait 等到装好或失败，默认最多 90 秒；
+                                   --show-secrets 显示密码）
   装好的应用默认只本机能打开：在你自己的电脑上运行 acornfox open 应用名
 
 其他

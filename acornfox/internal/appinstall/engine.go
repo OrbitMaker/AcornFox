@@ -30,6 +30,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -65,6 +66,11 @@ type Store interface {
 	GetCatalogSecrets(ctx context.Context, app string) (state.CatalogSecrets, error)
 	GetKeptCatalogSecrets(ctx context.Context, app string) (state.KeptCatalogSecrets, error)
 	DeleteKeptCatalogSecrets(ctx context.Context, app string) error
+	// The manifest each catalog app was installed with: Set replaces (an
+	// install), Add only fills an empty slot (the backfill).
+	SetCatalogManifest(ctx context.Context, m state.CatalogManifest) error
+	AddCatalogManifest(ctx context.Context, m state.CatalogManifest) (bool, error)
+	GetCatalogManifest(ctx context.Context, app string) (state.CatalogManifest, error)
 }
 
 // Runner is what the engine needs from the runner; it must also implement
@@ -191,12 +197,16 @@ func (e *Engine) h() Hooks {
 // Catalog returns the catalog holder.
 func (e *Engine) Catalog() *Catalog { return e.cfg.Catalog }
 
-// Start fails and cleans up tasks a previous run left running, then keeps the
-// catalog synced until ctx ends.
+// Start fails and cleans up tasks a previous run left running, starts keeping
+// the catalog synced until ctx ends, and then gives apps installed before
+// manifests were saved theirs from what is on this machine (see
+// BackfillManifests; a failure there is only logged). The server calls it in
+// its own goroutine, so none of this delays serving.
 func (e *Engine) Start(ctx context.Context) {
 	e.recover(ctx)
 	if e.cfg.Catalog != nil {
 		go e.cfg.Catalog.Run(ctx)
+		e.BackfillManifests(ctx)
 	}
 }
 
@@ -225,6 +235,10 @@ type Request struct {
 	// with CAT-INST-24. Those volumes are never removed by a failed install;
 	// init steps are skipped (the old data has been initialized) and the
 	// first-login values init would have written say they are the old ones.
+	// What the old app was set up with comes back unless this request says
+	// otherwise (see reuse.go): its parameters, the platform variables the
+	// user had changed, its model source (and gateway token), and its config
+	// files in the data.
 	ReuseData bool `json:"reuse_data,omitempty"`
 }
 
@@ -246,6 +260,36 @@ type planned struct {
 	// no kept record and init said the data was initialized already.
 	restored  bool
 	initStale bool
+	// What a reuse_data install carries over (reuse.go): kept is the old
+	// app's saved parameters (nil without a kept record), keptManifest the
+	// manifest it was installed with (nil when not saved), keptTokens the
+	// gateway tokens it had (kept with its data, not revoked). takeover: per
+	// llm parameter, the old gateway token this install may take over
+	// (checked in create); taken: the ones it took over (saved as its own,
+	// never revoked by a failed install). carried: one line per thing carried
+	// over, shown in the create step. rewritten: config files (by path) an
+	// earlier install on the same old data rewrote before it failed (see
+	// rewrittenSince): what is in the data is not the old app's any more.
+	kept         Values
+	keptManifest *catalog.Manifest
+	keptTokens   []TokenRef
+	takeover     map[string]keptToken
+	taken        []TokenRef
+	carried      []string
+	rewritten    map[string]bool
+	// preset: parameter keys whose value came from the recipe, not the user.
+	// origins: where each parameter's value came from (Origin*), saved with
+	// the parameters so it can be shown later; "<key>.model" for the model
+	// of an llm_provider parameter.
+	preset  map[string]bool
+	origins map[string]string
+}
+
+func (p *planned) setOrigin(key, origin string) {
+	if p.origins == nil {
+		p.origins = map[string]string{}
+	}
+	p.origins[key] = origin
 }
 
 func newID() string {
@@ -277,6 +321,101 @@ func versionAtLeast(have, min string) bool {
 	return true
 }
 
+// needsPlatform returns the highest of the given min_platform values when
+// this AcornFox is older than it (without a leading "v"), else "". Values it
+// cannot read are skipped, as versionAtLeast lets them pass.
+func (e *Engine) needsPlatform(mins ...string) string {
+	need := ""
+	for _, m := range mins {
+		if !versionRe.MatchString(m) {
+			continue
+		}
+		if need == "" || catalog.CompareVersions(m, need) > 0 {
+			need = m
+		}
+	}
+	if need == "" || versionAtLeast(e.cfg.Version, need) {
+		return ""
+	}
+	return strings.TrimPrefix(need, "v")
+}
+
+// tooOld is CAT-INST-08 for what (an app id or "配方 <id>") that needs
+// platform version need.
+func (e *Engine) tooOld(what, need string) *Fault {
+	f := fault(CodeTooOld, nil, "%s 要求 AcornFox %s 以上，这台是 %s，请先升级 AcornFox 再装", what, need, e.cfg.Version)
+	f.NeedsPlatform = need
+	return f
+}
+
+// appToInstall returns app id of catalog from, checked as far as it can be
+// before anything is created: the index's min_platform first (CAT-INST-08,
+// before the app package is even downloaded), then, with the package
+// downloaded and verified, its manifest's raw bytes against the built-in
+// schema (CAT-INST-29), and only then is the manifest decoded. In that order
+// a manifest this program cannot decode at all (a known field that changed
+// type in a later format) is reported as what it is, not as a broken
+// package. A private catalog's app goes through the same checks.
+func (e *Engine) appToInstall(ctx context.Context, from, id string) (*App, error) {
+	v, ia, err := e.cfg.Catalog.find(from, id)
+	if err != nil {
+		return nil, err
+	}
+	if need := e.needsPlatform(ia.MinPlatform); need != "" {
+		return nil, e.tooOld(ia.ID, need)
+	}
+	files, err := e.cfg.Catalog.loadPackage(ctx, v, ia)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.checkPackage(ia, files[manifestFile]); err != nil {
+		return nil, err
+	}
+	return parseApp(v, ia, files)
+}
+
+// checkPackage refuses an app package whose manifest uses a field, a value
+// or a format version this program does not know (CAT-INST-29): installing
+// it anyway would silently leave out what the unknown part asks for. The
+// check is the schema the catalog tools use, on the manifest's own bytes, so
+// fields the schema has but the engine does not read still pass. When the
+// manifest asks for a newer platform the cure is an upgrade (NeedsPlatform is
+// set); otherwise the catalog itself is wrong and the user can only wait.
+// The two cases carry different hints, so that nobody upgrades for nothing
+// or waits for a catalog fix that an upgrade would have made unnecessary.
+//
+// It works on the raw bytes alone, before the manifest is decoded: the
+// platform version the manifest asks for is read leniently from them.
+func (e *Engine) checkPackage(ia catalog.IndexApp, manifest []byte) error {
+	ps := catalog.ValidateManifest(manifest)
+	if len(ps) == 0 {
+		return nil
+	}
+	var what []string
+	for i, p := range ps {
+		if i == 3 {
+			what = append(what, fmt.Sprintf("等 %d 处", len(ps)))
+			break
+		}
+		at := p.Path
+		if at == "" {
+			at = "/"
+		}
+		what = append(what, at+" "+p.Message)
+	}
+	detail := strings.Join(what, "；")
+	id, ver := ia.ID, ia.Version
+	if need := e.needsPlatform(ia.MinPlatform, catalog.DeclaredMinPlatform(manifest)); need != "" {
+		f := fault(CodeBadManifest, nil, "%s %s 的清单用了这个版本的 AcornFox 不认识的写法，它要求 AcornFox %s 以上，这台是 %s，请先升级 AcornFox 再装（%s）", id, ver, need, e.cfg.Version, detail)
+		f.NeedsPlatform = need
+		f.Hint = badManifestUpgradeHint(need)
+		return f
+	}
+	f := fault(CodeBadManifest, nil, "%s %s 的清单过不了检查，没有安装。这是这份目录有问题，不是你的操作不对：稍后再试，还不行请把这段话反馈给我们（%s）", id, ver, detail)
+	f.Hint = hintBadManifestCatalog
+	return f
+}
+
 func (e *Engine) archSupported(platforms []string) bool {
 	if len(platforms) == 0 {
 		return true
@@ -292,6 +431,11 @@ func (e *Engine) archSupported(platforms []string) bool {
 // checkManifest rejects what this version cannot install.
 func (e *Engine) checkManifest(a *App) error {
 	m := a.Manifest
+	// "Upgrade first" comes before "this version cannot do X": a manifest for
+	// a newer platform fails the checks below for that very reason.
+	if need := e.needsPlatform(m.Lifecycle.MinPlatform); need != "" {
+		return e.tooOld(m.ID, need)
+	}
 	if len(m.Release.Images) != 1 {
 		return fault(CodeUnsupported, nil, "%s 有 %d 个镜像，这个版本只能装单容器应用", m.ID, len(m.Release.Images))
 	}
@@ -314,9 +458,6 @@ func (e *Engine) checkManifest(a *App) error {
 		if pv.ViaParam {
 			return fault(CodeUnsupported, nil, "%s 的清单直接引用了平台变量 %s（只能经大模型参数使用），这个版本装不了", m.ID, name)
 		}
-	}
-	if !versionAtLeast(e.cfg.Version, m.Lifecycle.MinPlatform) {
-		return fault(CodeTooOld, nil, "%s 要求 AcornFox %s 以上，这台是 %s", m.ID, m.Lifecycle.MinPlatform, e.cfg.Version)
 	}
 	if !e.archSupported(m.Resources.Platforms) {
 		return fault(CodeArch, nil, "%s 不支持这台机器的 CPU（linux/%s），只支持 %s", m.ID, e.cfg.Arch, strings.Join(m.Resources.Platforms, "、"))
@@ -351,8 +492,33 @@ func (e *Engine) installedCatalogApps(ctx context.Context) (map[string][]state.A
 	return out, nil
 }
 
-// gatewayProviders returns installed, live apps that provide llm_gateway
-// (according to any catalog in use).
+// providerNamed is the gateway provider app called name among providers.
+func providerNamed(providers []state.App, name string) (state.App, bool) {
+	for _, a := range providers {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return state.App{}, false
+}
+
+// stoppedGateway is CAT-INST-10 for a local model gateway that is installed
+// but stopped. why, when set, opens the message (the reuse_data case says
+// which app used it). Its hint is the way out for this case (starting it,
+// not installing another one, which would clash with its name).
+func stoppedGateway(name, why string) error {
+	if why == "" {
+		why = "本机的模型网关 " + name + " "
+	}
+	f := fault(CodeNoGateway, nil, "%s装着但停着：先 acornfox start %s，再装这个应用", why, name)
+	f.Hint = fmt.Sprintf("%s 是用户停的，先问用户：同意就 acornfox start %s，等 acornfox status %s 显示在运行后再装；不想启动它就改用 --llm own（自己的 Key，要用户提供）；不用再装一个 New API", name, name, name)
+	return f
+}
+
+// gatewayProviders returns installed apps that provide llm_gateway
+// (according to any catalog in use) and have a live deployment. One the
+// user stopped is among them (Desired stopped): callers that need it running
+// check that (stoppedGateway).
 func (e *Engine) gatewayProviders(ctx context.Context) ([]state.App, error) {
 	vs, err := e.cfg.Catalog.views()
 	if err != nil {
@@ -430,7 +596,7 @@ func (e *Engine) plan(ctx context.Context, req Request) (kind, target string, pl
 		return "", "", nil, nil, fault(CodeInternal, err, "读应用列表失败")
 	}
 	if req.App != "" {
-		a, err := e.cfg.Catalog.AppIn(ctx, req.Catalog, req.App)
+		a, err := e.appToInstall(ctx, req.Catalog, req.App)
 		if err != nil {
 			return "", "", nil, nil, e.disconnectedHint(err, "", installed[req.App])
 		}
@@ -462,19 +628,31 @@ func (e *Engine) plan(ctx context.Context, req Request) (kind, target string, pl
 			}
 			return "", "", nil, nil, e.disconnectedHint(err, "配方 "+req.Recipe, fromRecipe)
 		}
+		// The recipe's own minimum (it already counts its apps') before any
+		// of its apps is looked at.
+		if need := e.needsPlatform(r.MinPlatform); need != "" {
+			return "", "", nil, nil, e.tooOld("配方 "+r.ID, need)
+		}
 		from := origin
 		if from == "" {
 			from = PublicSource
 		}
 		byID := map[string]*planned{}
 		for _, ra := range r.Apps {
-			a, err := e.cfg.Catalog.AppIn(ctx, from, ra.App)
+			reuse := ra.ReuseInstalled == nil || *ra.ReuseInstalled
+			have := installed[ra.App]
+			// An app that is already installed is used as it is; every app
+			// this task will install is checked here, before the task starts.
+			load := e.appToInstall
+			if reuse && len(have) > 0 {
+				load = e.cfg.Catalog.AppIn
+			}
+			a, err := load(ctx, from, ra.App)
 			if err != nil {
 				return "", "", nil, nil, err
 			}
 			p := &planned{app: a, name: ra.App, source: "recipe:" + r.ID}
-			reuse := ra.ReuseInstalled == nil || *ra.ReuseInstalled
-			if have := installed[ra.App]; reuse && len(have) > 0 {
+			if reuse && len(have) > 0 {
 				p.name, p.reuse = have[0].Name, true
 				// Still being installed by another task: not usable yet.
 				if err := e.busy(p.name); err != nil {
@@ -499,6 +677,10 @@ func (e *Engine) plan(ctx context.Context, req Request) (kind, target string, pl
 			for k, v := range ra.Preset {
 				if _, ok := plan[i].user[k]; !ok {
 					plan[i].user[k] = v
+					if plan[i].preset == nil {
+						plan[i].preset = map[string]bool{}
+					}
+					plan[i].preset[k] = true
 				}
 			}
 		}
@@ -544,8 +726,14 @@ func (e *Engine) plan(ctx context.Context, req Request) (kind, target string, pl
 			return "", "", nil, nil, err
 		}
 		vals[platformKey] = e.platformValues(req.Platform)
+		// Only what the user changed in this request, next to the merged
+		// values above: later the two tell "the user chose this" from "the
+		// platform worked this out at install time".
+		vals[platformUserKey] = platformUserSets(req.Platform)
+		p.origins = paramOrigins(p.app.Manifest, p.user, p.preset)
+		vals[originsKey] = p.origins
 		if p.reuseData {
-			if err := e.restoreKept(ctx, p, vals); err != nil {
+			if err := e.restoreKept(ctx, p, vals, req.Platform); err != nil {
 				return "", "", nil, nil, err
 			}
 		}
@@ -556,8 +744,9 @@ func (e *Engine) plan(ctx context.Context, req Request) (kind, target string, pl
 		needMB += p.app.Manifest.Resources.DiskMB.Min
 		if e.cfg.Gateway != nil {
 			for _, img := range p.app.Manifest.Release.Images {
-				if img.Artifact != "" && img.ArtifactSHA256 != "" {
-					archive += img.ArtifactSize
+				// Only this machine's architecture's archive is downloaded.
+				if art, ok := img.ArtifactFor(e.cfg.Arch); ok {
+					archive += art.Size
 				}
 			}
 		}
@@ -577,47 +766,6 @@ type DiskSpace struct {
 	UploadFree uint64 // 0 with UploadPath "" when unknown (not checked)
 	UploadPath string
 	Same       bool // both directories are on one partition
-}
-
-// restoreKept puts back, for a reuse_data install, the parameters kept when
-// the old app of this name was deleted with its data: every parameter the
-// user did not give now (passwords, secrets, the admin name) gets its old
-// value, so the app finds its data initialized with the same ones. Old data
-// of another catalog app is refused (CAT-INST-24). No kept record (deleted by
-// an older version, or never from the catalog) is not an error: the install
-// then goes on with new values and finds out at init.
-func (e *Engine) restoreKept(ctx context.Context, p *planned, vals Values) error {
-	k, err := e.cfg.Store.GetKeptCatalogSecrets(ctx, p.name)
-	if errors.Is(err, state.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return fault(CodeInternal, err, "读保留的参数失败")
-	}
-	if k.CatalogID != p.app.Manifest.ID {
-		return fault(CodeOldVolumes, nil, "留下的数据是 %s 的，不能接到 %s 上；用 --name 换个名字装", k.CatalogID, p.app.Manifest.ID)
-	}
-	plain, err := e.box.open(k.ParamsEnc)
-	if err != nil {
-		return fault(CodeInternal, err, "保留的参数解不开（数据目录里的 secrets/catalog.key 换过？）")
-	}
-	var old map[string]any
-	if err := json.Unmarshal(plain, &old); err != nil {
-		return fault(CodeInternal, err, "保留的参数格式不对")
-	}
-	for _, prm := range p.app.Manifest.Params {
-		if prm.Type == "llm_provider" {
-			continue // chosen again for this install
-		}
-		if _, given := p.user[prm.Key]; given {
-			continue
-		}
-		if s, ok := old[prm.Key].(string); ok {
-			vals[prm.Key] = s
-		}
-	}
-	p.restored = true
-	return nil
 }
 
 // checkDisk refuses an install that does not fit (CAT-INST-27). needMB is
@@ -689,7 +837,14 @@ func (e *Engine) resolveLLM(p *planned, vals Values, providers []state.App) erro
 		}
 		c, _ := vals[prm.Key].(*LLMChoice)
 		wantModel := ""
+		// Who chose the source, and who named the model.
+		given := OriginUser
+		if p.preset[prm.Key] {
+			given = OriginRecipe
+		}
+		origin := given
 		if p.link != "" && e.usesLinkFor(p.app.Manifest, prm.Key) {
+			origin = OriginRecipe
 			model := ""
 			if c != nil {
 				// The recipe wires this parameter to its gateway: a different
@@ -708,14 +863,37 @@ func (e *Engine) resolveLLM(p *planned, vals Values, providers []state.App) erro
 			wantModel = c.Model
 			c = nil
 		}
+		// Installing on old data: the old app's model source comes back when
+		// this request names none, and the same gateway chosen again may get
+		// the old token back (reuse.go).
+		modelKept := false
+		if p.kept != nil {
+			r, restored, mk, err := e.keptLLM(p, prm, c, wantModel, providers)
+			if err != nil {
+				return err
+			}
+			c, modelKept = r, mk
+			if restored {
+				origin = OriginRestored
+			}
+		}
 		if c == nil {
 			if prm.LLM != nil && prm.LLM.LocalGateway && len(providers) == 1 {
 				c = &LLMChoice{Source: LLMLocalGateway, App: providers[0].Name}
+				origin = OriginPlatform
 			} else if prm.Required {
 				return fault(CodeBadParams, nil, "要选大模型（%s）：--llm local 用本机 New API，或 --llm own 填自己的 base_url、api_key、model", prm.Key)
 			} else {
+				p.setOrigin(prm.Key, OriginUnset)
 				continue
 			}
+		}
+		modelOrigin := given
+		switch {
+		case modelKept:
+			modelOrigin = OriginRestored // the old app's model
+		case c.Model == "" && wantModel == "":
+			modelOrigin = OriginPlatform // the platform's default model
 		}
 		switch c.Source {
 		case LLMPlatform:
@@ -748,6 +926,12 @@ func (e *Engine) resolveLLM(p *planned, vals Values, providers []state.App) erro
 					return fault(CodeNoGateway, nil, "本机没有在运行的模型网关 %s", c.App)
 				}
 			}
+			// Installed but stopped (acornfox stop): say so now, with the
+			// way out, instead of failing later at the create step with
+			// advice to install one.
+			if pa, ok := providerNamed(providers, c.App); ok && pa.Desired == state.DesiredStopped {
+				return stoppedGateway(c.App, "")
+			}
 			if c.Model == "" {
 				c.Model = wantModel
 			}
@@ -759,6 +943,8 @@ func (e *Engine) resolveLLM(p *planned, vals Values, providers []state.App) erro
 			}
 		}
 		vals[prm.Key] = c
+		p.setOrigin(prm.Key, origin)
+		p.setOrigin(prm.Key+".model", modelOrigin)
 	}
 	return nil
 }
@@ -857,7 +1043,7 @@ func (e *Engine) Task(ctx context.Context, id string) (TaskView, error) {
 	if err != nil {
 		return TaskView{}, fault(CodeInternal, err, "读安装任务失败")
 	}
-	return taskViewOf(t), nil
+	return withTiming(taskViewOf(t), time.Now()), nil
 }
 
 // Tasks lists recent tasks, newest first.
@@ -867,8 +1053,9 @@ func (e *Engine) Tasks(ctx context.Context, limit int) ([]TaskView, error) {
 		return nil, fault(CodeInternal, err, "读安装任务失败")
 	}
 	out := make([]TaskView, 0, len(ts))
+	now := time.Now()
 	for _, t := range ts {
-		out = append(out, taskViewOf(t))
+		out = append(out, withTiming(taskViewOf(t), now))
 	}
 	return out, nil
 }

@@ -1,13 +1,18 @@
 // 概览：出问题时的提示（带“复制诊断给 AI”）、运行情况、资源、来源、访问地址（只本机的给怎么打开的说明）、
 // 经本机 New API 连模型时令牌不限额的提示、首次登录信息。
-import { useEffect, useState } from 'react'
+// 最上面两张小图：内存、CPU 的近 1 小时或 24 小时（GET /v1/metrics/apps/{app}/history，30 秒刷新一次）。
+// 历史只存在后台服务的内存里，重启后从头记；旧服务端没有这个接口时两张图不显示。
+import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Copy, FileText } from 'lucide-react'
 import { api } from '@/lib/api'
+import { appCharts } from '@/lib/apphistory'
+import { RANGE_TAB, type RangeKey } from '@/lib/dashboard'
+import { usePoll } from '@/lib/hooks'
 import { deployDiagnosisForAI, deriveStatus, failedDeployment, gatewayTokenText, liveSeq, loginAddress, oldVersionServing, openableAddress } from '@/lib/appstatus'
 import { copyText } from '@/lib/clipboard'
 import { mbText, pctText, sinceText } from '@/lib/format'
 import { appHref, go } from '@/lib/router'
-import type { FirstLogin } from '@/lib/types'
+import type { AppHistory, FirstLogin } from '@/lib/types'
 import { useConsole } from '@/state'
 import { KV } from '@/components/bits'
 import { Button } from '@/components/ui/button'
@@ -16,6 +21,7 @@ import { Alert } from '@/components/ui/controls'
 import { CopyLine } from '@/components/ui/copy'
 import { useToast } from '@/components/ui/toast'
 import { FirstLoginCard } from '../store/install-dialog'
+import { TimeChart } from '../home/viz'
 import { OpenHintBlock } from './open-hint'
 import type { TabProps } from './app-page'
 
@@ -30,6 +36,40 @@ function useFirstLogin(app: string, fromCatalog: boolean) {
     return () => { alive = false }
   }, [app, fromCatalog])
   return fl
+}
+
+// 内存、CPU 两张小图和时间范围切换。没有历史接口（旧服务端）时什么都不显示。
+function HistoryCharts({ app, running }: { app: string; running: boolean }) {
+  const [range, setRange] = useState<RangeKey>('1h')
+  const hist = usePoll((s) => api.get<AppHistory>('/v1/metrics/apps/' + encodeURIComponent(app) + '/history?range=' + range, s).catch(() => null), 30000, [app, range])
+  const h = hist.data
+  const c = useMemo(() => (h ? appCharts(h) : null), [h])
+  if (!h || !c || !h.ranges.length) return null
+  const empty = running ? '还没有记录，每 30 秒记一次，稍等一会儿' : '这段时间没有记录（应用停着的时候不记）'
+  const head = (name: string) => (
+    <div className="mb-2 flex items-center justify-between text-xs font-medium">
+      <span>{name} <span className="font-normal text-muted-foreground">近 {RANGE_TAB[h.range] || h.range}</span></span>
+    </div>
+  )
+  return (
+    <div data-testid="app-history" className="flex flex-col gap-2">
+      <div className="flex items-center justify-end gap-1" role="group" aria-label="时间范围">
+        {h.ranges.filter((r): r is RangeKey => r === '1h' || r === '24h').map((r) => (
+          <Button key={r} size="sm" variant={r === range ? 'secondary' : 'ghost'} aria-pressed={r === range} onClick={() => setRange(r)}>{RANGE_TAB[r]}</Button>
+        ))}
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <Card className="p-3.5">
+          {head('内存')}
+          <div className="h-28">{c.count ? <TimeChart d={c.mem} type="area" gaps /> : <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{empty}</div>}</div>
+        </Card>
+        <Card className="p-3.5">
+          {head('CPU')}
+          <div className="h-28">{c.count ? <TimeChart d={c.cpu} type="area" gaps /> : <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{empty}</div>}</div>
+        </Card>
+      </div>
+    </div>
+  )
 }
 
 export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
@@ -58,6 +98,7 @@ export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
           容器停了，系统会自动拉起；一直起不来就看日志
         </Alert>
       )}
+      {!!a.current_deployment && <HistoryCharts app={a.name} running={!!a.observed?.running} />}
       <div className="grid gap-3 md:grid-cols-3">
         <Card className="px-3.5 py-2">
           <div className="pt-1 text-xs font-medium">运行</div>

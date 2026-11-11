@@ -64,8 +64,16 @@ import (
 	"github.com/acornfox/acornfox/internal/identity"
 )
 
-// DefaultTimeout bounds each request to the gateway (not the download).
-const DefaultTimeout = 10 * time.Second
+// DefaultTimeout bounds each request to the gateway: sending the small
+// signed request and reading its JSON answer (W1, W2, W10). It never bounds
+// a download: the caller fetches the file from the issued URL with its own
+// client (appinstall and setup bound a download by inactivity, not by total
+// time). From test machines in China the gateway took 1.2 to 8.3 seconds to
+// send its first byte; at 10 seconds installs gave up on it now and then and
+// fell back to the much slower public image sources, so it waits 30. When
+// the gateway is down for real, the fallback starts 30 seconds later.
+// doctor's HEAD to the gateway has its own 5 seconds (hostcheck).
+const DefaultTimeout = 30 * time.Second
 
 // ClockSkewMin is how far the gateway's Date must be from this machine's
 // clock before a GW-AUTH-01 is taken as a clock problem and retried with the

@@ -1,0 +1,77 @@
+{
+  "scenario": "new-api-user-values",
+  "request": {
+    "app": "new-api",
+    "params": {
+      "admin_password": "p\"a\\ss'w{{params.admin_username}}<&>中文",
+      "admin_username": "root_1"
+    },
+    "platform": {
+      "tz": "Europe/Berlin"
+    },
+    "name": "gateway"
+  },
+  "platform": {
+    "China": false,
+    "Cloud": "",
+    "TZ": "",
+    "ChatModel": ""
+  },
+  "apps": [
+    {
+      "app": "gateway",
+      "catalog_id": "new-api",
+      "version": "v1.0.0-rc.48",
+      "settings": {
+        "port": 3000,
+        "health_path": "/api/status",
+        "exposure": "local",
+        "command": [],
+        "pids_limit": 0,
+        "memory_mb": 512,
+        "links": []
+      },
+      "env": [
+        {
+          "key": "SESSION_SECRET",
+          "value": "096d91c80a6cc0e9ab41e35643396e8a9df4cdd30c352ea04fe8a76900d141b0",
+          "secret": true
+        },
+        {
+          "key": "SQLITE_PATH",
+          "value": "/data/one-api.db",
+          "secret": false
+        },
+        {
+          "key": "TZ",
+          "value": "Europe/Berlin",
+          "secret": false
+        }
+      ],
+      "files": [],
+      "init": [
+        {
+          "method": "POST",
+          "path": "/api/setup",
+          "content_type": "application/json",
+          "body": "{\"DemoSiteEnabled\":false,\"SelfUseModeEnabled\":true,\"confirmPassword\":\"p\\\"a\\\\ss'w{{params.admin_username}}\\u003c\\u0026\\u003e中文\",\"password\":\"p\\\"a\\\\ss'w{{params.admin_username}}\\u003c\\u0026\\u003e中文\",\"username\":\"root_1\"}"
+        }
+      ],
+      "first_login": {
+        "app": "gateway",
+        "url": "http://server.example:8080/gateway",
+        "fields": [
+          {
+            "label": "账号",
+            "value": "root_1"
+          },
+          {
+            "label": "密码",
+            "value": "p\"a\\ss'w{{params.admin_username}}<&>中文",
+            "secret": true
+          }
+        ]
+      }
+    }
+  ]
+}

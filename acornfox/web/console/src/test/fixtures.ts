@@ -30,6 +30,15 @@ export const catalog: CatalogView = {
   ],
 }
 
+// 目录里有“要更新版本的 AcornFox 才能装”的应用时的样子：Hermes 要 0.6.0，带它的两个配方跟着要；New API 不受影响。
+// 服务端不用升级时给空串，旧服务端没有这个字段，两种都留着。
+export const NEEDS = '0.6.0'
+export const catalogNeedsUpgrade: CatalogView = {
+  ...catalog,
+  apps: catalog.apps.map((a) => (a.id === 'hermes-agent' ? { ...a, needs_platform: NEEDS } : { ...a, needs_platform: '' })),
+  recipes: catalog.recipes.map((r) => (r.apps.some((x) => x.app === 'hermes-agent') ? { ...r, needs_platform: NEEDS } : r)),
+}
+
 export const newApiDetail: AppDetail = {
   id: 'new-api', version: 'v1.0.0-rc.48', versions: ['v1.0.0-rc.48'], name: 'New API', summary: catalog.apps[1].summary, category: 'ai-gateway',
   homepage: 'https://github.com/QuantumNous/new-api', license: 'AGPL-3.0', icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>',

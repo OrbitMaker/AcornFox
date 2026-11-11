@@ -1,6 +1,9 @@
 // 安装弹窗：填写 → 提交安装任务 → 按任务步骤实时显示进度 → 成功给首次登录信息，失败给故障编号和建议。
 // 接口：GET /v1/catalog/apps/{id}（表单）、POST /v1/catalog/install（202 返回任务）、
 //       GET /v1/catalog/install/{task}（每秒轮询）、GET /v1/apps/{app}/first-login?reveal=true（点了才显示密码）。
+// 要更新版本的 AcornFox 才能装的（needs_platform 有值）：说明要升到哪个版本、给升级命令，不能提交；
+// 提交后才被拒绝或失败的：服务端的说明原样显示；错误里带 needs_platform 的，下面说“要先升级到 x.y.z”并给升级命令。
+// 表单要读的应用详情读不了、原因是版本不够时（409，带 needs_platform）也一样。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, CircleCheck, Copy, ExternalLink, Eye, EyeOff, KeyRound } from 'lucide-react'
 import { cn, safeHref } from '@/lib/utils'
@@ -11,6 +14,7 @@ import {
   type FormProblem, type InstallForm, type LLMField, type LLMSource, type PlainField, type PlatformField,
 } from '@/lib/catalog'
 import { copyText } from '@/lib/clipboard'
+import { faultNeedsPlatform, installNeedsPlatform } from '@/lib/upgrade'
 import { appHref, go } from '@/lib/router'
 import { gatewayTokenText, isLoopbackURL, loginAddress, openableAddress } from '@/lib/appstatus'
 import type { AppDetail, AppView, FirstLogin, OpenHint, Recipe, StepProgress, TaskView } from '@/lib/types'
@@ -23,6 +27,7 @@ import { Dialog, DialogHead } from '@/components/ui/dialog'
 import { Input, Label } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
 import { OpenHintBlock } from '../apps/open-hint'
+import { UpgradeFirst, UpgradeNeeded } from './upgrade-note'
 
 const TITLE_ID = 'install-title'
 
@@ -124,6 +129,7 @@ function InstallBody({ target, onClose }: { target: InstallTarget; onClose: () =
       <>
         <DialogHead id={TITLE_ID} title={(target.kind === 'app' ? '安装 ' : '') + title} />
         <p className="text-sm text-danger" role="alert">{loadErr.message}</p>
+        {faultNeedsPlatform(loadErr) && <UpgradeFirst version={faultNeedsPlatform(loadErr)} className="mt-3" />}
       </>
     )
   }
@@ -160,6 +166,8 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
   const mem = target.kind === 'app' ? appMemory(d0) : recipeMemory(recipe!, appsIn(catalog, src))
   const check = memoryCheck(mem.need, mem.min, freeMB(resources))
   const command = useMemo(() => cliCommand(form), [form])
+  // 服务端给的是目录里当前版本的要求；选了别的版本时交给服务端判断。
+  const needs = target.kind === 'recipe' || !form.version || form.version === form.defaultVersion ? installNeedsPlatform(target.kind, details, recipe) : ''
   const required = form.plain.filter((p) => p.param.required && !p.param.generated && (p.param.default === undefined || p.param.default === ''))
   const optional = form.plain.filter((p) => !required.includes(p))
   const isGateway = (a: { provides: string[] | null }) => (a.provides || []).includes('llm_gateway')
@@ -247,11 +255,13 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
           {check.tone === 'ok' ? <CircleCheck className="size-3.5 text-success" /> : <AlertTriangle className="size-3.5" />}
           {check.text}
         </div>
+        {needs && <UpgradeNeeded version={needs} />}
         <CopyLine text={command} />
         {err && (
           <div className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs" role="alert">
             <div className="font-medium text-danger">{err.code.startsWith('CAT-') ? err.code + ' · ' : ''}{err.message}</div>
             {err.hint && <div className="mt-0.5 text-muted-foreground">{err.hint}</div>}
+            {faultNeedsPlatform(err) && <UpgradeFirst version={faultNeedsPlatform(err)} className="mt-2" />}
             {err.code === 'CAT-INST-24' && (
               <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="reuse-data">
                 {!confirmReuse ? (
@@ -270,7 +280,7 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
       </div>
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" onClick={onClose}>取消</Button>
-        <Button onClick={() => submit()} disabled={busy}>{busy && <Spinner />}{target.kind === 'recipe' ? '开始' : '安装'}</Button>
+        <Button onClick={() => submit()} disabled={busy || !!needs}>{busy && <Spinner />}{target.kind === 'recipe' ? '开始' : '安装'}</Button>
       </div>
     </>
   )
@@ -433,8 +443,9 @@ function TaskProgress({ task: t, title, onClose }: { task: TaskView; title: stri
           {t.keep_volumes_on_failure ? (
             <div className="mt-1 text-muted-foreground">数据卷按要求保留了：{t.apps.flatMap((a) => a.volumes || []).join('、') || '无'}</div>
           ) : (
-            <div className="mt-1 text-muted-foreground">这次新建的应用和数据卷已经清理，可以直接重装。</div>
+            <div className="mt-1 text-muted-foreground">这次新建的应用和数据卷已经清理，{faultNeedsPlatform(t.fault) ? '升级后再装。' : '可以直接重装。'}</div>
           )}
+          {faultNeedsPlatform(t.fault) && <UpgradeFirst version={faultNeedsPlatform(t.fault)} className="mt-2" />}
         </div>
       )}
       {/* 总是渲染：改成局域网后 openHint 没了，这一块在原位置显示完成态。 */}

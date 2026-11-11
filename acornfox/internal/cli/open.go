@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/acornfox/acornfox/internal/client"
+	"github.com/acornfox/acornfox/internal/faults"
 )
 
 // openUsage is `acornfox open -h`.
@@ -217,8 +218,7 @@ func (a *app) cmdOpenApp(ctx context.Context, name string, noBrowser bool, port 
 		return a.out.fail(aerr)
 	}
 	if ap.PublicPort <= 0 {
-		return a.openFail(codeOpenNoPort, name+" 还没有访问端口（没部署成功，或只在容器网络里）",
-			"运行 acornfox status "+name+" 看状态；部署成功后再打开")
+		return a.openFail(codeOpenNoPort, name+" 还没有访问端口（没部署成功，或只在容器网络里）", openHint(codeOpenNoPort, name))
 	}
 
 	var (
@@ -230,9 +230,7 @@ func (a *app) cmdOpenApp(ctx context.Context, name string, noBrowser bool, port 
 		appURL = "http://127.0.0.1:" + strconv.Itoa(ap.PublicPort)
 	case t.URL != "":
 		if ap.LocalOnly || ap.Exposure == "local" {
-			return a.openFail(codeOpenLocalOnly, name+" 只在服务器本机能打开，经网址连接的服务器开不了隧道",
-				"用 acornfox target add 名称 --ssh 用户@主机 登记这台服务器后再运行 acornfox open "+name+
-					"；或经用户同意改成局域网：acornfox app set --app "+name+" --expose lan")
+			return a.openFail(codeOpenLocalOnly, name+" 只在服务器本机能打开，经网址连接的服务器开不了隧道", openHint(codeOpenLocalOnly, name))
 		}
 		appURL = urlTargetAppURL(t.URL, ap)
 	default:
@@ -318,6 +316,14 @@ func urlTargetAppURL(targetURL string, ap client.App) string {
 
 // openFail reports a fault of open APP: in --json a diagnosis (stage open),
 // otherwise the reason, the fault code and what to do. Exit code 1.
+// openHint is the fault catalog's next step for an OPEN-APP code, with the
+// placeholder 应用名 replaced by the app's name: the hint here, `acornfox
+// faults OPEN-APP-0x` and docs/faults.md say the same thing.
+func openHint(code, name string) string {
+	f, _ := faults.Find(code)
+	return strings.ReplaceAll(f.Next, "应用名", name)
+}
+
 func (a *app) openFail(code, msg, hint string) int {
 	if a.out.json {
 		a.out.emitDiagnosisJSON(client.Diagnosis{Stage: "open", Code: code, Message: msg, Hint: hint})

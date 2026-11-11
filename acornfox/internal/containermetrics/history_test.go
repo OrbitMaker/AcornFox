@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,7 +26,11 @@ type phaseStart struct {
 	id domain.ID
 	at time.Time
 }
+
+// phaseClient is a read that never answers: each call reports when it started
+// (in virtual time) and then blocks until its deadline or cancellation.
 type phaseClient struct {
+	clock    *virtualClock
 	started  chan phaseStart
 	inflight atomic.Int32
 	peak     atomic.Int32
@@ -36,7 +42,7 @@ func (c *phaseClient) ReadManagedImageMetrics(ctx context.Context, q appcontract
 	}
 	defer c.inflight.Add(-1)
 	select {
-	case c.started <- phaseStart{id: q.DeploymentID, at: time.Now()}:
+	case c.started <- phaseStart{id: q.DeploymentID, at: c.clock.Now()}:
 	case <-ctx.Done():
 		return appcontracts.ImageMetricsResult{}, ctx.Err()
 	}
@@ -44,53 +50,280 @@ func (c *phaseClient) ReadManagedImageMetrics(ctx context.Context, q appcontract
 	return appcontracts.ImageMetricsResult{}, ctx.Err()
 }
 
-func TestSamplerThirtyTwoSlowReadsTickPhaseAndCancellationJoin(t *testing.T) {
+// virtualClock drives the sampler in virtual time. Ticks and read deadlines
+// happen only when the test says so, so the schedule under test does not
+// depend on how fast the machine runs.
+type virtualClock struct {
+	mu        sync.Mutex
+	now       time.Time
+	ticks     chan time.Time // unbuffered: a send returns once Run has taken the tick
+	intervals []time.Duration
+	budgets   []time.Duration
+	timers    []virtualTimer
+}
+
+type virtualTimer struct {
+	due    time.Time
+	cancel context.CancelFunc
+}
+
+func newVirtualClock(start time.Time) *virtualClock {
+	return &virtualClock{now: start, ticks: make(chan time.Time)}
+}
+
+func (c *virtualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *virtualClock) NewTicker(d time.Duration) (<-chan time.Time, func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.intervals = append(c.intervals, d)
+	return c.ticks, func() {}
+}
+
+func (c *virtualClock) WithTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.budgets = append(c.budgets, d)
+	c.timers = append(c.timers, virtualTimer{due: c.now.Add(d), cancel: cancel})
+	return ctx, cancel
+}
+
+func (c *virtualClock) set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = at
+}
+
+// expire ends every read whose deadline is at or before the current virtual
+// time and reports how many it ended.
+func (c *virtualClock) expire() int {
+	c.mu.Lock()
+	var due []context.CancelFunc
+	kept := c.timers[:0]
+	for _, timer := range c.timers {
+		if timer.due.After(c.now) {
+			kept = append(kept, timer)
+		} else {
+			due = append(due, timer.cancel)
+		}
+	}
+	c.timers = kept
+	c.mu.Unlock()
+	for _, cancel := range due {
+		cancel()
+	}
+	return len(due)
+}
+
+func (c *virtualClock) recorded() (intervals, budgets []time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.intervals...), append([]time.Duration(nil), c.budgets...)
+}
+
+// hangGuard only stops a broken build from hanging the run. No expected state
+// waits on real time, so a slow or loaded machine just takes longer.
+const hangGuard = 30 * time.Second
+
+func activeReads(s *Sampler) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, id := range s.active {
+		if !id.Empty() {
+			n++
+		}
+	}
+	return n
+}
+
+func waitActiveReads(t *testing.T, s *Sampler, want int) {
+	t.Helper()
+	guard := time.Now().Add(hangGuard)
+	for activeReads(s) != want {
+		if time.Now().After(guard) {
+			t.Fatalf("in-flight reads stayed at %d, want %d", activeReads(s), want)
+		}
+		runtime.Gosched()
+	}
+}
+
+func receiveStart(t *testing.T, client *phaseClient) phaseStart {
+	t.Helper()
+	select {
+	case started := <-client.started:
+		return started
+	case <-time.After(hangGuard):
+		t.Fatal("a dispatched read never started")
+		return phaseStart{}
+	}
+}
+
+func joinSampler(t *testing.T, s *Sampler) {
+	t.Helper()
+	joined := make(chan struct{})
+	go func() { s.wg.Wait(); close(joined) }()
+	select {
+	case <-joined:
+	case <-time.After(hangGuard):
+		t.Fatal("in-flight reads did not join after cancellation")
+	}
+}
+
+func phaseTargets() []appcontracts.ImageMetricsRequest {
 	targets := make([]appcontracts.ImageMetricsRequest, 32)
 	for i := range targets {
 		targets[i] = appcontracts.ImageMetricsRequest{AdminID: "admin", DeploymentID: domain.ID(fmt.Sprintf("dep-phase-%02d", i))}
 	}
-	client := &phaseClient{started: make(chan phaseStart, 32)}
-	s := &Sampler{Store: fixedTargetStore{selection: appcontracts.ImageMetricsTargetSelection{Targets: targets}}, History: NewHistory(time.Now().UTC()), interval: 50 * time.Millisecond, readTimeout: 100 * time.Millisecond}
+	return targets
+}
+
+// rotateSlowReads runs one launch rotation over 32 targets whose reads always
+// run into the read deadline, using the production interval and budget in
+// virtual time. When a deadline and a tick fall on the same instant,
+// tickFirst lets the tick see both slots still busy (the slow phase the
+// freshness budget is sized for); otherwise the slots free up first.
+func rotateSlowReads(t *testing.T, tickFirst bool) ([]phaseStart, *phaseClient, *virtualClock) {
+	t.Helper()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := newVirtualClock(start)
+	targets := phaseTargets()
+	client := &phaseClient{clock: clock, started: make(chan phaseStart, len(targets))}
+	s := &Sampler{Store: fixedTargetStore{selection: appcontracts.ImageMetricsTargetSelection{Targets: targets}}, History: NewHistory(start), clock: clock}
 	s.SetClient(client)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := s.Start(ctx)
-	deadline := time.After(4 * time.Second)
-	var first, last time.Time
-	seen := make(map[domain.ID]bool, 32)
-	for i := range targets {
-		select {
-		case started := <-client.started:
-			pair := i / 2
-			if (started.id != targets[2*pair].DeploymentID && started.id != targets[2*pair+1].DeploymentID) || seen[started.id] {
-				cancel()
-				<-done
-				t.Fatalf("slow tick skipped/duplicated pair %d: %s", pair, started.id)
-			}
-			seen[started.id] = true
-			if i == 0 {
-				first = started.at
-			}
-			last = started.at
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatalf("32 slow targets did not complete one launch rotation; reached %d", i)
+	defer func() { cancel(); joinSampler(t, s) }()
+	expire := func() {
+		before := activeReads(s)
+		if n := clock.expire(); n > 0 {
+			waitActiveReads(t, s, before-n)
 		}
 	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("cancel did not join all in-flight sample reads")
+	var launches []phaseStart
+	for step := 0; len(launches) < len(targets); step++ {
+		if step > 4*len(targets) {
+			t.Fatalf("no full launch rotation after %d ticks; reached %d", step, len(launches))
+		}
+		clock.set(start.Add(time.Duration(step) * sampleInterval))
+		if !tickFirst {
+			expire()
+		}
+		before := activeReads(s)
+		s.tick(ctx)
+		for launched := activeReads(s) - before; launched > 0; launched-- {
+			launches = append(launches, receiveStart(t, client))
+		}
+		if tickFirst {
+			expire()
+		}
 	}
-	if c := client.peak.Load(); c > 2 || c < 1 {
-		t.Fatalf("background read concurrency escaped two slots: %d", c)
+	for i, started := range launches {
+		pair := i / 2
+		if started.id != targets[2*pair].DeploymentID && started.id != targets[2*pair+1].DeploymentID {
+			t.Fatalf("slow tick skipped/duplicated pair %d: launch %d was %s", pair, i, started.id)
+		}
+		if i%2 == 1 && started.id == launches[i-1].id {
+			t.Fatalf("pair %d launched %s twice", pair, started.id)
+		}
 	}
-	if elapsed := last.Sub(first); elapsed > staleAfterFor(32, 100*time.Millisecond, 50*time.Millisecond)+100*time.Millisecond {
-		t.Fatalf("ticker phase exceeded scaled 250-second freshness budget: %v", elapsed)
-	} else {
-		t.Logf("32_target_slow_rotation=%s scaled_stale_after=%s", elapsed, staleAfterFor(32, 100*time.Millisecond, 50*time.Millisecond))
+	return launches, client, clock
+}
+
+func TestSamplerThirtyTwoSlowReadsTickPhaseAndCancellationJoin(t *testing.T) {
+	pairs := time.Duration(32 / 2)
+	for _, tc := range []struct {
+		name      string
+		tickFirst bool
+		rotation  time.Duration
+	}{
+		// A read ending just after a tick waits one more tick: each pair takes
+		// budget + interval, which is what staleAfter is sized for.
+		{name: "tick_before_deadline", tickFirst: true, rotation: (pairs - 1) * (readBudget + sampleInterval)},
+		// Slots free up first: the next pair starts on the deadline tick.
+		{name: "deadline_before_tick", tickFirst: false, rotation: (pairs - 1) * readBudget},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launches, client, clock := rotateSlowReads(t, tc.tickFirst)
+			if c := client.peak.Load(); c != 2 {
+				t.Fatalf("background read concurrency was %d, want exactly two slots", c)
+			}
+			_, budgets := clock.recorded()
+			for _, budget := range budgets {
+				if budget != readBudget {
+					t.Fatalf("read deadline %v, want production %v", budget, readBudget)
+				}
+			}
+			elapsed := launches[len(launches)-1].at.Sub(launches[0].at)
+			if elapsed != tc.rotation {
+				t.Fatalf("32-target slow rotation took %v, want %v", elapsed, tc.rotation)
+			}
+			if limit := staleAfter(32); elapsed > limit {
+				t.Fatalf("slow rotation %v exceeded the %v freshness budget", elapsed, limit)
+			}
+			t.Logf("32_target_slow_rotation=%s stale_after=%s", elapsed, staleAfter(32))
+		})
 	}
+
+	t.Run("cancel_joins_inflight_reads", func(t *testing.T) {
+		start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		clock := newVirtualClock(start)
+		targets := phaseTargets()
+		client := &phaseClient{clock: clock, started: make(chan phaseStart, len(targets))}
+		s := &Sampler{Store: fixedTargetStore{selection: appcontracts.ImageMetricsTargetSelection{Targets: targets}}, History: NewHistory(start), clock: clock}
+		s.SetClient(client)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := s.Start(ctx)
+		// Run's first tick launches the first pair at once; in virtual time
+		// their deadlines never pass, so only cancellation can end them.
+		first, second := receiveStart(t, client), receiveStart(t, client)
+		if first.id == second.id || (first.id != targets[0].DeploymentID && first.id != targets[1].DeploymentID) || (second.id != targets[0].DeploymentID && second.id != targets[1].DeploymentID) {
+			cancel()
+			t.Fatalf("first pair changed: %s %s", first.id, second.id)
+		}
+		// Two more ticks while both slots are busy. The second send returns
+		// only after Run has finished the first tick, which must have found
+		// no free slot and launched nothing.
+		for i := 1; i <= 2; i++ {
+			select {
+			case clock.ticks <- start.Add(time.Duration(i) * sampleInterval):
+			case <-time.After(hangGuard):
+				cancel()
+				t.Fatal("Run stopped taking ticks from its ticker")
+			}
+		}
+		if extra := len(client.started); extra != 0 {
+			cancel()
+			t.Fatalf("busy slots queued %d catch-up reads", extra)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(hangGuard):
+			t.Fatal("cancel did not join all in-flight sample reads")
+		}
+		if n := client.inflight.Load(); n != 0 {
+			t.Fatalf("Start reported done with %d reads still running", n)
+		}
+		intervals, budgets := clock.recorded()
+		if len(intervals) != 1 || intervals[0] != sampleInterval {
+			t.Fatalf("ticker intervals %v, want one production %v ticker", intervals, sampleInterval)
+		}
+		// The tick still in progress at cancellation may legally launch reads
+		// that end at once, so only the first pair's count is fixed.
+		if len(budgets) < 2 {
+			t.Fatalf("read deadlines %v, want at least the first pair", budgets)
+		}
+		for _, budget := range budgets {
+			if budget != readBudget {
+				t.Fatalf("read deadline %v, want production %v", budget, readBudget)
+			}
+		}
+	})
 }
 
 func TestHistoryFixedCapacityRotationExpiryAndIndependentCopies(t *testing.T) {

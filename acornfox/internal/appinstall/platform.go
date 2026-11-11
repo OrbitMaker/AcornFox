@@ -140,6 +140,24 @@ func checkPlatformSets(sets map[string]string) error {
 	return nil
 }
 
+// platformUserKey is where Values keep only the platform variables the user
+// changed in the install request (--set platform.<name>=…), next to the
+// merged values under platformKey. An app installed before this key existed
+// has none: its platform values cannot be told apart and count as "the
+// value at install time".
+const platformUserKey = "@platform_user"
+
+// platformUserSets is the user's changes as they are saved (already
+// checked); never nil, so a saved install with no change is told from an old
+// record without the key.
+func platformUserSets(sets map[string]string) map[string]string {
+	out := make(map[string]string, len(sets))
+	for k, v := range sets {
+		out[k] = strings.TrimSpace(v)
+	}
+	return out
+}
+
 // platformValues is base plus the user's changes (already checked).
 func (e *Engine) platformValues(sets map[string]string) map[string]string {
 	out := e.platformBase()

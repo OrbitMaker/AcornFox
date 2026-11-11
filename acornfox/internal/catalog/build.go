@@ -41,12 +41,39 @@ const (
 // "public", a private catalog only its own id. It is left out when the
 // builder was not told (older publishes); such an index is still accepted
 // for either, see CheckCatalog.
+//
+// Recipes holds the recipes every platform version can install. RecipesV2
+// holds the ones that need more than BasePlatform, each with its MinPlatform
+// filled in. The first platform release reads Recipes only and ignores keys
+// it does not know, so it never shows a recipe it could not install (it has
+// no version check for recipes). Later releases read both: use AllRecipes.
+// RecipesV2 is left out of the file when it is empty, so a catalog without
+// such recipes builds to the same bytes as before the key existed.
 type Index struct {
-	Schema  int        `json:"schema"`
-	Serial  int64      `json:"serial"`
-	Catalog string     `json:"catalog,omitempty"`
-	Apps    []IndexApp `json:"apps"`
-	Recipes []Recipe   `json:"recipes"`
+	Schema    int        `json:"schema"`
+	Serial    int64      `json:"serial"`
+	Catalog   string     `json:"catalog,omitempty"`
+	Apps      []IndexApp `json:"apps"`
+	Recipes   []Recipe   `json:"recipes"`
+	RecipesV2 []Recipe   `json:"recipes_v2,omitempty"`
+}
+
+// AllRecipes returns Recipes and RecipesV2 together, sorted by id. Check a
+// recipe's MinPlatform (empty means BasePlatform) before installing it. When
+// an id is in both lists the one in Recipes is kept.
+func (i *Index) AllRecipes() []Recipe {
+	out := make([]Recipe, 0, len(i.Recipes)+len(i.RecipesV2))
+	seen := map[string]bool{}
+	for _, list := range [][]Recipe{i.Recipes, i.RecipesV2} {
+		for _, r := range list {
+			if !seen[r.ID] {
+				seen[r.ID] = true
+				out = append(out, r)
+			}
+		}
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].ID < out[b].ID })
+	return out
 }
 
 // PublicCatalog is the Catalog value of the public catalog's index.
@@ -149,7 +176,15 @@ func BuildFor(dir string, serial int64, catalogID string) (*Bundle, error) {
 		if err := readYAML(filepath.Join(dir, "recipes", id, recipeName), &r); err != nil {
 			return nil, newErr(CodeBuildInput, err, "读配方失败："+id)
 		}
-		idx.Recipes = append(idx.Recipes, r)
+		// A recipe that needs more than the first platform release goes
+		// where that release does not look. The others stay as written, so
+		// their index entries do not change.
+		if need := rep.MinPlatform.Recipes[id].Required(); CompareVersions(need, BasePlatform) > 0 {
+			r.MinPlatform = need
+			idx.RecipesV2 = append(idx.RecipesV2, r)
+		} else {
+			idx.Recipes = append(idx.Recipes, r)
+		}
 	}
 	b.Index, err = encodeIndex(idx)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -30,7 +31,10 @@ import (
 //
 //   - AdoptImage: an image already on this machine whose identity matches the
 //     catalog's pinned digest (a pre-loaded or just-loaded image) is tagged
-//     acornfox/<app>:<id> so it belongs to the app, without any pull.
+//     acornfox/<app>:<id> so it belongs to the app, without any pull. When
+//     the request names a CPU architecture, an image built for another one
+//     is passed over (for example an amd64 archive an older version loaded
+//     on an arm64 machine), so the server goes on to fetch the right one.
 //   - LoadImage: `docker load` of an image archive the server downloaded into
 //     its upload directory (a large image from the download gateway). The
 //     server loads only archives it has checked against the catalog's signed
@@ -42,7 +46,9 @@ import (
 //   - WriteVolumeFiles: write rendered config files into one of the app's
 //     named volumes, with mode and owner, through a never-started helper
 //     container created from the app's own image. Nothing runs on the host and
-//     nothing runs in the helper.
+//     nothing runs in the helper. A file may be kept when it exists
+//     (Overwrite false), or copied aside before it is replaced (Backup); the
+//     answer says which files were written, kept and copied aside.
 const (
 	PathImageAdopt  = "/v1/images/adopt"  // POST AdoptImageRequest -> ImageInfo (404 when no local image matches)
 	PathImageLoad   = "/v1/images/load"   // POST LoadImageRequest -> LoadImageResponse (long)
@@ -53,17 +59,20 @@ const (
 type CatalogAPI interface {
 	AdoptImage(ctx context.Context, req AdoptImageRequest) (ImageInfo, error)
 	LoadImage(ctx context.Context, req LoadImageRequest) (LoadImageResponse, error)
-	WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) error
+	WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) (WriteFilesResult, error)
 }
 
 // AdoptImageRequest names candidate local references of one image (for
 // example "repo:tag" and "repo@sha256:…") and the digest it must have: the
-// image's ID or one of its repo digests must equal Digest.
+// image's ID or one of its repo digests must equal Digest. With Arch, the
+// image's architecture must also be Arch (an image that does not say which
+// it is built for is taken); without it (an older server) any is taken.
 type AdoptImageRequest struct {
 	App          string   `json:"app"`
 	DeploymentID string   `json:"deployment_id"` // tag acornfox/<app>:<id> to create
 	Refs         []string `json:"refs"`
-	Digest       string   `json:"digest"` // sha256:<64 hex>
+	Digest       string   `json:"digest"`         // sha256:<64 hex>
+	Arch         string   `json:"arch,omitempty"` // Go/Docker name: amd64, arm64; empty = not checked
 }
 
 // LoadImageRequest loads the archive at Path (under the upload directory).
@@ -100,6 +109,29 @@ type VolumeFile struct {
 	UID       int    `json:"uid"`       // owner inside the volume
 	GID       int    `json:"gid"`       // group inside the volume
 	Overwrite bool   `json:"overwrite"` // false: keep an existing file as is
+	// Backup (with Overwrite) is where an existing file is copied, with its
+	// own mode and owner, before it is replaced: relative like Path and not
+	// one of the request's paths. An existing file that cannot be copied
+	// (not a regular file, or larger than MaxBackupFileBytes) is then kept
+	// as it is instead of being replaced. "" replaces without a copy. An
+	// older runner ignores the field (and replaces the file).
+	Backup string `json:"backup,omitempty"`
+}
+
+// WriteFilesResult says what WriteVolumeFiles did with each file of the
+// request, by path. An older runner answers only {"ok": true}: every list is
+// then empty and the caller cannot tell written from kept.
+type WriteFilesResult struct {
+	OK      bool         `json:"ok"`
+	Written []string     `json:"written,omitempty"` // written (new, or replacing an existing file)
+	Kept    []string     `json:"kept,omitempty"`    // existing and left as they were
+	Backups []FileBackup `json:"backups,omitempty"` // existing, copied aside, then replaced
+}
+
+// FileBackup is one existing file copied aside before it was replaced.
+type FileBackup struct {
+	Path   string `json:"path"`
+	Backup string `json:"backup"`
 }
 
 // WriteFilesRequest writes Files into Volume, mounted at MountPath (the path
@@ -117,9 +149,16 @@ type WriteFilesRequest struct {
 const (
 	MaxVolumeFiles     = 32
 	MaxVolumeFileBytes = 256 << 10 // all files together
+	// MaxBackupFileBytes is the largest existing file Backup copies aside
+	// (read into memory); MaxBackupBytes bounds all copies of one request.
+	MaxBackupFileBytes = 2 << 20
+	MaxBackupBytes     = 8 << 20
 )
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// archPattern is a Go/Docker architecture name (amd64, arm64, riscv64, …).
+var archPattern = regexp.MustCompile(`^[a-z][a-z0-9]{1,15}$`)
 
 // ValidateWriteFiles checks a request the same way on both sides.
 func ValidateWriteFiles(req WriteFilesRequest) error {
@@ -139,9 +178,19 @@ func ValidateWriteFiles(req WriteFilesRequest) error {
 		return fmt.Errorf("need 1..%d files", MaxVolumeFiles)
 	}
 	total := 0
+	paths := map[string]bool{}
 	for _, f := range req.Files {
 		if !validRelPath(f.Path) {
 			return fmt.Errorf("invalid file path %q", f.Path)
+		}
+		paths[f.Path] = true
+	}
+	for _, f := range req.Files {
+		if f.Backup != "" {
+			if !f.Overwrite || !validRelPath(f.Backup) || paths[f.Backup] {
+				return fmt.Errorf("invalid backup path %q for %s", f.Backup, f.Path)
+			}
+			paths[f.Backup] = true
 		}
 		if f.Mode < 0 || f.Mode > 0o777 {
 			return fmt.Errorf("invalid mode for %s", f.Path)
@@ -179,6 +228,9 @@ func validateAdopt(req AdoptImageRequest) error {
 	if !digestPattern.MatchString(req.Digest) {
 		return errors.New("digest must be sha256:<64 hex>")
 	}
+	if req.Arch != "" && !archPattern.MatchString(req.Arch) {
+		return errors.New("invalid arch")
+	}
 	if len(req.Refs) == 0 || len(req.Refs) > 8 {
 		return errors.New("need 1..8 refs")
 	}
@@ -213,6 +265,13 @@ func (d *Docker) AdoptImage(ctx context.Context, req AdoptImageRequest) (ImageIn
 		if !imageMatchesDigest(res.ID, res.RepoDigests, req.Digest) {
 			continue
 		}
+		if !imageArchFits(res.Architecture, req.Arch) {
+			// The same digest, built for another CPU: on the containerd image
+			// store an image's ID is its index digest, so an archive of one
+			// architecture matches a multi-architecture digest. Taking it
+			// would start a container that does not run here.
+			continue
+		}
 		if _, err := d.c().ImageTag(ctx, client.ImageTagOptions{Source: res.ID, Target: tag}); err != nil {
 			return ImageInfo{}, err
 		}
@@ -233,6 +292,12 @@ func imageMatchesDigest(id string, repoDigests []string, digest string) bool {
 		}
 	}
 	return false
+}
+
+// imageArchFits: want empty (not asked) or an image that does not say its
+// architecture fits; otherwise the two must be equal.
+func imageArchFits(have, want string) bool {
+	return want == "" || have == "" || have == want
 }
 
 // LoadImage implements CatalogAPI.
@@ -337,20 +402,20 @@ func (d *Docker) ownLoaded(ctx context.Context, app, id string, loaded []string)
 const RoleFiles = "files"
 
 // WriteVolumeFiles implements CatalogAPI.
-func (d *Docker) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) error {
+func (d *Docker) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) (WriteFilesResult, error) {
 	if err := ValidateWriteFiles(req); err != nil {
-		return &RemoteError{Status: http.StatusBadRequest, ErrorResponse: ErrorResponse{Code: "invalid_request", Message: err.Error()}}
+		return WriteFilesResult{}, &RemoteError{Status: http.StatusBadRequest, ErrorResponse: ErrorResponse{Code: "invalid_request", Message: err.Error()}}
 	}
 	img, err := d.inspectImage(ctx, req.Image, req.App)
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
-			return &RemoteError{Status: http.StatusForbidden, ErrorResponse: ErrorResponse{Code: "refused", Message: "image is not an image of this app"}}
+			return WriteFilesResult{}, &RemoteError{Status: http.StatusForbidden, ErrorResponse: ErrorResponse{Code: "refused", Message: "image is not an image of this app"}}
 		}
-		return err
+		return WriteFilesResult{}, err
 	}
 	var rnd [6]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
-		return err
+		return WriteFilesResult{}, err
 	}
 	helperID := hex.EncodeToString(rnd[:])
 	name := ContainerName(req.App, helperID)
@@ -368,7 +433,7 @@ func (d *Docker) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) er
 		},
 	})
 	if err != nil {
-		return err
+		return WriteFilesResult{}, err
 	}
 	defer func() {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -376,31 +441,97 @@ func (d *Docker) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) er
 		_, _ = d.c().ContainerRemove(rctx, created.ID, client.ContainerRemoveOptions{Force: true})
 	}()
 
+	res := WriteFilesResult{OK: true}
 	var files []VolumeFile
+	copied := 0
 	for _, f := range req.Files {
-		if !f.Overwrite {
-			_, serr := d.c().ContainerStatPath(ctx, created.ID, client.ContainerStatPathOptions{Path: path.Join(req.MountPath, f.Path)})
-			if serr == nil {
-				continue // keep the user's file
-			}
-			if !cerrdefs.IsNotFound(serr) {
-				return serr
+		if !f.Overwrite || f.Backup != "" {
+			target := path.Join(req.MountPath, f.Path)
+			st, serr := d.c().ContainerStatPath(ctx, created.ID, client.ContainerStatPathOptions{Path: target})
+			switch {
+			case serr == nil && !f.Overwrite:
+				res.Kept = append(res.Kept, f.Path) // keep the user's file
+				continue
+			case serr == nil:
+				b, ok, err := d.backupFile(ctx, created.ID, target, st.Stat, f, MaxBackupBytes-copied)
+				if err != nil {
+					return WriteFilesResult{}, err
+				}
+				if !ok {
+					// Not copyable: replacing it would lose it, so keep it.
+					res.Kept = append(res.Kept, f.Path)
+					continue
+				}
+				copied += len(b.Content)
+				files = append(files, b)
+				res.Backups = append(res.Backups, FileBackup{Path: f.Path, Backup: f.Backup})
+			case !cerrdefs.IsNotFound(serr):
+				return WriteFilesResult{}, serr
 			}
 		}
 		files = append(files, f)
+		res.Written = append(res.Written, f.Path)
 	}
 	if len(files) == 0 {
-		return nil
+		return res, nil
 	}
 	archive, err := volumeFilesTar(files, time.Now())
 	if err != nil {
-		return err
+		return WriteFilesResult{}, err
 	}
-	_, err = d.c().CopyToContainer(ctx, created.ID, client.CopyToContainerOptions{
+	if _, err := d.c().CopyToContainer(ctx, created.ID, client.CopyToContainerOptions{
 		DestinationPath: req.MountPath,
 		Content:         bytes.NewReader(archive),
-	})
-	return err
+	}); err != nil {
+		return WriteFilesResult{}, err
+	}
+	return res, nil
+}
+
+// backupFile reads the existing file at target (in the helper container) and
+// returns it as the file to write at f.Backup, with its own mode and owner.
+// ok is false when it is not a regular file or is larger than
+// MaxBackupFileBytes or room: it is then not copied (and must not be
+// replaced).
+func (d *Docker) backupFile(ctx context.Context, id, target string, st container.PathStat, f VolumeFile, room int) (VolumeFile, bool, error) {
+	limit := int64(MaxBackupFileBytes)
+	if int64(room) < limit {
+		limit = int64(room)
+	}
+	if !st.Mode.IsRegular() || st.Size > limit {
+		return VolumeFile{}, false, nil
+	}
+	rc, err := d.c().CopyFromContainer(ctx, id, client.CopyFromContainerOptions{SourcePath: target})
+	if err != nil {
+		return VolumeFile{}, false, err
+	}
+	defer rc.Content.Close()
+	return backupFromTar(rc.Content, f, limit)
+}
+
+// backupFromTar takes the single regular file of a CopyFromContainer
+// archive as the copy of f, at f.Backup.
+func backupFromTar(r io.Reader, f VolumeFile, limit int64) (VolumeFile, bool, error) {
+	tr := tar.NewReader(r)
+	h, err := tr.Next()
+	if err != nil {
+		return VolumeFile{}, false, fmt.Errorf("read %s: %w", f.Path, err)
+	}
+	if h.Typeflag != tar.TypeReg || h.Size > limit {
+		return VolumeFile{}, false, nil
+	}
+	content, err := io.ReadAll(io.LimitReader(tr, limit+1))
+	if err != nil {
+		return VolumeFile{}, false, fmt.Errorf("read %s: %w", f.Path, err)
+	}
+	if int64(len(content)) > limit {
+		return VolumeFile{}, false, nil
+	}
+	uid, gid := h.Uid, h.Gid
+	if uid < 0 || gid < 0 || uid > 1<<30 || gid > 1<<30 {
+		uid, gid = f.UID, f.GID
+	}
+	return VolumeFile{Path: f.Backup, Content: content, Mode: int(h.Mode) & 0o777, UID: uid, GID: gid, Overwrite: true}, true, nil
 }
 
 // volumeFilesTar builds the archive: parent directories (0755, same owner as
@@ -450,9 +581,12 @@ func (c *Client) LoadImage(ctx context.Context, req LoadImageRequest) (LoadImage
 	return out, err
 }
 
-// WriteVolumeFiles implements CatalogAPI.
-func (c *Client) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) error {
-	return c.call(ctx, c.standard, PathVolumeWrite, req, clientDefaultBound, nil)
+// WriteVolumeFiles implements CatalogAPI. An older runner answers without
+// the lists (see WriteFilesResult).
+func (c *Client) WriteVolumeFiles(ctx context.Context, req WriteFilesRequest) (WriteFilesResult, error) {
+	var out WriteFilesResult
+	err := c.call(ctx, c.standard, PathVolumeWrite, req, clientDefaultBound, &out)
+	return out, err
 }
 
 // ---- Server ----
@@ -530,9 +664,11 @@ func (s *Server) handleVolumeWrite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := c.WriteVolumeFiles(r.Context(), req); err != nil {
+	res, err := c.WriteVolumeFiles(r.Context(), req)
+	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, OK{OK: true})
+	res.OK = true
+	writeJSON(w, http.StatusOK, res)
 }

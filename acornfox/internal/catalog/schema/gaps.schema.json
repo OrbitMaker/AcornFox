@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acornfox.com/catalog/schema/gaps-1.json",
+  "title": "AcornFox 缺变量登记 schema 1",
+  "description": "目录仓库根目录的 gaps.yaml：起草清单时发现平台还没有要用的变量或写法，就登记一条。应用不用等：那一项先写死、标成要用户做一步，或先不配。平台补上后，acornfox catalog gaps 会提示可以改清单了。这个文件不进应用包，也不进 index.json。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "gaps"],
+  "properties": {
+    "schema": { "const": 1 },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "app", "upstream_key", "want", "layer", "handling", "doc_url", "date", "status"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^GAP-[0-9]{4}$", "description": "编号，按登记顺序往下排，不重复、不复用" },
+          "app": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "哪个应用（apps/ 下的目录名）" },
+          "upstream_key": { "type": "string", "minLength": 1, "description": "上游的配置项名字，例如环境变量名 HF_ENDPOINT、配置文件里的键" },
+          "want": { "type": "string", "minLength": 1, "description": "想要的变量或写法。要平台变量就写 platform.<名字>（例如 platform.mirror.huggingface），平台有了这个名字后会提示可以关了；其他情况用一句话写清楚" },
+          "layer": { "enum": ["platform", "param", "format"], "description": "建议归哪层：platform 值随环境变（地址、时区、下载源、硬件），做成平台变量；param 值随应用变，做成清单参数；format 清单格式要加新写法" },
+          "handling": { "enum": ["hardcoded", "user_step", "omitted"], "description": "现在怎么处理的：hardcoded 写死在清单里；user_step 写进 user_steps 让用户做一步；omitted 先不配" },
+          "doc_url": { "type": "string", "pattern": "^https?://", "description": "上游文档里讲这个配置项的地址" },
+          "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "登记日期" },
+          "status": { "enum": ["open", "planned", "done"], "description": "open 还没定；planned 已排进某个平台版本；done 平台已有，清单已改" },
+          "done_in": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "status 是 done 时必填：哪个平台版本补上的" },
+          "note": { "type": "string" }
+        },
+        "if": { "required": ["status"], "properties": { "status": { "const": "done" } } },
+        "then": { "required": ["done_in"] }
+      }
+    }
+  }
+}

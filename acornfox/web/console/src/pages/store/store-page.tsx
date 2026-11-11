@@ -1,4 +1,5 @@
 // 应用中心列表页：配方卡片、来源和分类标签、搜索、应用小卡片、连接私有目录。数据全部来自 GET /v1/catalog。
+// 要更新版本的 AcornFox 才能装的应用和配方（needs_platform 有值）：卡片上说明要升到哪个版本，安装按钮不可点。
 // 私有目录的应用标“来自：目录名”，详情和安装都带上目录编号；已断开的私有目录在顶部提示。
 // 这一版私有目录先不开放：“连接私有目录”按钮和来源标签由 PRIVATE_CATALOG_UI 控制，默认藏起。
 import { useMemo, useState } from 'react'
@@ -8,6 +9,7 @@ import { api } from '@/lib/api'
 import { PUBLIC, appKey, appsIn, categoryTabs, disconnectedSources, filterApps, filterSource, freeMB, matchRecipe, memoryCheck, recipeAppNames, recipeMemory, sourceId, sourceTabs } from '@/lib/catalog'
 import { mbText } from '@/lib/format'
 import { PRIVATE_CATALOG_UI } from '@/lib/features'
+import { needsPlatform, needsPlatformText } from '@/lib/upgrade'
 import { appHref, go, itemHref } from '@/lib/router'
 import type { CatalogApp, Recipe, TaskView } from '@/lib/types'
 import { useConsole } from '@/state'
@@ -19,6 +21,7 @@ import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
 import { ExpertButton } from './shared'
 import { ConnectCatalogDialog } from './connect-dialog'
+import { UpgradeHint } from './upgrade-note'
 
 // runningTaskFor：按“目录来源 + id”找进行中的安装任务。公共目录和私有目录可能有同 id 的应用，
 // 只看 id 会把公共版的进度显示到私有那张卡片上。没带 catalog 的旧任务算公共目录。
@@ -39,8 +42,10 @@ function RecipeCard({ r }: { r: Recipe }) {
   const running = runningTaskFor(tasks, 'recipe', r.id, sourceId(r))
   const minutes = r.delivery.minutes
   const video = safeHref(r.delivery.video)
+  // 已经在装的照常能点开看进度。
+  const needs = running ? '' : needsPlatform(r)
   return (
-    <div className="flex min-w-0 flex-col gap-2.5 rounded-lg border bg-card p-3.5">
+    <div className="flex min-w-0 flex-col gap-2.5 rounded-lg border bg-card p-3.5" data-testid="catalog-recipe">
       <div className="flex items-center gap-2">
         <Sparkles className="size-3.5 shrink-0" />
         <span className="min-w-0 truncate text-sm font-medium">{r.title}</span>
@@ -50,6 +55,7 @@ function RecipeCard({ r }: { r: Recipe }) {
       <div className="flex flex-wrap gap-1">
         {recipeAppNames(r, catalog).map((x) => <Badge key={x} variant="secondary" className="font-normal">{x}</Badge>)}
       </div>
+      {needs && <UpgradeHint version={needs} />}
       <div className="mt-auto flex items-center gap-2 pt-1">
         <span className={cn('tnum flex-1 text-2xs', check.tone === 'ok' ? 'text-muted-foreground' : 'text-warning')} title={check.text}>
           {mem.need > 0 ? <>{minutes ? `${minutes} 分钟 · ` : ''}{mbText(mem.need)} 内存</> : '都已装好，不再占内存'}
@@ -59,7 +65,7 @@ function RecipeCard({ r }: { r: Recipe }) {
             <PlayCircle className="size-3.5" />
           </a>
         )}
-        <Button size="sm" onClick={() => install({ kind: 'recipe', id: r.id, taskId: running?.id, catalog: sourceId(r) })}>
+        <Button size="sm" disabled={!!needs} title={needs ? needsPlatformText(needs) : undefined} onClick={() => install({ kind: 'recipe', id: r.id, taskId: running?.id, catalog: sourceId(r) })}>
           {running ? <><Spinner />安装中</> : '开始'}
         </Button>
       </div>
@@ -72,10 +78,13 @@ function AppCard({ a }: { a: CatalogApp }) {
   const src = sourceId(a)
   const running = runningTaskFor(tasks, 'app', a.id, src)
   const href = itemHref(a.id, src)
+  // 装过的、正在装的、这台机器用不了的，各有各的说法，不再提升级。
+  const needs = !running && a.installed.length === 0 && a.supported ? needsPlatform(a) : ''
   let action
   if (running) action = <Button size="sm" variant="secondary" onClick={(e) => { e.stopPropagation(); install({ kind: 'app', id: a.id, taskId: running.id, catalog: src }) }}><Spinner />安装中</Button>
   else if (a.installed.length > 0) action = <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); go(appHref(a.installed[0])) }}>已安装 · 管理</Button>
   else if (!a.supported) action = <span className="text-2xs text-muted-foreground" title={'只支持 ' + a.platforms.join('、')}>这台机器用不了</span>
+  else if (needs) action = <Button size="sm" variant="secondary" disabled title={needsPlatformText(needs)}>安装</Button>
   else action = <Button size="sm" variant="secondary" onClick={(e) => { e.stopPropagation(); install({ kind: 'app', id: a.id, catalog: src }) }}>安装</Button>
   return (
     <div
@@ -90,6 +99,7 @@ function AppCard({ a }: { a: CatalogApp }) {
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{a.name}</span><SourceBadge x={a} /></div>
         <div className="truncate text-2xs text-muted-foreground">{a.summary}</div>
+        {needs && <UpgradeHint version={needs} className="mt-0.5" />}
       </div>
       {action}
     </div>

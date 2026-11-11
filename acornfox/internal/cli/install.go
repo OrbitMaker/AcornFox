@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/acornfox/acornfox/internal/client"
+	"github.com/acornfox/acornfox/internal/installtiming"
 )
 
 // App center commands: browse the catalog on the server and install from it.
@@ -16,11 +18,14 @@ import (
 // internal/appinstall/faults.go; the server sends the hint with each error.
 
 const catalogBrowseUsage = `应用中心（在服务器上看目录、装应用）：
-  catalog list           目录里的应用和配方、目录序号、上次同步结果。只读
+  catalog list           目录里的应用和配方、目录序号、上次同步结果。只读。
+                         这台 AcornFox 太旧、装不了的应用和配方后面写“要先升级到 x.y.z”
+                         （--json 里是 needs_platform，不用升时是空串）：先升级 AcornFox 再装
   catalog info 应用      应用详情和安装时能填的参数（不含平台生成的密码）。只读
   catalog sync           让服务器现在同步一次目录
   catalog platform-vars  平台变量：平台交给应用的模型地址、时区、下载源、访问地址等，这台机器上的值、哪些能改。只读
-从目录安装：acornfox install 应用 / acornfox install --recipe 配方（acornfox install -h 看详情）`
+从目录安装：acornfox install 应用 / acornfox install --recipe 配方（acornfox install -h 看详情）
+装好以后看它是用什么设置装的：acornfox apps vars 应用（只读）`
 
 const catalogConnectUsage = `用法：acornfox catalog connect 连接码
 
@@ -51,7 +56,8 @@ const catalogSourcesUsage = `用法：acornfox catalog sources
 const catalogPlatformVarsUsage = `用法：acornfox catalog platform-vars
 
 用途：列出平台变量。应用的清单不写死时区、下载源、默认模型这类底层的东西，而是引用平台变量，
-  装的时候由平台按这台机器填进去，用户不用配。每项写：这台机器上的值、单机版和云版各从哪取、能不能改。
+  装的时候由平台按这台机器填进去，用户不用配。每项写：这台机器上的值、单机版和云版各从哪取、能不能改、
+  从哪个平台版本起有（--json 的 since；清单用到它，就至少要这个版本的 AcornFox 才能装）。
   能改的，装应用时用 --set platform.名字=值 改（只对这次装的应用生效）。
 副作用：无，只读。
 例子：
@@ -62,7 +68,7 @@ const catalogPlatformVarsUsage = `用法：acornfox catalog platform-vars
 const installUsage = `用法：acornfox install 应用 [--name 应用名] [--version 版本] [--set 参数=值]...
                          [--llm own|local|platform] [--no-wait] [--timeout 30m] [--show-secrets] [--keep-data-on-failure] [--reuse-data]
       acornfox install --recipe 配方 [--set 应用.参数=值]... [--llm …] [--no-wait] …
-      acornfox install status 任务编号 [--show-secrets]
+      acornfox install status 任务编号 [--wait] [--timeout 秒] [--show-secrets]
 
 用途：从应用中心的目录在服务器上一次装好一个应用（或一个配方里的几个应用并连起来）：建应用、写配置、
   下载镜像、启动、健康检查、初始化。装成一个安装任务，可以查进度；任一步失败会自动清理这次建出来的东西。
@@ -76,17 +82,40 @@ const installUsage = `用法：acornfox install 应用 [--name 应用名] [--ver
                        平台变量写 platform. 前缀：--set platform.tz=Asia/Tokyo（acornfox catalog platform-vars 看哪些能改）
   --llm 来源           大模型来源：local（本机 New API，装了就默认用它）、own（自己的 Key，要同时给
                        llm.base_url、llm.api_key、llm.model）、platform（平台 Key，即将开放，现在报 CAT-INST-09）
-  --no-wait            只提交，输出任务编号；之后用 acornfox install status 任务编号 查
+  --no-wait            只提交，输出任务编号；之后用 acornfox install status 任务编号 --wait 等它装完
   --timeout 时长       最多等多久（默认 30m）；等不到不会取消安装
   --show-secrets       显示首次登录的密码（默认遮成 ******）
   --keep-data-on-failure  失败时保留数据卷，方便排查（默认清理）
   --reuse-data         接上以前同名应用留下的数据卷（删应用时保留了数据），不加时这种情况报 CAT-INST-24。
-                       接上的旧数据装失败也不会删；账号密码和以前一样（删除时保留的参数会恢复）。要先问用户
-输出：--json 时提交后输出 {"ok":true,"task_id":…}（--no-wait）或任务结束后的完整任务。
+                       接上的旧数据装失败也不会删。没写的照旧：账号密码和以前一样；以前用 --set platform.* 改过的平台变量
+                       恢复；大模型来源沿用原来的（本机 New API 还在跑就接着用原来那把令牌；它停着报 CAT-INST-10，
+                       问用户后 acornfox start 它再装；本机没有它了报 CAT-INST-02 要重选）；
+                       数据里已有的配置文件不重写（平台要填的内容变了才重写，旧文件先另存为 文件名.bak-时间）。
+                       这次写了的（--set、--llm）以这次为准。沿用了什么，进度和任务的 apps[].carried 里写着；
+                       carried 里“没能吊销以前……的令牌”要原样告诉用户（那把令牌要用户到 New API 里删）。要先问用户
+输出：--json 时提交后输出 {"ok":true,"task_id":…,"next_command":…}（--no-wait）或任务结束后的完整任务（字段见下面“查进度”）。
 退出码：0 装好（status：进行中或装好）；1 安装失败；2 参数不对；3 连不上服务器；4 服务器拒绝（带 CAT-INST 编号）。
-常见编号：CAT-INST-03 同名应用已存在；04 正在装；05 内存不够；09 平台 Key 即将开放；10 本机没有 New API；
+查进度（install status 任务编号，只读）：
+  默认查一次就返回。加 --wait 时等到装好或失败才返回（每 2 秒查一次），最多等 --timeout 秒（默认 90，
+  最多 600，超过按 600 算；写 90、90s、2m 都行；只写 --timeout 也算 --wait）；到时还没装完就照实返回
+  当前进度，安装照常进行，再运行一次接着等。
+  --json 输出是任务本身，另加下面几项，照着用，不用自己判断：
+    done            true：有结果了（status 是 succeeded 或 failed）；false：还在装，结果还不知道，不要下结论
+    stuck、slow     stuck 为 true：正在做的那一步比平常慢很多（CAT-INST-30），还没失败；slow：比平常慢一些
+    say             可以原样告诉用户的话（到了哪一步、这一步和整次各用了多久）
+    next、next_command  下一步做什么、运行哪条命令（还在装时就是接着等的命令）
+    must_tell       装好后必须照原话告诉用户的话（没能吊销的旧令牌、不限额不过期的令牌）
+    elapsed_seconds 整次用了多久；timing 里是细节：timing.step 是正在做的那一步（elapsed_seconds、
+                    normal_seconds 正常最多多久、stuck_after_seconds 过了算卡住、typical、look 看原因的只读命令），
+                    timing.steps 是每一步用了多久
+    带 --wait 时另有 waited_seconds（这次等了多久）、timed_out（等到时限还没装完）
+  退出码：0 装好或还在装（看 done）；1 安装失败；3 连不上服务器；4 没有这个任务（CAT-INST-21）。
+常见编号：CAT-INST-03 同名应用已存在；04 正在装；05 内存不够；09 平台 Key 即将开放；10 本机 New API 没装或停着（停着就问用户后 acornfox start 它）；
   12 镜像拉不到；15 没能上线；16 健康检查不过；17 初始化失败；24 以前同名应用的数据卷还在（先问用户，要旧数据就加 --reuse-data）；
-  27 磁盘不够；28 平台变量改法不对。
+  27 磁盘不够；28 平台变量改法不对；
+  08 这台 AcornFox 比应用或配方要求的旧（先升级再装；--json 里 diagnosis.needs_platform 是要升到的版本）；
+  29 应用包里的清单有这个版本不认识的写法：diagnosis 带 needs_platform 就先升级，不带就是这份目录有问题，稍后再试或反馈。
+  30 某一步比平常慢很多、还没失败（install status 输出 stuck: true；先运行 next_command 只读看原因）。
   完整列表见 docs/capabilities.md。
 例子：
   acornfox install new-api
@@ -95,6 +124,8 @@ const installUsage = `用法：acornfox install 应用 [--name 应用名] [--ver
   acornfox install --recipe hermes-with-new-api
   acornfox --json install new-api --no-wait
   acornfox install status 3f9a0c1b2d4e
+  acornfox --json install status 3f9a0c1b2d4e --wait   # 等到装好或失败，最多 90 秒；没装完就再运行一次
+  acornfox install hermes-agent --reuse-data      # 删掉时保留了数据，接上旧数据重装（换应用版本也这样做）
 装好以后：
   只本机能打开的应用，在你自己的电脑上运行 acornfox open 应用名 打开（经 SSH 隧道，不用放行安全组）。
   用了本机 New API 的应用（--llm local）拿到的是一把不限额、不过期的令牌；要控制花费，在 New API 后台的令牌里给它设上限。
@@ -164,7 +195,7 @@ func (a *app) cmdCatalogList(ctx context.Context, args []string) int {
 			for _, x := range r.Apps {
 				apps = append(apps, x.App)
 			}
-			a.out.human("  %-22s %s（%s）%s  %s", r.ID, r.Title, strings.Join(apps, " + "), fromText(r.Source), r.Command)
+			a.out.human("  %-22s %s（%s）%s%s  %s", r.ID, r.Title, strings.Join(apps, " + "), fromText(r.Source), upgradeFirst(r.NeedsPlatform), r.Command)
 		}
 	}
 	a.out.human("")
@@ -176,10 +207,19 @@ func (a *app) cmdCatalogList(ctx context.Context, args []string) int {
 		} else if !x.Supported {
 			state = "  这台机器的 CPU 不支持"
 		}
+		state += upgradeFirst(x.NeedsPlatform)
 		a.out.human("  %-22s %s %s，内存 %s 起%s%s", x.ID, x.Name, x.Version, mbText(x.MemoryMB.Min), fromText(x.Source), state)
 		a.out.human("  %-22s %s", "", x.Summary)
 	}
 	return exitOK
+}
+
+// upgradeFirst marks a catalog entry this AcornFox is too old to install.
+func upgradeFirst(needs string) string {
+	if needs == "" {
+		return ""
+	}
+	return "  要先升级到 " + needs
 }
 
 // fromText marks an entry of a private catalog ("（来自：名称）").
@@ -221,6 +261,9 @@ func (a *app) cmdCatalogInfo(ctx context.Context, args []string) int {
 	}
 	if len(d.Installed) > 0 {
 		a.out.human("已安装：%s", strings.Join(d.Installed, "、"))
+	}
+	if d.NeedsPlatform != "" {
+		a.out.human("要先升级到 %s：这台 AcornFox 版本太旧，装不了这个应用。先升级 AcornFox（Linux 服务器用 upgrade.sh，见使用文档）再装", d.NeedsPlatform)
 	}
 	if len(d.Params) > 0 {
 		a.out.human("")
@@ -423,9 +466,10 @@ func (a *app) cmdInstall(ctx context.Context, args []string) int {
 	}
 	if *noWait {
 		if a.out.json {
-			a.out.emitJSON(map[string]any{"task_id": task.ID, "status": task.Status})
+			a.out.emitJSON(map[string]any{"task_id": task.ID, "status": task.Status, "done": false,
+				"next": installtiming.NextRunning, "next_command": installtiming.WaitCommand(task.ID)})
 		} else {
-			a.out.human("已提交安装任务 %s。查进度：acornfox install status %s", task.ID, task.ID)
+			a.out.human("已提交安装任务 %s。等它装完：acornfox install status %s --wait", task.ID, task.ID)
 		}
 		return exitOK
 	}
@@ -587,14 +631,13 @@ func (a *app) waitInstall(ctx context.Context, ac client.AppCenterAPI, id string
 			}
 		}
 		if t.Status != "running" {
-			return a.reportTask(ctx, ac, t, show)
+			return a.reportTask(ctx, ac, t, show, nil)
 		}
 		if time.Now().After(deadline) {
 			if a.out.json {
-				a.out.emitJSON(map[string]any{"task_id": id, "status": t.Status, "waiting": "timeout"})
-			} else {
-				a.out.human("等了 %s 还没装完，安装仍在进行。查进度：acornfox install status %s", timeout, id)
+				return a.reportTask(ctx, ac, t, show, map[string]any{"waiting": "timeout"})
 			}
+			a.out.human("等了 %s 还没装完，安装仍在进行。接着等：acornfox install status %s --wait", timeout, id)
 			return exitOK
 		}
 		select {
@@ -622,12 +665,17 @@ func stepText(s string) string {
 		return "失败"
 	case "skipped":
 		return "跳过"
+	case "pending":
+		return "还没开始"
 	}
 	return s
 }
 
-// reportTask prints a finished (or running) task with its first-login info.
-func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.InstallTask, show bool) int {
+// reportTask prints a finished (or running) task with its first-login info
+// and the verdict on its step times (the server's, or worked out here when
+// an older server sent none); more goes into the --json output as well.
+func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.InstallTask, show bool, more map[string]any) int {
+	vd := verdictOf(t)
 	logins := t.FirstLogin
 	if show {
 		logins = nil
@@ -640,18 +688,41 @@ func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.I
 		}
 	}
 	if a.out.json {
-		extra := map[string]any{"ok": t.Status != "failed", "task_id": t.ID}
+		extra := map[string]any{"ok": t.Status != "failed", "task_id": t.ID,
+			"done": vd.Done, "slow": vd.Slow, "stuck": vd.Stuck, "elapsed_seconds": vd.ElapsedSeconds,
+			"say": vd.Say, "next": vd.Next, "must_tell": vd.MustTell}
+		if vd.MustTell == nil {
+			extra["must_tell"] = []string{}
+		}
+		if vd.NextCommand != "" {
+			extra["next_command"] = vd.NextCommand
+		}
+		if t.Timing == nil {
+			extra["timing"] = vd
+		}
+		for k, v := range more {
+			extra[k] = v
+		}
 		if show {
 			extra["first_login"] = logins
 		}
 		if t.Fault != nil {
-			extra["diagnosis"] = map[string]any{"stage": "install", "code": t.Fault.Code, "message": t.Fault.Message, "hint": t.Fault.Hint}
+			diag := map[string]any{"stage": "install", "code": t.Fault.Code, "message": t.Fault.Message, "hint": t.Fault.Hint}
+			if t.Fault.NeedsPlatform != "" {
+				diag["needs_platform"] = t.Fault.NeedsPlatform
+			}
+			extra["diagnosis"] = diag
 		}
 		a.emitRaw(t.Raw, extra)
 	} else {
 		switch t.Status {
 		case "running":
 			a.out.human("任务 %s 进行中（%s）", t.ID, t.Step)
+			a.out.human("%s", vd.Say)
+			if vd.Stuck {
+				a.out.human("这一步比平常慢很多（%s），还没失败：先运行 %s 看原因（只读）；完整办法：acornfox faults %s", installtiming.CodeStuck, vd.NextCommand, installtiming.CodeStuck)
+			}
+			a.out.human("接着等：acornfox install status %s --wait", t.ID)
 		case "succeeded":
 			a.out.human("已装好。")
 			for _, x := range t.Apps {
@@ -667,8 +738,23 @@ func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.I
 				}
 			}
 			for _, x := range t.Apps {
-				if x.GatewayToken != nil {
+				if len(x.Carried) > 0 {
+					if len(x.ReusedVolumes) > 0 {
+						a.out.human("%s 接上了旧数据，沿用的设置：", x.App)
+					} else {
+						a.out.human("%s 另外：", x.App)
+					}
+					for _, c := range x.Carried {
+						a.out.human("  - %s", c)
+					}
+				}
+			}
+			for _, x := range t.Apps {
+				switch {
+				case x.GatewayToken != nil:
 					a.out.human("%s", gatewayTokenNote(x.App, x.GatewayToken.Provider))
+				case x.TakenToken != nil:
+					a.out.human("%s", gatewayTokenNote(x.App, x.TakenToken.Provider))
 				}
 			}
 			for _, fl := range logins {
@@ -689,6 +775,9 @@ func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.I
 		case "failed":
 			if t.Fault != nil {
 				a.out.humanErr("安装失败：%s %s", t.Fault.Code, t.Fault.Message)
+				if t.Fault.NeedsPlatform != "" {
+					a.out.humanErr("要先升级到 %s：这台 AcornFox 版本太旧，升级 AcornFox 后再试", t.Fault.NeedsPlatform)
+				}
 				if t.Fault.Hint != "" {
 					a.out.humanErr("建议：%s", t.Fault.Hint)
 				}
@@ -714,30 +803,132 @@ func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.I
 	return exitOK
 }
 
-// gatewayTokenNote says that app uses a token with no quota from the local
-// model gateway provider (New API), and where to cap it.
+// gatewayTokenNote says that app uses a token with no quota and no expiry
+// from the local model gateway provider (New API), and where to cap it.
 func gatewayTokenNote(app, provider string) string {
-	return app + " 用的是 " + provider + " 里一把不限额的令牌；要控制花费，可在 " + provider + " 后台的令牌里给它设上限。"
+	return installtiming.TokenNote(app, provider)
 }
 
+// verdictOf returns the server's verdict on t's step times, or works it out
+// by this computer's clock when the server sent none (older than v0.5.1).
+func verdictOf(t client.InstallTask) installtiming.Verdict {
+	if t.Timing != nil {
+		return *t.Timing
+	}
+	it := installtiming.Task{ID: t.ID, Status: t.Status, CreatedAt: t.CreatedAt, FinishedAt: t.FinishedAt, KeepVolumes: t.KeepVolumes}
+	if t.Fault != nil {
+		it.FaultCode, it.FaultMsg = t.Fault.Code, t.Fault.Message
+	}
+	for _, s := range t.Steps {
+		it.Steps = append(it.Steps, installtiming.Step{App: s.App, Name: s.Name, Label: s.Label, Status: s.Status, Message: s.Message,
+			StartedAt: s.StartedAt, FinishedAt: s.FinishedAt, Progress: s.Progress})
+	}
+	for _, x := range t.Apps {
+		ap := installtiming.App{Name: x.App, Carried: x.Carried}
+		switch {
+		case x.GatewayToken != nil:
+			ap.TokenProvider = x.GatewayToken.Provider
+		case x.TakenToken != nil:
+			ap.TokenProvider = x.TakenToken.Provider
+		}
+		it.Apps = append(it.Apps, ap)
+	}
+	return installtiming.Assess(it, waitNow(), "client")
+}
+
+// How `install status --wait` waits: it asks for the task every installPoll,
+// by default for statusWaitDefault, at most statusWaitMax. 90 seconds keeps
+// one command inside the two minutes AI workbenches commonly allow a single
+// command (with room for an SSH hop); a longer install is waited on by
+// running the command again.
+const (
+	statusWaitDefault = 90 * time.Second
+	statusWaitMax     = 600 * time.Second
+)
+
+// installPoll, waitNow and waitSleep are what the waiting goes by (tests
+// replace them with a virtual clock).
+var (
+	installPoll = 2 * time.Second
+	waitNow     = time.Now
+	waitSleep   = func(ctx context.Context, d time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+			return nil
+		}
+	}
+)
+
+// waitFlag is --timeout of install status: whole seconds ("90") or a Go
+// duration ("90s", "2m"); set says it was given.
+type waitFlag struct {
+	d   time.Duration
+	set bool
+}
+
+func (w *waitFlag) String() string { return w.d.String() }
+func (w *waitFlag) Set(v string) error {
+	v = strings.TrimSpace(v)
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		n, nerr := strconv.Atoi(v)
+		if nerr != nil {
+			return fmt.Errorf("要写秒数，例如 90（或 90s、2m）：%s", v)
+		}
+		d = time.Duration(n) * time.Second
+	}
+	if d <= 0 {
+		return fmt.Errorf("要大于 0：%s", v)
+	}
+	w.d, w.set = d, true
+	return nil
+}
+
+// cmdInstallStatus implements `install status <task> [--wait] [--timeout s]`:
+// one look at the task, or (--wait) asking every installPoll until it is
+// over or the time is up. Either way the output carries the verdict
+// (done, stuck, say, next_command …) so the reader need not judge.
 func (a *app) cmdInstallStatus(ctx context.Context, args []string) int {
 	fs := a.catalogFlags("install status", installUsage)
 	show := fs.Bool("show-secrets", false, "显示首次登录的密码")
+	wait := fs.Bool("wait", false, "等到装好或失败才返回")
+	var limit waitFlag
+	fs.Var(&limit, "timeout", "--wait 最多等多久，秒（默认 90，最多 600）")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return flagExit(err)
 	}
 	if len(pos) != 1 {
-		return a.out.usageError("用法：acornfox install status 任务编号")
+		return a.out.usageError("用法：acornfox install status 任务编号 [--wait] [--timeout 秒]")
+	}
+	waiting := *wait || limit.set
+	budget := statusWaitDefault
+	if limit.set {
+		budget = min(limit.d, statusWaitMax)
 	}
 	api, ac, code := a.appCenterAPI(ctx)
 	if api == nil {
 		return code
 	}
 	defer api.Close()
-	t, err := ac.InstallTask(ctx, pos[0])
-	if err != nil {
-		return a.out.fail(err)
+	start := waitNow()
+	deadline := start.Add(budget)
+	interrupted := false
+	var t client.InstallTask
+	for {
+		t, err = ac.InstallTask(ctx, pos[0])
+		if err != nil {
+			return a.out.fail(err)
+		}
+		if !waiting || t.Status != "running" || !waitNow().Before(deadline) {
+			break
+		}
+		if err := waitSleep(ctx, min(installPoll, deadline.Sub(waitNow()))); err != nil {
+			interrupted = true
+			break
+		}
 	}
 	if !a.out.json {
 		for _, s := range t.Steps {
@@ -748,5 +939,20 @@ func (a *app) cmdInstallStatus(ctx context.Context, args []string) int {
 			a.out.human("  [%s] %s %s%s", s.App, s.Label, stepText(s.Status), msg)
 		}
 	}
-	return a.reportTask(ctx, ac, t, *show)
+	var more map[string]any
+	if waiting {
+		more = map[string]any{"waited_seconds": int(waitNow().Sub(start) / time.Second), "timed_out": t.Status == "running",
+			"wait_timeout_seconds": int(budget / time.Second)}
+		if interrupted {
+			more["interrupted"] = true
+		}
+	}
+	rc := a.reportTask(ctx, ac, t, *show, more)
+	if interrupted {
+		if !a.out.json {
+			a.out.humanErr("不再等待，安装仍在服务器上进行：acornfox install status %s --wait", t.ID)
+		}
+		return exitOpFailed
+	}
+	return rc
 }

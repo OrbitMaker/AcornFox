@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/acornfox/acornfox/internal/setup"
 )
@@ -185,12 +186,13 @@ func (c *Client) classifyTransport(err error) error {
 func (c *Client) serverError(resp *http.Response) error {
 	var wire struct {
 		Error struct {
-			Code        string `json:"code"`
-			Message     string `json:"message"`
-			Hint        string `json:"hint"`
-			TaskID      string `json:"task_id"`
-			GatewayCode string `json:"gateway_code"`
-			RetryAfter  int    `json:"retry_after"`
+			Code          string `json:"code"`
+			Message       string `json:"message"`
+			Hint          string `json:"hint"`
+			TaskID        string `json:"task_id"`
+			GatewayCode   string `json:"gateway_code"`
+			RetryAfter    int    `json:"retry_after"`
+			NeedsPlatform string `json:"needs_platform"`
 		} `json:"error"`
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -209,12 +211,13 @@ func (c *Client) serverError(resp *http.Response) error {
 	return &Error{
 		Status: resp.StatusCode,
 		Diag: Diagnosis{
-			Stage:       "server",
-			Code:        code,
-			Message:     msg,
-			Hint:        wire.Error.Hint,
-			GatewayCode: wire.Error.GatewayCode,
-			RetryAfter:  wire.Error.RetryAfter,
+			Stage:         "server",
+			Code:          code,
+			Message:       msg,
+			Hint:          wire.Error.Hint,
+			GatewayCode:   wire.Error.GatewayCode,
+			RetryAfter:    wire.Error.RetryAfter,
+			NeedsPlatform: wire.Error.NeedsPlatform,
 		},
 		TaskID: wire.Error.TaskID,
 	}
@@ -684,6 +687,20 @@ func (c *Client) AppMetrics(ctx context.Context, app string) (AppMetrics, error)
 	return metrics, nil
 }
 
+// AppHistory calls GET /v1/metrics/apps/{app}/history. rng is "1h" or "24h"
+// ("" lets the server default to 1h).
+func (c *Client) AppHistory(ctx context.Context, app, rng string) (AppHistory, error) {
+	path := "/v1/metrics/apps/" + url.PathEscape(app) + "/history"
+	if rng != "" {
+		path += "?range=" + url.QueryEscape(rng)
+	}
+	var h AppHistory
+	if _, err := c.do(ctx, http.MethodGet, path, nil, -1, "", &h); err != nil {
+		return AppHistory{}, err
+	}
+	return h, nil
+}
+
 // Domains calls GET /v1/apps/{app}/domains.
 func (c *Client) Domains(ctx context.Context, app string) ([]Domain, error) {
 	path := "/v1/apps/" + url.PathEscape(app) + "/domains"
@@ -763,18 +780,48 @@ func (c *Client) RemoveAddon(ctx context.Context, app, kind string, deleteVolume
 // ---- LAN console (three-platform architecture) ----
 
 // LANConsoleStatus mirrors GET /v1/lan-console.
+// PasswordSet is false while the LAN console is open without a password (the
+// first visitor from the local network sets it); PasswordSetAt/From say when
+// and from which address it was set; GeneratedPassword marks a LAN console
+// opened by an older version that still uses its generated password.
 type LANConsoleStatus struct {
-	Enabled bool   `json:"enabled"`
-	URL     string `json:"url,omitempty"`
-	Port    int    `json:"port"`
+	Enabled           bool       `json:"enabled"`
+	URL               string     `json:"url,omitempty"`
+	Port              int        `json:"port"`
+	PasswordSet       bool       `json:"password_set"`
+	PasswordSetAt     *time.Time `json:"password_set_at,omitempty"`
+	PasswordSetFrom   string     `json:"password_set_from,omitempty"`
+	GeneratedPassword bool       `json:"generated_password,omitempty"`
+	Devices           int        `json:"devices"`
+}
+
+// LANConsoleDevice is one remembered device (GET /v1/lan-console/devices).
+type LANConsoleDevice struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at"`
+	LastIP     string    `json:"last_ip,omitempty"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 // LANConsoleAPI is the optional capability for opening the console on the
 // LAN; *Client implements it (test fakes need not).
 type LANConsoleAPI interface {
 	LANConsoleStatus(ctx context.Context) (LANConsoleStatus, error)
+	// LANConsoleEnable opens the LAN console (no password: the first visitor
+	// sets it). The returned password is non-empty only from an older server
+	// that still generates one.
 	LANConsoleEnable(ctx context.Context, reset bool) (LANConsoleStatus, string, error)
 	LANConsoleDisable(ctx context.Context) error
+	// LANConsoleResetPassword clears the password, sessions and remembered
+	// devices. Errors: 409 lan_console_off when the LAN console is closed;
+	// 404 from a server older than this command.
+	LANConsoleResetPassword(ctx context.Context) (LANConsoleStatus, error)
+	LANConsoleDevices(ctx context.Context) ([]LANConsoleDevice, error)
+	// LANConsoleRemoveDevice forgets one device ("" = all of them) and
+	// returns how many were removed.
+	LANConsoleRemoveDevice(ctx context.Context, id string) (int, error)
 }
 
 var _ LANConsoleAPI = (*Client)(nil)
@@ -801,6 +848,51 @@ func (c *Client) LANConsoleEnable(ctx context.Context, reset bool) (LANConsoleSt
 func (c *Client) LANConsoleDisable(ctx context.Context) error {
 	_, err := c.do(ctx, http.MethodDelete, "/v1/lan-console", nil, -1, "", nil)
 	return err
+}
+
+// LANConsoleResetPassword calls POST /v1/lan-console/reset-password.
+func (c *Client) LANConsoleResetPassword(ctx context.Context) (LANConsoleStatus, error) {
+	var wire struct {
+		Status LANConsoleStatus `json:"status"`
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/lan-console/reset-password", nil, &wire)
+	return wire.Status, err
+}
+
+// LANConsoleDevices calls GET /v1/lan-console/devices.
+func (c *Client) LANConsoleDevices(ctx context.Context) ([]LANConsoleDevice, error) {
+	var wire struct {
+		Devices []LANConsoleDevice `json:"devices"`
+	}
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/lan-console/devices", nil, &wire)
+	if wire.Devices == nil {
+		wire.Devices = []LANConsoleDevice{}
+	}
+	return wire.Devices, err
+}
+
+// LANConsoleRemoveDevice calls DELETE /v1/lan-console/devices[/{id}].
+func (c *Client) LANConsoleRemoveDevice(ctx context.Context, id string) (int, error) {
+	path := "/v1/lan-console/devices"
+	if id != "" {
+		path += "/" + url.PathEscape(id)
+	}
+	var raw struct {
+		Removed json.RawMessage `json:"removed"`
+	}
+	if _, err := c.doJSON(ctx, http.MethodDelete, path, nil, &raw); err != nil {
+		return 0, err
+	}
+	// One device answers true/false, all devices answer a count.
+	var n int
+	if json.Unmarshal(raw.Removed, &n) == nil {
+		return n, nil
+	}
+	var b bool
+	if json.Unmarshal(raw.Removed, &b) == nil && b {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // ---- runtime setup ----

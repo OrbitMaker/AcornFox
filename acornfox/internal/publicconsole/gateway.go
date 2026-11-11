@@ -3,7 +3,6 @@ package publicconsole
 import (
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,7 +26,10 @@ type GatewayConfig struct {
 	// LAN serves the console on the local network over plain HTTP instead of
 	// behind Caddy on a domain: any Host is accepted, the Origin must match
 	// the Host, the client address is the TCP peer (no proxy in front) and
-	// cookies are not marked Secure.
+	// cookies are not marked Secure. The LAN entry is the relaxed one (see
+	// lan_gateway.go): only clients with a local-network address are served,
+	// the first visitor sets the password in the browser, and a browser can
+	// be remembered for 90 days.
 	LAN bool
 }
 
@@ -72,6 +74,10 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	origin := "https://" + cfg.Domain
 	if g.cfg.LAN {
+		if ip := hostOnly(r.RemoteAddr); !LANSource(ip) {
+			g.refuseSource(w, ip)
+			return
+		}
 		origin = "http://" + r.Host
 	} else {
 		if !strings.EqualFold(hostOnly(r.Host), cfg.Domain) {
@@ -89,15 +95,39 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Path {
 	case "/login":
+		if g.cfg.LAN && !cfg.HasPassword() {
+			// Nothing to log in with yet: the first visitor sets the password.
+			if r.Method == http.MethodPost {
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
+			g.setupPage(w, http.StatusOK, "")
+			return
+		}
 		if r.Method == http.MethodPost {
 			g.login(w, r, cfg)
 			return
 		}
-		g.loginPage(w, http.StatusOK, "")
+		g.loginPage(w, http.StatusOK, "", cfg)
+		return
+	case "/setup":
+		if !g.cfg.LAN {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost || cfg.HasPassword() {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		g.setup(w, r)
 		return
 	case "/login.css":
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		_, _ = w.Write([]byte(loginCSS))
+		return
+	case "/login.js":
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write([]byte(loginJS))
 		return
 	case "/console/login", "/v1/console/tokens":
 		// Token login belongs to `acornfox open` over SSH only.
@@ -107,6 +137,12 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || c.Value == "" || !cfg.HasSession(Digest(c.Value)) {
+		// A remembered device gets a fresh session on a page load. API calls
+		// are not renewed here: the page holds the old session's CSRF token,
+		// so it must reload (which lands on the branch above).
+		if g.cfg.LAN && r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/v1/") && g.renewFromDevice(w, r, cfg) {
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			writeJSONError(w, http.StatusUnauthorized, "session_expired", "登录已过期，请刷新页面重新登录")
 			return
@@ -120,13 +156,19 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, k := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
 		out.Header.Del(k)
 	}
+	logout := r.Method == http.MethodPost && r.URL.Path == "/v1/console/logout"
 	if g.cfg.LAN {
+		if logout {
+			// Logging out also forgets this device; the cookie has to go out
+			// before the console writes its response.
+			g.clearDeviceCookie(w)
+		}
 		g.cfg.Console.ServeHTTP(w, out)
 	} else {
 		g.cfg.Console.ServeHTTP(&secureCookieWriter{ResponseWriter: w}, out)
 	}
 
-	if r.Method == http.MethodPost && r.URL.Path == "/v1/console/logout" {
+	if logout {
 		g.forget(Digest(c.Value))
 	}
 }
@@ -139,47 +181,64 @@ func (g *gateway) login(w http.ResponseWriter, r *http.Request, cfg *Config) {
 	}
 	if ok, wait := g.cfg.Limiter.Allow(ip); !ok {
 		mins := int(wait.Minutes() + 0.999)
-		g.loginPage(w, http.StatusTooManyRequests, fmt.Sprintf("尝试次数过多，请 %d 分钟后再试。", mins))
+		g.loginPage(w, http.StatusTooManyRequests, fmt.Sprintf("尝试次数过多，请 %d 分钟后再试。", mins), cfg)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	if err := r.ParseForm(); err != nil {
-		g.loginPage(w, http.StatusBadRequest, "请求无效，请重试。")
+		g.loginPage(w, http.StatusBadRequest, "请求无效，请重试。", cfg)
 		return
 	}
 	if !cfg.CheckPassword(r.PostFormValue("password")) {
 		g.cfg.Limiter.Fail(ip)
-		g.cfg.Logger.Warn("public console: login failed", "client", ip)
-		g.loginPage(w, http.StatusUnauthorized, "密码不对。")
+		g.cfg.Logger.Warn("public console: login failed", "client", ip, "lan", g.cfg.LAN)
+		g.loginPage(w, http.StatusUnauthorized, "密码不对。", cfg)
 		return
 	}
 	g.cfg.Limiter.Success(ip)
 
+	deviceID := ""
+	if g.cfg.LAN && r.PostFormValue("remember") == "1" {
+		id, err := g.rememberDevice(w, r, ip)
+		if err != nil {
+			g.cfg.Logger.Error("lan console: remember device", "err", err)
+			g.loginPage(w, http.StatusInternalServerError, "登录失败，请重试。", cfg)
+			return
+		}
+		deviceID = id
+	}
+	if err := g.issueSession(w, r, deviceID); err != nil {
+		g.cfg.Logger.Error("public console: issue session", "err", err)
+		g.loginPage(w, http.StatusInternalServerError, "登录失败，请重试。", cfg)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// issueSession creates a console session, records it as issued by this
+// gateway (for deviceID when the browser is remembered) and sets its cookie.
+func (g *gateway) issueSession(w http.ResponseWriter, r *http.Request, deviceID string) error {
 	ctx := r.Context()
 	token, err := g.cfg.Sessions.CreateConsoleToken(ctx)
 	if err != nil {
-		g.loginPage(w, http.StatusInternalServerError, "登录失败，请重试。")
-		return
+		return err
 	}
 	_, secret, _, err := g.cfg.Sessions.RedeemConsoleToken(ctx, token)
 	if err != nil {
-		g.loginPage(w, http.StatusInternalServerError, "登录失败，请重试。")
-		return
+		return err
 	}
-	if err := g.remember(Digest(secret)); err != nil {
-		g.cfg.Logger.Error("public console: record session", "err", err)
-		g.loginPage(w, http.StatusInternalServerError, "登录失败，请重试。")
-		return
+	if err := g.remember(Digest(secret), deviceID); err != nil {
+		return err
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: secret, Path: "/",
 		Secure: !g.cfg.LAN, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	return nil
 }
 
 // remember records an issued session and drops ones past their lifetime.
-func (g *gateway) remember(digest string) error {
+func (g *gateway) remember(digest, deviceID string) error {
 	now := g.cfg.Now().UTC()
 	return g.cfg.Store.Update(func(c *Config) {
 		kept := c.Sessions[:0]
@@ -188,19 +247,27 @@ func (g *gateway) remember(digest string) error {
 				kept = append(kept, s)
 			}
 		}
-		c.Sessions = append(kept, IssuedSession{Digest: digest, IssuedAt: now})
+		c.Sessions = append(kept, IssuedSession{Digest: digest, IssuedAt: now, DeviceID: deviceID})
 	})
 }
 
+// forget drops a session at logout and, when the browser was remembered, the
+// remembered device with it (logging out means "ask me again").
 func (g *gateway) forget(digest string) {
 	_ = g.cfg.Store.Update(func(c *Config) {
+		device := ""
 		kept := c.Sessions[:0]
 		for _, s := range c.Sessions {
 			if s.Digest != digest {
 				kept = append(kept, s)
+			} else {
+				device = s.DeviceID
 			}
 		}
 		c.Sessions = kept
+		if device != "" {
+			c.RemoveDevice(device)
+		}
 	})
 }
 
@@ -275,43 +342,3 @@ func writeJSONError(w http.ResponseWriter, status int, code, msg string) {
 	body.Error.Code, body.Error.Message = code, msg
 	_ = json.NewEncoder(w).Encode(body)
 }
-
-var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>登录 · AcornFox 控制台</title>
-<link rel="stylesheet" href="/login.css"></head>
-<body><main>
-<h1>AcornFox 控制台</h1>
-<p class="sub">{{.Sub}}</p>
-{{if .Msg}}<p class="err" role="alert">{{.Msg}}</p>{{end}}
-<form method="post" action="/login">
-<label for="password">密码</label>
-<input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-<button type="submit">登录</button>
-</form>
-<p class="note">忘记密码：运行 <code>{{.Reset}}</code> 重新生成。</p>
-</main></body></html>`))
-
-func (g *gateway) loginPage(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-	w.WriteHeader(status)
-	page := struct{ Msg, Sub, Reset string }{msg, "输入开通公网访问时生成的密码。", "acornfox public-console enable 域名 --reset-password"}
-	if g.cfg.LAN {
-		page.Sub, page.Reset = "输入开启局域网访问时生成的密码。", "acornfox lan-console enable --reset-password"
-	}
-	_ = loginTmpl.Execute(w, page)
-}
-
-// loginCSS uses the console palette (ink, paper, line, pill buttons).
-const loginCSS = `:root{--paper:#f4f6f7;--surface:#fff;--line:#dde3e6;--ink:#13161c;--muted:#5a6470;--danger:#b42d20}
-@media (prefers-color-scheme:dark){:root{--paper:#13161c;--surface:#1c2028;--line:#2e343d;--ink:#f4f6f7;--muted:#a9b3bc;--danger:#f06a5c}}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--paper);color:var(--ink);font:16px/1.6 "IBM Plex Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif}
-main{width:min(400px,100% - 32px);padding:32px;border-radius:16px;background:var(--surface);border:1px solid var(--line)}
-h1{margin:0;font-size:22px}.sub,.note{color:var(--muted);font-size:14px}.err{color:var(--danger);font-weight:500}
-form{display:flex;flex-direction:column;gap:10px;margin:16px 0}label{font-weight:500;font-size:14px}
-input{height:44px;padding:0 16px;border-radius:999px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font:inherit}
-button{height:44px;border:0;border-radius:999px;background:var(--ink);color:var(--paper);font:inherit;font-weight:700;cursor:pointer}
-:focus-visible{outline:2px solid #0c7565;outline-offset:3px}code{font-size:13px}`

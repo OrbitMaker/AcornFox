@@ -1,0 +1,157 @@
+{
+  "scenario": "recipe-hermes-with-new-api",
+  "request": {
+    "recipe": "hermes-with-new-api"
+  },
+  "platform": {
+    "China": true,
+    "Cloud": "",
+    "TZ": "Asia/Shanghai",
+    "ChatModel": "qwen-plus"
+  },
+  "apps": [
+    {
+      "app": "new-api",
+      "catalog_id": "new-api",
+      "version": "v1.0.0-rc.48",
+      "settings": {
+        "port": 3000,
+        "health_path": "/api/status",
+        "exposure": "local",
+        "command": [],
+        "pids_limit": 0,
+        "memory_mb": 512,
+        "links": []
+      },
+      "env": [
+        {
+          "key": "SESSION_SECRET",
+          "value": "54676765f0432576424ce6e0a600062bedb25870327cf737825b31cbc2d8055f",
+          "secret": true
+        },
+        {
+          "key": "SQLITE_PATH",
+          "value": "/data/one-api.db",
+          "secret": false
+        },
+        {
+          "key": "TZ",
+          "value": "Asia/Shanghai",
+          "secret": false
+        }
+      ],
+      "files": [],
+      "init": [
+        {
+          "method": "POST",
+          "path": "/api/setup",
+          "content_type": "application/json",
+          "body": "{\"DemoSiteEnabled\":false,\"SelfUseModeEnabled\":true,\"confirmPassword\":\"ziYTAwtHwfmVQ47fNg4Z\",\"password\":\"ziYTAwtHwfmVQ47fNg4Z\",\"username\":\"admin\"}"
+        }
+      ],
+      "first_login": {
+        "app": "new-api",
+        "url": "http://server.example:8080/new-api",
+        "fields": [
+          {
+            "label": "账号",
+            "value": "admin"
+          },
+          {
+            "label": "密码",
+            "value": "ziYTAwtHwfmVQ47fNg4Z",
+            "secret": true
+          }
+        ]
+      }
+    },
+    {
+      "app": "hermes-agent",
+      "catalog_id": "hermes-agent",
+      "version": "v0.23.0",
+      "settings": {
+        "port": 9119,
+        "health_path": "/api/status",
+        "exposure": "local",
+        "command": [
+          "gateway",
+          "run"
+        ],
+        "pids_limit": 512,
+        "memory_mb": 2048,
+        "links": [
+          "new-api"
+        ]
+      },
+      "env": [
+        {
+          "key": "HERMES_DASHBOARD",
+          "value": "1",
+          "secret": false
+        },
+        {
+          "key": "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+          "value": "8CPMzmp6dUPYvkbxjsDqXSet",
+          "secret": true
+        },
+        {
+          "key": "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
+          "value": "08f66c8f86b318548a213fc4bbf1b166407775889e2802116664483625bc984a",
+          "secret": true
+        },
+        {
+          "key": "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
+          "value": "admin",
+          "secret": false
+        },
+        {
+          "key": "PIP_INDEX_URL",
+          "value": "https://repo.huaweicloud.com/repository/pypi/simple/",
+          "secret": false
+        },
+        {
+          "key": "TZ",
+          "value": "Asia/Shanghai",
+          "secret": false
+        },
+        {
+          "key": "UV_DEFAULT_INDEX",
+          "value": "https://repo.huaweicloud.com/repository/pypi/simple/",
+          "secret": false
+        },
+        {
+          "key": "npm_config_registry",
+          "value": "https://repo.huaweicloud.com/repository/npm/",
+          "secret": false
+        }
+      ],
+      "files": [
+        {
+          "mount_path": "/opt/data",
+          "path": "config.yaml",
+          "mode": "0600",
+          "uid": 10000,
+          "gid": 10000,
+          "overwrite": true,
+          "content": "model:\n  provider: custom\n  base_url: \"http://new-api:3000/v1\"\n  api_key: \"sk-K1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n  default: \"qwen-plus\"\napprovals:\n  mode: manual\nterminal:\n  backend: local\n"
+        }
+      ],
+      "init": [],
+      "first_login": {
+        "app": "hermes-agent",
+        "url": "http://server.example:8080/hermes-agent",
+        "fields": [
+          {
+            "label": "账号",
+            "value": "admin"
+          },
+          {
+            "label": "密码",
+            "value": "8CPMzmp6dUPYvkbxjsDqXSet",
+            "secret": true
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -393,3 +393,30 @@ func TestCodesCoverContract(t *testing.T) {
 		}
 	}
 }
+
+// The gateway sometimes takes several seconds to send its first byte (1.2 to
+// 8.3 seconds measured from China); at 10 seconds installs gave up on it and
+// fell back to slow public sources. The default client waits 30 seconds for
+// the small signed answer; downloads use the caller's own client.
+func TestDefaultTimeoutLeavesRoomForASlowGateway(t *testing.T) {
+	if DefaultTimeout != 30*time.Second {
+		t.Fatalf("DefaultTimeout = %s, want 30s", DefaultTimeout)
+	}
+	if got := (&Client{}).httpClient().Timeout; got != DefaultTimeout {
+		t.Fatalf("default client timeout = %s, want DefaultTimeout", got)
+	}
+	// A slow but answering gateway is waited for: the client's timeout, not
+	// how fast the first byte comes, decides (scaled down to keep the test
+	// short).
+	slow := newFake()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		slow.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+	c.HTTP = &http.Client{Timeout: 2 * time.Second}
+	if _, err := c.Issue(context.Background(), "x", "runtime"); err != nil {
+		t.Fatalf("a slow answer within the timeout must be taken: %v", err)
+	}
+}

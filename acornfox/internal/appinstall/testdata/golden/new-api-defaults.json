@@ -1,0 +1,69 @@
+{
+  "scenario": "new-api-defaults",
+  "request": {
+    "app": "new-api"
+  },
+  "platform": {
+    "China": true,
+    "Cloud": "aliyun",
+    "TZ": "Asia/Shanghai",
+    "ChatModel": ""
+  },
+  "apps": [
+    {
+      "app": "new-api",
+      "catalog_id": "new-api",
+      "version": "v1.0.0-rc.48",
+      "settings": {
+        "port": 3000,
+        "health_path": "/api/status",
+        "exposure": "local",
+        "command": [],
+        "pids_limit": 0,
+        "memory_mb": 512,
+        "links": []
+      },
+      "env": [
+        {
+          "key": "SESSION_SECRET",
+          "value": "064b2f0c02788b52df4e6ca331656455f2188bf83440fb0ae4fa9022f2840ac2",
+          "secret": true
+        },
+        {
+          "key": "SQLITE_PATH",
+          "value": "/data/one-api.db",
+          "secret": false
+        },
+        {
+          "key": "TZ",
+          "value": "Asia/Shanghai",
+          "secret": false
+        }
+      ],
+      "files": [],
+      "init": [
+        {
+          "method": "POST",
+          "path": "/api/setup",
+          "content_type": "application/json",
+          "body": "{\"DemoSiteEnabled\":false,\"SelfUseModeEnabled\":true,\"confirmPassword\":\"aWNwD0t6hFTzBE93vt4E\",\"password\":\"aWNwD0t6hFTzBE93vt4E\",\"username\":\"admin\"}"
+        }
+      ],
+      "first_login": {
+        "app": "new-api",
+        "url": "http://server.example:8080/new-api",
+        "fields": [
+          {
+            "label": "账号",
+            "value": "admin"
+          },
+          {
+            "label": "密码",
+            "value": "aWNwD0t6hFTzBE93vt4E",
+            "secret": true
+          }
+        ]
+      }
+    }
+  ]
+}

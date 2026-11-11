@@ -2,7 +2,9 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +13,9 @@ import (
 	"time"
 )
 
-// App-center records (migration 0010): install tasks and the encrypted
-// install parameters / first-login fields of apps installed from the catalog.
+// App-center records (migrations 0010, 0012, 0013): install tasks, the
+// encrypted install parameters / first-login fields of apps installed from
+// the catalog, and the manifest each was installed with.
 // The store keeps the ciphertext as given; encryption is the caller's
 // (internal/appinstall).
 
@@ -210,21 +213,25 @@ func (s *Store) GetCatalogSecrets(ctx context.Context, app string) (CatalogSecre
 }
 
 // KeptCatalogSecrets is the saved parameters of an app-center app deleted
-// with its data kept (see migration0012).
+// with its data kept (see migration0012). Manifest and ManifestSHA256 are the
+// manifest the deleted app was installed with ("" when it had none saved,
+// see migration0013).
 type KeptCatalogSecrets struct {
-	App           string
-	CatalogID     string
-	CatalogOrigin string
-	ParamsEnc     string
-	KeptAt        time.Time
+	App            string
+	CatalogID      string
+	CatalogOrigin  string
+	ParamsEnc      string
+	KeptAt         time.Time
+	Manifest       string
+	ManifestSHA256 string
 }
 
 // GetKeptCatalogSecrets returns what was kept for app; ErrNotFound when none.
 func (s *Store) GetKeptCatalogSecrets(ctx context.Context, app string) (KeptCatalogSecrets, error) {
 	var k KeptCatalogSecrets
 	var at string
-	err := s.db.QueryRowContext(ctx, `SELECT app, catalog_id, catalog_origin, params_enc, kept_at FROM kept_catalog_secrets WHERE app=?`, app).
-		Scan(&k.App, &k.CatalogID, &k.CatalogOrigin, &k.ParamsEnc, &at)
+	err := s.db.QueryRowContext(ctx, `SELECT app, catalog_id, catalog_origin, params_enc, kept_at, manifest, manifest_sha256 FROM kept_catalog_secrets WHERE app=?`, app).
+		Scan(&k.App, &k.CatalogID, &k.CatalogOrigin, &k.ParamsEnc, &at, &k.Manifest, &k.ManifestSHA256)
 	if errors.Is(err, sql.ErrNoRows) {
 		return KeptCatalogSecrets{}, ErrNotFound
 	}
@@ -244,6 +251,119 @@ func (s *Store) DeleteKeptCatalogSecrets(ctx context.Context, app string) error 
 		return fmt.Errorf("delete kept catalog secrets: %w", err)
 	}
 	return nil
+}
+
+// Where a saved manifest came from.
+const (
+	ManifestFromInstall  = "install"  // saved by the install itself
+	ManifestFromBackfill = "backfill" // found on this machine later, for an app installed before manifests were saved
+)
+
+// CatalogManifest is the manifest an app-center app was installed with
+// (migration0013). Manifest is the manifest.yaml text of the app package as
+// it was; SHA256 is the lowercase hex sha256 of exactly those bytes. A
+// manifest holds no secrets, so it is kept in clear.
+type CatalogManifest struct {
+	App            string
+	CatalogID      string
+	CatalogVersion string
+	CatalogOrigin  string // "" = public catalog, else the private catalog id
+	Manifest       string
+	SHA256         string
+	Source         string // ManifestFrom*
+	SavedAt        time.Time
+}
+
+// ManifestSHA256 is the checksum CatalogManifest.SHA256 must hold.
+func ManifestSHA256(manifest string) string {
+	sum := sha256.Sum256([]byte(manifest))
+	return hex.EncodeToString(sum[:])
+}
+
+func validCatalogManifest(m CatalogManifest) error {
+	if m.CatalogID == "" || m.Manifest == "" {
+		return fmt.Errorf("%w: catalog manifest needs a catalog id and the manifest text", ErrInvalid)
+	}
+	if m.Source != ManifestFromInstall && m.Source != ManifestFromBackfill {
+		return fmt.Errorf("%w: catalog manifest source %q", ErrInvalid, m.Source)
+	}
+	if m.SHA256 != ManifestSHA256(m.Manifest) {
+		return fmt.Errorf("%w: catalog manifest checksum does not match the text", ErrInvalid)
+	}
+	return nil
+}
+
+// SetCatalogManifest stores (replaces) the manifest app was installed with;
+// SavedAt is set to now. ErrNotFound when the app does not exist, ErrInvalid
+// when SHA256 is not the checksum of Manifest.
+func (s *Store) SetCatalogManifest(ctx context.Context, m CatalogManifest) error {
+	if err := validCatalogManifest(m); err != nil {
+		return err
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := scanAppTx(ctx, tx, m.App); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO app_catalog_manifests (app, catalog_id, catalog_version, catalog_origin, manifest, manifest_sha256, source, saved_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(app) DO UPDATE SET catalog_id=excluded.catalog_id, catalog_version=excluded.catalog_version,
+				catalog_origin=excluded.catalog_origin, manifest=excluded.manifest, manifest_sha256=excluded.manifest_sha256,
+				source=excluded.source, saved_at=excluded.saved_at`,
+			m.App, m.CatalogID, m.CatalogVersion, m.CatalogOrigin, m.Manifest, m.SHA256, m.Source, formatTime(time.Now().UTC()))
+		if err != nil {
+			return fmt.Errorf("set catalog manifest: %w", err)
+		}
+		return nil
+	})
+}
+
+// AddCatalogManifest stores the manifest only when app has none yet and
+// reports whether it did; an existing row is never touched (a backfill must
+// not replace what an install saved). ErrNotFound when the app does not
+// exist.
+func (s *Store) AddCatalogManifest(ctx context.Context, m CatalogManifest) (bool, error) {
+	if err := validCatalogManifest(m); err != nil {
+		return false, err
+	}
+	added := false
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := scanAppTx(ctx, tx, m.App); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO app_catalog_manifests (app, catalog_id, catalog_version, catalog_origin, manifest, manifest_sha256, source, saved_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(app) DO NOTHING`,
+			m.App, m.CatalogID, m.CatalogVersion, m.CatalogOrigin, m.Manifest, m.SHA256, m.Source, formatTime(time.Now().UTC()))
+		if err != nil {
+			return fmt.Errorf("add catalog manifest: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("add catalog manifest: %w", err)
+		}
+		added = n > 0
+		return nil
+	})
+	return added, err
+}
+
+// GetCatalogManifest returns the manifest app was installed with, ErrNotFound
+// when none is saved.
+func (s *Store) GetCatalogManifest(ctx context.Context, app string) (CatalogManifest, error) {
+	var m CatalogManifest
+	var at string
+	err := s.db.QueryRowContext(ctx, `SELECT app, catalog_id, catalog_version, catalog_origin, manifest, manifest_sha256, source, saved_at
+		FROM app_catalog_manifests WHERE app=?`, app).
+		Scan(&m.App, &m.CatalogID, &m.CatalogVersion, &m.CatalogOrigin, &m.Manifest, &m.SHA256, &m.Source, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CatalogManifest{}, ErrNotFound
+	}
+	if err != nil {
+		return CatalogManifest{}, fmt.Errorf("get catalog manifest: %w", err)
+	}
+	if m.SavedAt, err = parseTime(at); err != nil {
+		return CatalogManifest{}, err
+	}
+	return m, nil
 }
 
 // encodeStringList stores a list column as JSON ("" for an empty list).

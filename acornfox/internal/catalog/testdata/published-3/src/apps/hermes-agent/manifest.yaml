@@ -1,0 +1,136 @@
+# Hermes 智能体（Nous Research 的 Hermes Agent）。原样安装上游镜像，不改代码。
+# 它的网页控制台能改密钥、能开终端：默认只本机、必须登录，危险命令要人批准，不挂宿主机 Docker。
+id: hermes-agent
+schema: 2
+source: upstream
+maintainer: acornfox
+
+app:
+  name: Hermes 智能体
+  summary: 常驻的 AI 智能体，可以接飞书、钉钉、企业微信、微信等做机器人
+  category: ai-agent
+  tags: [ai, agent]
+  keywords: [hermes, hermes agent, 爱马仕, 爱马仕智能体]
+  icon: icon.svg
+  homepage: https://github.com/NousResearch/hermes-agent
+  license: MIT
+
+lifecycle:
+  min_platform: "0.5.0"
+  status: active
+
+resources:
+  memory_mb: { min: 1024, recommended: 2048 }
+  cpu: { min: 1 }
+  # 实测：镜像在 Docker 里占 4.56 GB（containerd 镜像存储同时留压缩层和解开的文件），
+  # 经网关下载时镜像包（1.12 GB）也要先落盘，再加数据，所以至少 6 GB
+  disk_mb: { min: 6144 }
+  platforms: [linux/amd64, linux/arm64]
+  gpu: none
+
+release:
+  version: v0.23.0
+  images:
+    - name: app
+      repository: nousresearch/hermes-agent
+      tag: v0.23.0
+      digest: sha256:adb7890916de63245523492be8f68f9d2095fecbec4e2a6dab7960381f0fc002
+      size_mb: 1150
+      artifact: hermes-agent-v0.23.0-image
+      artifact_sha256: d356bba314af272039743d82123bf57a38e67696d69558a6871c4b999700df45
+      artifact_size: 1120227840
+
+container:
+  command: [gateway, run]
+  pids_limit: 512
+  no_new_privileges: true
+
+endpoints:
+  - name: web
+    port: 9119
+    protocol: http
+    primary: true
+    health:
+      path: /api/status
+      timeout_s: 300
+
+exposure:
+  default: local
+
+volumes:
+  - name: data
+    path: /opt/data
+    backup: true
+
+params:
+  - key: llm
+    type: llm_provider
+    label: 大模型
+    hint: 模型的上下文要不少于 64K，否则 Hermes 启动不了
+    required: true
+    llm:
+      platform: optional
+      local_gateway: true
+      needs: [chat]
+      min_context: 65536
+  - key: dashboard_password
+    type: secret
+    generate: { length: 24 }
+    hidden: true
+    editable: never
+  - key: dashboard_session_secret
+    type: secret
+    generate: { length: 64, charset: hex }
+    hidden: true
+    editable: never
+
+env:
+  - { key: HERMES_DASHBOARD, value: "1" }
+  # 平台变量：时区，以及 Hermes 装插件、技能时用的 Python、Node 包下载源（国内自动用国内镜像）
+  - { key: TZ, from: platform.tz }
+  - { key: PIP_INDEX_URL, from: platform.mirror.pypi }
+  - { key: UV_DEFAULT_INDEX, from: platform.mirror.pypi }
+  - { key: npm_config_registry, from: platform.mirror.npm }
+  # 非本机回环地址上必须配登录方式，否则控制台拒绝启动（上游的安全默认）
+  - { key: HERMES_DASHBOARD_BASIC_AUTH_USERNAME, value: admin }
+  - { key: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD, from: params.dashboard_password, secret: true }
+  - { key: HERMES_DASHBOARD_BASIC_AUTH_SECRET, from: params.dashboard_session_secret, secret: true }
+
+files:
+  - volume: data
+    path: config.yaml
+    overwrite: install
+    mode: "0600"
+    # Hermes 以 uid 10000 运行，配置文件要归它，否则读不到（试装实测）
+    owner: "10000:10000"
+    template: |
+      model:
+        provider: custom
+        base_url: "{{params.llm.base_url}}"
+        api_key: "{{params.llm.api_key}}"
+        default: "{{params.llm.model}}"
+      approvals:
+        mode: manual
+      terminal:
+        backend: local
+
+uses:
+  - { name: llm_gateway, kind: llm_gateway, for_param: llm, optional: true }
+
+first_login:
+  - { label: 账号, value: admin }
+  - { label: 密码, from: params.dashboard_password, secret: true }
+
+delivery:
+  tier: auto
+  minutes: 3
+  user_steps:
+    - 打开控制台，用应用详情里的密码登录
+    - 要接飞书、企业微信等机器人时，在控制台里填机器人凭据
+
+upgrade:
+  from: ">=v0.16.0"
+  breaking: false
+
+uninstall:
+  data: [volumes.data]

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/hostcheck"
+	"github.com/acornfox/acornfox/internal/publicconsole"
 	"github.com/acornfox/acornfox/internal/reconcile"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -125,7 +126,11 @@ func TestHostHistorySkipsUnavailable(t *testing.T) {
 
 // --- runtime checks ---
 
-type fakeLANConsole struct{ enabled bool }
+type fakeLANConsole struct {
+	enabled bool
+	resets  int
+	removed []string
+}
 
 func (f *fakeLANConsole) Status(context.Context) (LANConsoleStatus, error) {
 	return LANConsoleStatus{Enabled: f.enabled, Port: 18802, URL: "http://192.168.1.10:18802"}, nil
@@ -134,6 +139,21 @@ func (f *fakeLANConsole) Enable(context.Context, bool) (LANConsoleStatus, string
 	return LANConsoleStatus{}, "", errors.New("not in tests")
 }
 func (f *fakeLANConsole) Disable(context.Context) error { return nil }
+func (f *fakeLANConsole) ResetPassword(context.Context) (LANConsoleStatus, error) {
+	f.resets++
+	return LANConsoleStatus{Enabled: f.enabled}, nil
+}
+func (f *fakeLANConsole) Devices(context.Context) ([]publicconsole.DeviceView, error) {
+	return []publicconsole.DeviceView{{ID: "d1", Name: "Mac · Chrome"}}, nil
+}
+func (f *fakeLANConsole) RemoveDevice(_ context.Context, id string) (bool, error) {
+	f.removed = append(f.removed, id)
+	return id == "d1", nil
+}
+func (f *fakeLANConsole) RemoveDevices(context.Context) (int, error) {
+	f.removed = append(f.removed, "*")
+	return 1, nil
+}
 
 const runtimeTCPHdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
 
@@ -151,28 +171,50 @@ func withRuntimeEnv(t *testing.T, goos, procRows string, free uint64) {
 	if err := os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(runtimeTCPHdr+procRows), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	oldOS, oldRoot, oldFree, oldDev, oldRoot2, oldClock := runtimeGOOS, runtimeProcRoot, runtimeFree, runtimeDevice, runtimeIsRoot, runtimeClockProbe
+	oldOS, oldRoot, oldFree, oldDev, oldRoot2, oldProbes := runtimeGOOS, runtimeProcRoot, runtimeFree, runtimeDevice, runtimeIsRoot, runtimeGatewayProbes
 	runtimeGOOS, runtimeProcRoot = goos, root
 	runtimeFree = func(string) (uint64, error) { return free, nil }
 	runtimeDevice = func(string) uint64 { return 7 }
 	runtimeIsRoot = func() bool { return false }
+	// The clock and the gateway readers come from testClockProbe and
+	// testGatewayProbe, which tests replace one at a time.
+	runtimeGatewayProbes = func(gw string) (hostcheck.ClockProbe, hostcheck.GatewayProbe) {
+		return testClockProbe(gw), testGatewayProbe(gw)
+	}
 	// The clock: synchronized, no time comparison (no timedatectl, no network).
-	runtimeClockProbe = func(string) hostcheck.ClockProbe {
+	testClockProbe = func(string) hostcheck.ClockProbe {
 		return hostcheck.ClockProbe{Sync: func(context.Context) (hostcheck.SyncStatus, error) {
 			return hostcheck.SyncStatus{SyncKnown: true, Synchronized: true}, nil
 		}}
 	}
+	// The download gateway: reachable, no network used.
+	testGatewayProbe = func(gw string) hostcheck.GatewayProbe {
+		p := hostcheck.GatewayProbe{Base: gw}
+		if gw != "" {
+			p.Health = func(context.Context) (hostcheck.GatewayHealth, error) {
+				return hostcheck.GatewayHealth{Status: 200}, nil
+			}
+		}
+		return p
+	}
 	t.Cleanup(func() {
-		runtimeGOOS, runtimeProcRoot, runtimeFree, runtimeDevice, runtimeIsRoot, runtimeClockProbe = oldOS, oldRoot, oldFree, oldDev, oldRoot2, oldClock
+		runtimeGOOS, runtimeProcRoot, runtimeFree, runtimeDevice, runtimeIsRoot, runtimeGatewayProbes = oldOS, oldRoot, oldFree, oldDev, oldRoot2, oldProbes
 	})
 }
+
+// testClockProbe and testGatewayProbe are what withRuntimeEnv's
+// runtimeGatewayProbes returns.
+var (
+	testClockProbe   func(gw string) hostcheck.ClockProbe
+	testGatewayProbe func(gw string) hostcheck.GatewayProbe
+)
 
 // The clock line: compared with the download gateway named in the download
 // sources; ten minutes off fails with SETUP-CLOCK-01.
 func TestRuntimeChecksClock(t *testing.T) {
 	withRuntimeEnv(t, "linux", "", 50<<30)
 	var asked []string
-	runtimeClockProbe = func(gw string) hostcheck.ClockProbe {
+	testClockProbe = func(gw string) hostcheck.ClockProbe {
 		asked = append(asked, gw)
 		return hostcheck.ClockProbe{
 			Sync: func(context.Context) (hostcheck.SyncStatus, error) {
@@ -381,9 +423,55 @@ func TestConsoleEntryConsoleStatusReadOnly(t *testing.T) {
 	if rec := call("GET", "/v1/public-console"); rec.Code != 200 {
 		t.Fatalf("GET public-console on console entry = %d", rec.Code)
 	}
-	for _, m := range [][2]string{{"POST", "/v1/lan-console"}, {"DELETE", "/v1/lan-console"}, {"POST", "/v1/public-console/enable"}, {"DELETE", "/v1/public-console"}} {
+	for _, m := range [][2]string{{"POST", "/v1/lan-console"}, {"DELETE", "/v1/lan-console"}, {"POST", "/v1/lan-console/reset-password"}, {"POST", "/v1/public-console/enable"}, {"DELETE", "/v1/public-console"}} {
 		if rec := call(m[0], m[1]); rec.Code == 200 || rec.Code == 201 {
 			t.Fatalf("%s %s must not work on the console entry (got %d)", m[0], m[1], rec.Code)
 		}
+	}
+}
+
+// A logged-in browser may list and remove remembered devices (that only takes
+// access away); clearing the password needs the trusted entry.
+func TestLANConsoleDevicesAndResetPassword(t *testing.T) {
+	cfg, _, _ := newTestConfig(t)
+	lan := &fakeLANConsole{enabled: true}
+	cfg.LANConsole = lan
+	trusted, console := New(cfg), NewConsole(cfg)
+	cookie, csrf := login(t, trusted, console)
+	onConsole := func(method, path string, withCSRF bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Host = "127.0.0.1:12345"
+		req.AddCookie(cookie)
+		if withCSRF {
+			req.Header.Set(csrfHeader, csrf)
+		}
+		rec := httptest.NewRecorder()
+		console.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := onConsole("GET", "/v1/lan-console/devices", false); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"Mac · Chrome"`) || strings.Contains(rec.Body.String(), "digest") {
+		t.Fatalf("devices on console entry = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := onConsole("DELETE", "/v1/lan-console/devices/d1", false); rec.Code == 200 || len(lan.removed) != 0 {
+		t.Fatalf("removing a device without the CSRF header must be refused (got %d)", rec.Code)
+	}
+	if rec := onConsole("DELETE", "/v1/lan-console/devices/d1", true); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"removed":true`) {
+		t.Fatalf("remove device = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := onConsole("DELETE", "/v1/lan-console/devices/gone", true); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"removed":false`) {
+		t.Fatalf("removing a device twice must not be an error: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := onConsole("DELETE", "/v1/lan-console/devices", true); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"removed":1`) {
+		t.Fatalf("remove all = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Join(lan.removed, ",") != "d1,gone,*" {
+		t.Fatalf("removed = %v", lan.removed)
+	}
+	if lan.resets != 0 {
+		t.Fatal("nothing above may clear the password")
+	}
+	w := do(t, trusted, "POST", "/v1/lan-console/reset-password", nil, nil)
+	if w.Code != 200 || lan.resets != 1 {
+		t.Fatalf("reset-password on the trusted entry = %d %s", w.Code, w.Body.String())
 	}
 }

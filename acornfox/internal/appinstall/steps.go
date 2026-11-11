@@ -19,6 +19,7 @@ import (
 
 	"github.com/acornfox/acornfox/internal/catalog"
 	"github.com/acornfox/acornfox/internal/gatewayclient"
+	"github.com/acornfox/acornfox/internal/installtiming"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -65,6 +66,10 @@ type TaskView struct {
 	CreatedAt   time.Time    `json:"created_at"`
 	UpdatedAt   time.Time    `json:"updated_at"`
 	FinishedAt  *time.Time   `json:"finished_at,omitempty"`
+	// Timing is the verdict on the task's step times by this server's clock
+	// (done, slow, stuck, what to say and do next: internal/installtiming).
+	// Worked out when the task is read (Task, Tasks); never stored.
+	Timing *installtiming.Verdict `json:"timing,omitempty"`
 }
 
 // StepView is one step of one app.
@@ -82,14 +87,10 @@ type StepView struct {
 	Progress *StepProgress `json:"progress,omitempty"`
 }
 
-// StepProgress is how far a running step is.
-type StepProgress struct {
-	Phase       string `json:"phase"` // download | load (docker load after the download)
-	DoneBytes   int64  `json:"done_bytes"`
-	TotalBytes  int64  `json:"total_bytes,omitempty"`
-	BytesPerSec int64  `json:"bytes_per_sec,omitempty"`
-	ETASeconds  int64  `json:"eta_seconds,omitempty"`
-}
+// StepProgress is how far a running step is: phase (download | load),
+// done_bytes, total_bytes, bytes_per_sec, eta_seconds and, while
+// downloading, stalled_seconds (how long no byte has come in).
+type StepProgress = installtiming.Progress
 
 // AppResult is one app of a task.
 type AppResult struct {
@@ -109,6 +110,19 @@ type AppResult struct {
 	// ReusedVolumes are old data volumes this install took over (reuse_data);
 	// they are never removed by this task.
 	ReusedVolumes []string `json:"reused_volumes,omitempty"`
+	// What an install on old data (reuse_data) carried over from the old app,
+	// see reuse.go. Carried: one line each (parameters, the platform
+	// variables the user had changed, the model source, its token; after any
+	// install also what became of tokens an old app of this name left).
+	// TakenToken: the old app's token in a local model gateway, taken over
+	// (not issued by this task: a failed install leaves it alone). KeptFiles:
+	// config files of the old data left as they were. FileBackups: config
+	// files written anew because what the platform puts in them changed, and
+	// where the old file was copied first.
+	Carried     []string            `json:"carried,omitempty"`
+	TakenToken  *TokenRef           `json:"taken_gateway_token,omitempty"`
+	KeptFiles   []string            `json:"kept_files,omitempty"`
+	FileBackups []runner.FileBackup `json:"file_backups,omitempty"`
 }
 
 // TokenRef names a token issued in a local model gateway app (never its value).
@@ -133,6 +147,31 @@ type LoginField struct {
 
 // Masked is what a secret value shows when not revealed.
 const Masked = "******"
+
+// withTiming adds the verdict on v's step times by now (this server's clock).
+func withTiming(v TaskView, now time.Time) TaskView {
+	t := installtiming.Task{ID: v.ID, Status: v.Status, CreatedAt: v.CreatedAt, FinishedAt: v.FinishedAt, KeepVolumes: v.KeepVolumes}
+	if v.Fault != nil {
+		t.FaultCode, t.FaultMsg = v.Fault.Code, v.Fault.Message
+	}
+	for _, s := range v.Steps {
+		t.Steps = append(t.Steps, installtiming.Step{App: s.App, Name: s.Name, Label: s.Label, Status: s.Status, Message: s.Message,
+			StartedAt: s.StartedAt, FinishedAt: s.FinishedAt, Progress: s.Progress})
+	}
+	for _, a := range v.Apps {
+		x := installtiming.App{Name: a.App, Carried: a.Carried}
+		switch {
+		case a.GatewayToken != nil:
+			x.TokenProvider = a.GatewayToken.Provider
+		case a.TakenToken != nil:
+			x.TokenProvider = a.TakenToken.Provider
+		}
+		t.Apps = append(t.Apps, x)
+	}
+	vd := installtiming.Assess(t, now, "server")
+	v.Timing = &vd
+	return v
+}
 
 func stepsFor(p *planned) []StepView {
 	if p.reuse {
@@ -163,9 +202,16 @@ func (t *taskRun) snapshot() TaskView {
 	for i, a := range t.view.Apps {
 		a.Volumes = append([]string(nil), a.Volumes...)
 		a.ReusedVolumes = append([]string(nil), a.ReusedVolumes...)
+		a.Carried = append([]string(nil), a.Carried...)
+		a.KeptFiles = append([]string(nil), a.KeptFiles...)
+		a.FileBackups = append([]runner.FileBackup(nil), a.FileBackups...)
 		if a.GatewayToken != nil {
 			tok := *a.GatewayToken
 			a.GatewayToken = &tok
+		}
+		if a.TakenToken != nil {
+			tok := *a.TakenToken
+			a.TakenToken = &tok
 		}
 		v.Apps[i] = a
 	}
@@ -226,6 +272,25 @@ func (t *taskRun) step(ctx context.Context, app, name, status, msg string) {
 			t.view.Step = app + "/" + name
 		default:
 			s.FinishedAt = &now
+		}
+	}
+	t.mu.Unlock()
+	t.save(ctx)
+}
+
+// noteStep adds note to the message of a step that is over (keeping its
+// status) and saves: something found out after the step, shown with it.
+func (t *taskRun) noteStep(ctx context.Context, app, name, note string) {
+	t.mu.Lock()
+	for i := range t.view.Steps {
+		s := &t.view.Steps[i]
+		if s.App != app || s.Name != name {
+			continue
+		}
+		if s.Message == "" {
+			s.Message = note
+		} else {
+			s.Message += "；" + note
 		}
 	}
 	t.mu.Unlock()
@@ -310,7 +375,15 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 	if err := t.create(ctx, p); err != nil {
 		return t.fail(ctx, p.name, "create", AsFault(err))
 	}
-	t.step(ctx, p.name, "create", StepDone, "")
+	if len(p.reusedVolumes) > 0 {
+		lines := []string{"接上了旧数据（" + strings.Join(p.reusedVolumes, "、") + "）"}
+		if p.kept == nil {
+			lines = append(lines, "没有找到删除时保留的设置（不是这台的应用中心删的，或记录丢了）：配置文件沿用旧数据里的，平台变量和大模型按这次的")
+		}
+		p.carried = append(lines, p.carried...)
+	}
+	t.setApp(p.name, func(r *AppResult) { r.Carried = append([]string(nil), p.carried...) })
+	t.step(ctx, p.name, "create", StepDone, strings.Join(p.carried, "；"))
 
 	// image, files and the deployment are serialized with the app's reconcile
 	// round, so image GC never sees the image before the deployment refers
@@ -327,14 +400,14 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 		t.step(ctx, p.name, "image", StepDone, msg)
 
 		t.step(ctx, p.name, "files", StepRunning, "")
-		n, err := t.files(ctx, p, cat, imageID)
+		fmsg, err := t.files(ctx, p, cat, imageID)
 		if err != nil {
 			return t.fail(ctx, p.name, "files", AsFault(err))
 		}
-		if n == 0 {
+		if fmsg == "" {
 			t.step(ctx, p.name, "files", StepSkipped, "没有要写的配置文件")
 		} else {
-			t.step(ctx, p.name, "files", StepDone, fmt.Sprintf("写了 %d 个文件", n))
+			t.step(ctx, p.name, "files", StepDone, fmsg)
 		}
 
 		t.step(ctx, p.name, "start", StepRunning, "")
@@ -402,10 +475,22 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 	if err := t.saveSecrets(ctx, p, url); err != nil {
 		return fault(CodeInternal, err, "保存首次登录信息失败")
 	}
-	if p.reuseData {
-		// The app has its own saved parameters again.
-		if err := e.cfg.Store.DeleteKeptCatalogSecrets(ctx, p.name); err != nil {
-			e.cfg.Log.Warn("drop kept catalog secrets", "app", p.name, "err", err)
+	// The app has its own saved parameters (and tokens) again: the kept
+	// record goes, with the tokens of it this install did not take over. A
+	// fresh install with data volumes passed the old-volumes check, so a
+	// kept record of its name is stale (its data is gone).
+	if p.reuseData || len(m.Volumes) > 0 {
+		var issued []TokenRef
+		t.setApp(p.name, func(r *AppResult) {
+			if r.GatewayToken != nil {
+				issued = append(issued, *r.GatewayToken)
+			}
+		})
+		if notes := e.dropKept(ctx, p.name, p.taken, issued); len(notes) > 0 {
+			t.setApp(p.name, func(r *AppResult) { r.Carried = append(r.Carried, notes...) })
+			// Also in the progress the page shows (it does not show
+			// carried): a token not revoked is for the user to remove.
+			t.noteStep(ctx, p.name, "init", strings.Join(notes, "；"))
 		}
 	}
 	t.addFirstLogin(ctx, p.name)
@@ -456,17 +541,22 @@ func (t *taskRun) create(ctx context.Context, p *planned) error {
 	t.setApp(p.name, func(r *AppResult) { r.Created = true; r.MemoryMB = mem })
 	t.save(ctx)
 
-	// model gateway link: a token in the provider, the provider's network
+	// model gateway link: a token in the provider (the old app's, when an
+	// install on its data may take it over and the gateway still has it),
+	// the provider's network
 	var links []string
 	for _, prm := range m.Params {
 		c, ok := p.vals[prm.Key].(*LLMChoice)
 		if !ok || c.Source != LLMLocalGateway {
 			continue
 		}
+		links = append(links, c.App)
+		if tk, ok := p.takeover[prm.Key]; ok && tk.choice.App == c.App && t.takeOverToken(ctx, p, c, tk) {
+			continue
+		}
 		if err := t.linkGateway(ctx, p, c); err != nil {
 			return err
 		}
-		links = append(links, c.App)
 	}
 
 	ep := primaryEndpoint(m)
@@ -574,17 +664,28 @@ func (e *Engine) checkOldVolumes(ctx context.Context, app string) error {
 	return fault(CodeOldVolumes, nil, "这台机器上还留着以前叫 %s 的应用的数据卷（%s）", app, strings.Join(names, "、"))
 }
 
-// linkGateway issues a token in the provider app for p and points c at the
-// provider's address inside Docker.
-func (t *taskRun) linkGateway(ctx context.Context, p *planned, c *LLMChoice) error {
-	e := t.e
-	prov, err := e.cfg.Store.GetApp(ctx, c.App)
+// gatewayConn is how to reach a local model gateway app: inURL is the
+// address apps use inside Docker, base its management address from this
+// server, user and pass its admin account.
+type gatewayConn struct {
+	prov       state.App
+	inURL      string
+	base       string
+	user, pass string
+}
+
+// gateway looks up the running local model gateway app name.
+func (e *Engine) gateway(ctx context.Context, name string) (gatewayConn, error) {
+	prov, err := e.cfg.Store.GetApp(ctx, name)
 	if err != nil || prov.CurrentDeployment == "" {
-		return fault(CodeNoGateway, err, "本机的模型网关 %s 没在运行", c.App)
+		return gatewayConn{}, fault(CodeNoGateway, err, "本机的模型网关 %s 没在运行", name)
+	}
+	if prov.Desired == state.DesiredStopped {
+		return gatewayConn{}, stoppedGateway(name, "")
 	}
 	pa, err := e.cfg.Catalog.App(ctx, prov.CatalogID)
 	if err != nil {
-		return err
+		return gatewayConn{}, err
 	}
 	var pv *catalog.Provide
 	for i := range pa.Manifest.Provides {
@@ -593,23 +694,15 @@ func (t *taskRun) linkGateway(ctx context.Context, p *planned, c *LLMChoice) err
 		}
 	}
 	if pv == nil || pv.Adapter != "new-api" {
-		return fault(CodeNoGateway, nil, "%s 不能当模型网关用", c.App)
+		return gatewayConn{}, fault(CodeNoGateway, nil, "%s 不能当模型网关用", name)
 	}
 	user, pass, err := e.gatewayAdmin(ctx, prov.Name)
 	if err != nil {
-		return fault(CodeGatewayToken, err, "读不到 %s 的管理员账号", prov.Name)
+		return gatewayConn{}, fault(CodeGatewayToken, err, "读不到 %s 的管理员账号", prov.Name)
 	}
 	base, err := e.hostBase(ctx, prov)
 	if err != nil {
-		return fault(CodeNoGateway, err, "本机的模型网关 %s 没在运行", prov.Name)
-	}
-	key, id, err := e.adapter.IssueToken(ctx, base, user, pass, "acornfox-"+p.name)
-	if id > 0 {
-		t.setApp(p.name, func(r *AppResult) { r.GatewayToken = &TokenRef{Provider: prov.Name, ID: id} })
-		t.save(ctx)
-	}
-	if err != nil {
-		return fault(CodeGatewayToken, err, "在 %s 里建令牌失败：%v", prov.Name, err)
+		return gatewayConn{}, fault(CodeNoGateway, err, "本机的模型网关 %s 没在运行（应该在运行，容器却没起来）：acornfox status %s 看它怎么了", prov.Name, prov.Name)
 	}
 	port := prov.Port
 	for _, ep := range pa.Manifest.Endpoints {
@@ -617,7 +710,26 @@ func (t *taskRun) linkGateway(ctx context.Context, p *planned, c *LLMChoice) err
 			port = ep.Port
 		}
 	}
-	c.BaseURL = fmt.Sprintf("http://%s:%d%s", prov.Name, port, pv.BasePath)
+	return gatewayConn{prov: prov, inURL: fmt.Sprintf("http://%s:%d%s", prov.Name, port, pv.BasePath), base: base, user: user, pass: pass}, nil
+}
+
+// linkGateway issues a token in the provider app for p and points c at the
+// provider's address inside Docker.
+func (t *taskRun) linkGateway(ctx context.Context, p *planned, c *LLMChoice) error {
+	e := t.e
+	g, err := e.gateway(ctx, c.App)
+	if err != nil {
+		return err
+	}
+	key, id, err := e.adapter.IssueToken(ctx, g.base, g.user, g.pass, "acornfox-"+p.name)
+	if id > 0 {
+		t.setApp(p.name, func(r *AppResult) { r.GatewayToken = &TokenRef{Provider: g.prov.Name, ID: id} })
+		t.save(ctx)
+	}
+	if err != nil {
+		return fault(CodeGatewayToken, err, "在 %s 里建令牌失败：%v", g.prov.Name, err)
+	}
+	c.BaseURL = g.inURL
 	c.APIKey = key
 	return nil
 }
@@ -668,11 +780,16 @@ func (e *Engine) hostBase(ctx context.Context, a state.App) (string, error) {
 }
 
 // image makes the pinned image available as acornfox/<app>:<id> and returns
-// its ID: a matching local image, else the gateway archive (when the
-// manifest names one), else the public sources.
+// its ID: a matching local image, else the gateway archive for this
+// machine's architecture (when the manifest names one), else the public
+// sources. An image whose archives are all for other architectures (or in
+// the older single form, which stands for amd64, on an arm64 machine) is not
+// fetched through the gateway: a public app's comes from the public sources
+// by digest, a private app's cannot be installed here.
 func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) (string, string, error) {
 	e := t.e
 	img := p.app.Manifest.Release.Images[0]
+	art, haveArt := img.ArtifactFor(e.cfg.Arch)
 	tagID := newID()
 	tag := runner.ImageTag(p.name, tagID)
 	t.setApp(p.name, func(r *AppResult) { r.ImageTag = tag })
@@ -683,7 +800,10 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 	}
 	refs = append(refs, img.Repository+"@"+img.Digest)
 	adopt := func() (string, bool, error) {
-		info, err := cat.AdoptImage(ctx, runner.AdoptImageRequest{App: p.name, DeploymentID: tagID, Refs: refs, Digest: img.Digest})
+		// Arch: a local image with the digest but of another architecture
+		// (an amd64 archive an older version loaded on an arm64 machine) is
+		// not "already here"; the steps below fetch this machine's one.
+		info, err := cat.AdoptImage(ctx, runner.AdoptImageRequest{App: p.name, DeploymentID: tagID, Refs: refs, Digest: img.Digest, Arch: e.cfg.Arch})
 		if errors.Is(err, runner.ErrNotFound) {
 			return "", false, nil
 		}
@@ -700,32 +820,46 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 	var notes []string
 	private := p.app.Origin != ""
 	switch {
-	case private && img.Artifact == "":
+	case private && !img.NamesArtifact():
 		// A private catalog's app is only fetched through the gateway: a
 		// manifest without an image archive would make this server ask a
 		// public registry for repository@digest, telling a third party the
 		// private app's image name. Its author has to add the archive.
 		return "", "", fault(CodePrivateDenied, nil, "私有目录 %s 的清单没有写镜像包（artifact），取不到镜像；私有应用的镜像只从下载网关取，不去公共源拉。请给码的人在目录里补上镜像包", p.app.Origin)
-	case img.Artifact == "":
+	case !img.NamesArtifact():
 		// The catalog names no gateway file: the image is a public one,
-		// pulled by its pinned digest.
+		// pulled by its pinned digest. The pull reports no progress: say
+		// so, or the step looks like it is doing nothing.
+		t.progress(ctx, p.name, "image", publicPullNote, nil)
 	case private && !t.hasGateway(p):
 		// A private catalog's image archive is only handed out by the
 		// gateway: asking a public registry for repository@digest would
 		// tell a third party the private app's image name.
 		return "", "", fault(CodePrivateDenied, nil, "这台服务器关掉了下载网关，取不到私有目录 %s 的镜像包；私有应用的镜像不去公共源找", p.app.Origin)
-	case private && img.ArtifactSHA256 == "":
+	case private && img.LegacyArtifact() && img.ArtifactSHA256 == "":
 		return "", "", fault(CodePrivateDenied, nil, "私有目录 %s 的清单没有镜像包的校验值，不能下载；私有应用的镜像不去公共源找", p.app.Origin)
+	case private && !haveArt:
+		// No archive for this machine's architecture: loading another
+		// architecture's image would not run, and the public sources are
+		// not asked for a private app.
+		return "", "", fault(CodePrivateDenied, nil, "私有目录 %s 的应用 %s 没有这台机器能用的镜像包（%s），装不了；私有应用的镜像不去公共源找。请给码的人在目录里补上 linux/%s 的镜像包", p.app.Origin, p.app.Manifest.ID, img.NoArtifactReason(e.cfg.Arch), e.cfg.Arch)
 	case !t.hasGateway(p):
-	case img.ArtifactSHA256 == "":
+		t.progress(ctx, p.name, "image", publicPullNote, nil)
+	case !haveArt:
 		// Only the catalog's signed checksum may vouch for an archive that
-		// is loaded into Docker; without it the gateway is not used.
-		notes = append(notes, "下载网关：清单没有镜像包的校验值，不走网关")
+		// is loaded into Docker, and only an archive of this machine's
+		// architecture is of use; otherwise the gateway is not used.
+		notes = append(notes, "下载网关："+img.NoArtifactReason(e.cfg.Arch)+"，不走网关")
+		if img.ArtifactSHA256 != "" || !img.LegacyArtifact() {
+			// An architecture without an archive: the pull below can take
+			// minutes, say why it is not the (usually faster) gateway.
+			t.progress(ctx, p.name, "image", img.NoArtifactReason(e.cfg.Arch)+"，从公共源拉取…", nil)
+		}
 	default:
 		t.progress(ctx, p.name, "image", "向下载网关要下载地址…", nil)
-		id, err := t.fromGateway(ctx, p, cat, img, tagID)
+		id, err := t.fromGateway(ctx, p, cat, art, tagID)
 		if err == nil {
-			return id, "从下载网关下载", nil
+			return id, installtiming.GatewayDone, nil
 		}
 		if private {
 			// A private catalog's file is only handed out by the gateway;
@@ -735,12 +869,12 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 			if errors.As(err, &f) && (f.Code == CodePrivateDenied || f.Code == CodeImageDigest) {
 				return "", "", f
 			}
-			e.cfg.Log.Warn("gateway image (private)", "app", p.name, "artifact", img.Artifact, "err", err)
+			e.cfg.Log.Warn("gateway image (private)", "app", p.name, "artifact", art.File, "err", err)
 			pf := fault(CodePrivateDenied, scrubURL(err), "私有目录 %s 的镜像包没从下载网关取到；私有应用的镜像不去公共源找", p.app.Origin)
 			pf.GatewayCode = gatewayclient.CodeOf(err)
 			return "", "", pf
 		}
-		e.cfg.Log.Warn("gateway image", "app", p.name, "artifact", img.Artifact, "err", err)
+		e.cfg.Log.Warn("gateway image", "app", p.name, "artifact", art.File, "err", err)
 		notes = append(notes, "下载网关："+err.Error())
 		// The download's progress must not stay on screen while the public
 		// sources are tried.
@@ -774,6 +908,10 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 	return resp.Image.ID, msg, nil
 }
 
+// publicPullNote is the image step's message while pulling from the public
+// sources, which report no progress.
+const publicPullNote = "从公共源拉取（拉取时看不到进度，要看网速）…"
+
 func shortDigest(d string) string {
 	if len(d) > 19 {
 		return d[:19]
@@ -790,27 +928,27 @@ func (t *taskRun) hasGateway(p *planned) bool {
 	return t.e.cfg.Gateway != nil
 }
 
-// fromGateway downloads the image archive through the download gateway (W2,
-// purpose app), checks it against the size and sha256 the signed catalog
-// pins for it (artifact_sha256, artifact_size) before anything is loaded, and
-// has the runner load it and tag it acornfox/<app>:<tagID>. The checksum the
+// fromGateway downloads the image archive art (this machine's architecture's,
+// from ArtifactFor) through the download gateway (W2, purpose app), checks it
+// against the size and sha256 the signed catalog pins for it before anything
+// is loaded, and has the runner load it and tag it acornfox/<app>:<tagID>. The checksum the
 // gateway reports is only compared: when it differs from the catalog's, the
 // file is not even downloaded. Loaded names other than the app's tag are
 // dropped by the runner, so nothing is left behind when a later step fails
 // (cleanup removes the app's tag, hence the image).
-func (t *taskRun) fromGateway(ctx context.Context, p *planned, cat runner.CatalogAPI, img catalog.Image, tagID string) (string, error) {
+func (t *taskRun) fromGateway(ctx context.Context, p *planned, cat runner.CatalogAPI, art catalog.ArchArtifact, tagID string) (string, error) {
 	e := t.e
-	want := strings.ToLower(img.ArtifactSHA256)
+	want := strings.ToLower(art.SHA256)
 	issue := func(ctx context.Context) (gatewayclient.Issued, error) {
 		if p.app.Origin != "" {
 			// A private catalog's image: W2 names the catalog and the app.
-			iss, err := e.cfg.Catalog.cfg.Gateway.IssueApp(ctx, img.Artifact, gatewayclient.AppRef{Catalog: p.app.Origin, App: p.app.Manifest.ID})
+			iss, err := e.cfg.Catalog.cfg.Gateway.IssueApp(ctx, art.File, gatewayclient.AppRef{Catalog: p.app.Origin, App: p.app.Manifest.ID})
 			if err != nil {
-				return iss, privateIssueFault(err, "镜像包 "+img.Artifact)
+				return iss, privateIssueFault(err, "镜像包 "+art.File)
 			}
 			return iss, nil
 		}
-		iss, err := e.cfg.Gateway.Issue(ctx, img.Artifact, "app")
+		iss, err := e.cfg.Gateway.Issue(ctx, art.File, "app")
 		return iss, scrubURL(err)
 	}
 	// offset is the gateway's clock minus this machine's, as the client
@@ -825,14 +963,14 @@ func (t *taskRun) fromGateway(ctx context.Context, p *planned, cat runner.Catalo
 		}
 		return 0
 	}
-	size := img.ArtifactSize
+	size := art.Size
 	// check compares what the gateway reports with the signed catalog.
 	check := func(iss gatewayclient.Issued) error {
 		if iss.SHA256 != "" && strings.ToLower(iss.SHA256) != want {
-			return fault(CodeImageDigest, nil, "下载网关给的 %s 校验值和目录里的不一致，没有下载", img.Artifact)
+			return fault(CodeImageDigest, nil, "下载网关给的 %s 校验值和目录里的不一致，没有下载", art.File)
 		}
 		if size > 0 && iss.Size > 0 && iss.Size != size {
-			return fault(CodeImageDigest, nil, "下载网关给的 %s 大小和目录里的不一致，没有下载", img.Artifact)
+			return fault(CodeImageDigest, nil, "下载网关给的 %s 大小和目录里的不一致，没有下载", art.File)
 		}
 		return nil
 	}
@@ -910,6 +1048,9 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 			n  int64
 		}
 		window := []sample{{time.Now(), 0}}
+		// lastMove: when a byte last came in (stalled_seconds, which tells a
+		// stuck download from a slow one).
+		lastMove, lastN := time.Now(), int64(0)
 		for {
 			select {
 			case <-quit:
@@ -918,6 +1059,9 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 				return
 			case now := <-tick.C:
 				n := st.done.Load()
+				if n != lastN {
+					lastMove, lastN = now, n
+				}
 				window = append(window, sample{now, n})
 				if len(window) > 6 {
 					window = window[len(window)-6:]
@@ -927,7 +1071,7 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 				if dt := now.Sub(first.at).Seconds(); dt > 0 {
 					rate = int64(float64(n-first.n) / dt)
 				}
-				pr := &StepProgress{Phase: "download", DoneBytes: n, TotalBytes: total, BytesPerSec: rate}
+				pr := &StepProgress{Phase: "download", DoneBytes: n, TotalBytes: total, BytesPerSec: rate, StalledSeconds: int64(now.Sub(lastMove) / time.Second)}
 				if rate > 0 && total > n {
 					pr.ETASeconds = (total - n + rate - 1) / rate
 				}
@@ -981,14 +1125,20 @@ func etaText(sec int64) string {
 }
 
 // files writes the manifest's files into their volumes.
-func (t *taskRun) files(ctx context.Context, p *planned, cat runner.CatalogAPI, imageID string) (int, error) {
+// files writes the manifest's config files into their volumes and returns
+// what it says about them ("" when there are none). On a fresh install every
+// file is written (overwrite: never keeps one the image already put there).
+// Into a volume taken over from an old app (reuse_data) a file that exists
+// is kept when what the platform writes into it did not change, and written
+// anew after copying the old one aside when it did (see reuse.go).
+func (t *taskRun) files(ctx context.Context, p *planned, cat runner.CatalogAPI, imageID string) (string, error) {
 	m := p.app.Manifest
 	if len(m.Files) == 0 {
-		return 0, nil
+		return "", nil
 	}
 	vols, err := t.e.cfg.Store.ListVolumes(ctx, p.name)
 	if err != nil {
-		return 0, fault(CodeInternal, err, "读数据卷失败")
+		return "", fault(CodeInternal, err, "读数据卷失败")
 	}
 	type target struct{ volume, mount string }
 	byName := map[string]target{}
@@ -999,34 +1149,93 @@ func (t *taskRun) files(ctx context.Context, p *planned, cat runner.CatalogAPI, 
 			}
 		}
 	}
+	reused := map[string]bool{}
+	for _, v := range p.reusedVolumes {
+		reused[v] = true
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
+	changes := map[string][]string{} // path -> what changed (a backup was asked for)
 	groups := map[target][]runner.VolumeFile{}
 	var order []target
 	for _, f := range m.Files {
 		tg, ok := byName[f.Volume]
 		if !ok {
-			return 0, fault(CodeFiles, nil, "配置文件 %s 指向的数据卷 %s 不存在", f.Path, f.Volume)
+			return "", fault(CodeFiles, nil, "配置文件 %s 指向的数据卷 %s 不存在", f.Path, f.Volume)
 		}
 		content, err := p.vals.render(f.Template, fileEscape(f.Path))
 		if err != nil {
-			return 0, fault(CodeFiles, err, "配置文件 %s 的模板：%v", f.Path, err)
+			return "", fault(CodeFiles, err, "配置文件 %s 的模板：%v", f.Path, err)
 		}
 		vf, err := volumeFile(f, content)
 		if err != nil {
-			return 0, fault(CodeFiles, err, "配置文件 %s：%v", f.Path, err)
+			return "", fault(CodeFiles, err, "配置文件 %s：%v", f.Path, err)
+		}
+		if reused[tg.volume] && vf.Overwrite {
+			if p.rewritten[vf.Path] {
+				// An earlier install on this data rewrote it, then failed:
+				// what is there is that attempt's, not the old app's.
+				vf.Backup = vf.Path + ".bak-" + stamp
+				changes[vf.Path] = []string{"上次接旧数据没装好时按那次的设置改写过"}
+			} else if changed, ok := p.fileChange(f, content); ok && len(changed) > 0 {
+				vf.Backup = vf.Path + ".bak-" + stamp
+				changes[vf.Path] = changed
+			} else {
+				vf.Overwrite = false // the old data's own file stays
+			}
 		}
 		if _, seen := groups[tg]; !seen {
 			order = append(order, tg)
 		}
 		groups[tg] = append(groups[tg], vf)
 	}
+	var res runner.WriteFilesResult
 	n := 0
 	for _, tg := range order {
-		if err := cat.WriteVolumeFiles(ctx, runner.WriteFilesRequest{App: p.name, Volume: tg.volume, MountPath: tg.mount, Image: imageID, Files: groups[tg]}); err != nil {
-			return n, fault(CodeFiles, err, "写配置文件失败：%v", err)
+		r, err := cat.WriteVolumeFiles(ctx, runner.WriteFilesRequest{App: p.name, Volume: tg.volume, MountPath: tg.mount, Image: imageID, Files: groups[tg]})
+		if err != nil {
+			return "", fault(CodeFiles, err, "写配置文件失败：%v", err)
 		}
 		n += len(groups[tg])
+		res.Written = append(res.Written, r.Written...)
+		res.Kept = append(res.Kept, r.Kept...)
+		res.Backups = append(res.Backups, r.Backups...)
 	}
-	return n, nil
+	t.setApp(p.name, func(r *AppResult) {
+		r.KeptFiles = append([]string(nil), res.Kept...)
+		r.FileBackups = append([]runner.FileBackup(nil), res.Backups...)
+	})
+	return filesMessage(n, len(p.reusedVolumes) > 0, res, changes), nil
+}
+
+// filesMessage says what files did. A runner that does not report (an older
+// one) leaves every list empty: then only the count is known.
+func filesMessage(n int, reuse bool, res runner.WriteFilesResult, changes map[string][]string) string {
+	if !reuse || len(res.Written)+len(res.Kept)+len(res.Backups) == 0 {
+		return fmt.Sprintf("写了 %d 个文件", n)
+	}
+	var parts []string
+	backedUp := map[string]bool{}
+	for _, b := range res.Backups {
+		backedUp[b.Path] = true
+		parts = append(parts, fmt.Sprintf("%s 里平台填的内容变了（%s），按这次的设置重写了，旧文件另存为 %s", b.Path, strings.Join(changes[b.Path], "、"), b.Backup))
+	}
+	for _, k := range res.Kept {
+		if c, asked := changes[k]; asked {
+			parts = append(parts, fmt.Sprintf("%s 里平台填的内容变了（%s），但旧文件不是普通文件或太大、没法另存，没有改它，请自己核对", k, strings.Join(c, "、")))
+			continue
+		}
+		parts = append(parts, "沿用旧的配置文件 "+k)
+	}
+	fresh := 0
+	for _, w := range res.Written {
+		if !backedUp[w] {
+			fresh++
+		}
+	}
+	if fresh > 0 {
+		parts = append(parts, fmt.Sprintf("旧数据里没有的 %d 个按模板写了", fresh))
+	}
+	return strings.Join(parts, "；")
 }
 
 func volumeFile(f catalog.File, content string) (runner.VolumeFile, error) {
@@ -1260,12 +1469,24 @@ func notSent(err error) bool {
 // the app (ids only), so deleting the app revokes them.
 const savedTokensKey = "_acornfox_gateway_tokens"
 
-// saveSecrets keeps the parameters and the first-login fields, encrypted.
+// saveSecrets keeps the parameters and the first-login fields, encrypted,
+// and, in the same step, the manifest the app was installed with (in clear:
+// a manifest holds no secrets). The manifest goes first, so an app that has
+// saved parameters has its manifest too.
 func (t *taskRun) saveSecrets(ctx context.Context, p *planned, url string) error {
 	e := t.e
 	fields, err := loginFields(p.app.Manifest, p.vals)
 	if err != nil {
 		return err
+	}
+	if raw := p.app.Files[manifestFile]; len(raw) > 0 {
+		text := string(raw)
+		if err := e.cfg.Store.SetCatalogManifest(ctx, state.CatalogManifest{
+			App: p.name, CatalogID: p.app.Manifest.ID, CatalogVersion: p.app.Manifest.Release.Version, CatalogOrigin: p.app.Origin,
+			Manifest: text, SHA256: state.ManifestSHA256(text), Source: state.ManifestFromInstall,
+		}); err != nil {
+			return fmt.Errorf("保存清单失败：%w", err)
+		}
 	}
 	saved := map[string]any{}
 	for k, v := range p.vals {
@@ -1281,17 +1502,30 @@ func (t *taskRun) saveSecrets(ctx context.Context, p *planned, url string) error
 				fields[i] = LoginField{Label: lf.Label, Value: ReusedLoginValue}
 			}
 		}
+		origins := map[string]string{}
+		for k, o := range p.origins {
+			origins[k] = o
+		}
 		for k := range stale {
 			delete(saved, k)
+			origins[k] = OriginOldData
 		}
+		saved[originsKey] = origins
 	}
+	// The tokens issued for it and those taken over from the old app it was
+	// installed on: deleting it with its data revokes them.
+	var toks []TokenRef
 	t.mu.Lock()
 	for _, a := range t.view.Apps {
 		if a.App == p.name && a.GatewayToken != nil {
-			saved[savedTokensKey] = []TokenRef{*a.GatewayToken}
+			toks = append(toks, *a.GatewayToken)
 		}
 	}
 	t.mu.Unlock()
+	toks = append(toks, p.taken...)
+	if len(toks) > 0 {
+		saved[savedTokensKey] = toks
+	}
 	pb, err := json.Marshal(saved)
 	if err != nil {
 		return err

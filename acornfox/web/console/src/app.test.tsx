@@ -5,7 +5,7 @@ import { App } from './App'
 import { Tile } from './components/bits'
 import { OpenHintBlock } from './pages/apps/open-hint'
 import { ToastProvider } from './components/ui/toast'
-import { app, catalog, hermesDetail, newApiDetail, resources, task } from './test/fixtures'
+import { NEEDS, app, catalog, catalogNeedsUpgrade, hermesDetail, newApiDetail, resources, task } from './test/fixtures'
 import type { TaskView } from './lib/types'
 
 type Handler = (url: string, init?: RequestInit) => unknown
@@ -339,6 +339,248 @@ describe('应用中心', () => {
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
     await within(dialog).findByText('任务 tbusy')
+  })
+})
+
+describe('要先升级 AcornFox 才能装的应用', () => {
+  const SENTENCE = '要先把 AcornFox 升级到 0.6.0 才能装'
+  const upgradeLines = (root: HTMLElement) => within(root).queryAllByText(/upgrade\.sh \| sudo bash/, { selector: 'code' })
+
+  it('应用卡片：说明要升到哪个版本，安装按钮不可点，“怎么升级”进设置的升级分区；别的应用不受影响', async () => {
+    routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
+    await openStore()
+    const [hermes, newApi] = screen.getAllByTestId('catalog-app')
+    expect(within(hermes).getByText(SENTENCE)).toBeTruthy()
+    expect((within(hermes).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
+    // 不用升级的（空串）照常能装，没有提示
+    expect(within(newApi).queryByTestId('needs-platform')).toBeNull()
+    expect((within(newApi).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(within(hermes).getByRole('button', { name: '怎么升级' }))
+    expect(location.hash).toBe('#prefs/update')
+  })
+
+  it('配方卡片：自己或其中的应用要升级时“开始”不可点并说明；别的配方不受影响', async () => {
+    routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
+    await openStore()
+    const cards = screen.getAllByTestId('catalog-recipe')
+    expect(cards.length).toBe(3)
+    for (const c of cards.slice(0, 2)) {
+      expect(within(c).getByText(SENTENCE)).toBeTruthy()
+      expect((within(c).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true)
+      expect(within(c).getByRole('button', { name: '怎么升级' })).toBeTruthy()
+    }
+    expect(within(cards[2]).queryByTestId('needs-platform')).toBeNull()
+    expect((within(cards[2]).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('旧服务端没有这个字段时，卡片和详情都没有提示，按钮能点', async () => {
+    await openStore()
+    expect(screen.queryByTestId('needs-platform')).toBeNull()
+    for (const b of screen.getAllByRole('button', { name: /^(安装|开始)$/ })) expect((b as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('详情页：安装按钮不可点，说明要升到哪个版本、现在是哪个版本，给国内和海外两条升级命令', async () => {
+    routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
+    routes['GET /v1/status'] = () => ({ runner: 'ok', version: '0.5.1' })
+    routes['GET /v1/catalog/apps/hermes-agent'] = () => ({ ...hermesDetail(false), needs_platform: NEEDS })
+    location.hash = '#item-hermes-agent'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Hermes 智能体' })
+    const note = screen.getByTestId('needs-platform')
+    expect(within(note).getByText(SENTENCE)).toBeTruthy()
+    await within(note).findByText('0.5.1')
+    const lines = upgradeLines(note).map((x) => x.textContent || '')
+    expect(lines.length).toBe(2)
+    expect(lines[0]).toContain('gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh')
+    expect(lines[1]).toContain('github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh')
+    expect((screen.getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('详情页：不用升级的应用没有提示，安装能点', async () => {
+    routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
+    routes['GET /v1/catalog/apps/new-api'] = () => ({ ...newApiDetail, needs_platform: '' })
+    location.hash = '#item-new-api'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'New API' })
+    expect(screen.queryByTestId('needs-platform')).toBeNull()
+    expect((screen.getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('安装弹窗：列表是旧的、详情说要升级时，弹窗里说明并给升级命令，不能提交', async () => {
+    routes['GET /v1/catalog/apps/new-api'] = () => ({ ...newApiDetail, needs_platform: NEEDS })
+    await openStore()
+    fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText(SENTENCE)).toBeTruthy()
+    expect(upgradeLines(dialog).length).toBe(2)
+    const submit = within(dialog).getByRole('button', { name: '安装' }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+    fireEvent.click(submit)
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
+  })
+
+  it('配方的弹窗：配方要升级时不能提交', async () => {
+    // 从命令面板这类入口也能打开配方的弹窗，所以弹窗自己也要拦。
+    routes['GET /v1/catalog'] = () => ({ ...catalog, recipes: catalog.recipes.map((r) => (r.id === 'new-api' ? { ...r, needs_platform: NEEDS } : r)) })
+    await openStore()
+    fireEvent.keyDown(window, { key: 'k', metaKey: true })
+    const palette = await screen.findByRole('dialog')
+    fireEvent.click(within(palette).getByText('New API 模型网关'))
+    await screen.findByRole('heading', { name: 'New API 模型网关' })
+    const dialog = screen.getByRole('dialog')
+    expect(await within(dialog).findByText(SENTENCE)).toBeTruthy()
+    expect((within(dialog).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  // 下面几条的说明和建议照服务端的原文写。CAT-INST-29 的建议两种情况共用一句，里面有“升级”两个字，页面不能按字猜。
+  const MSG08 = 'new-api 要求 AcornFox 0.6.0 以上，这台是 0.5.1，请先升级 AcornFox 再装'
+  const HINT08 = '先升级 AcornFox 再装（错误里的 needs_platform 是要升到的版本）'
+  const MSG29_UPGRADE = 'new-api v1.0.0-rc.48 的清单用了这个版本的 AcornFox 不认识的写法，它要求 AcornFox 0.6.0 以上，这台是 0.5.1，请先升级 AcornFox 再装（/ additional properties \'future_feature\' not allowed）'
+  const MSG29_BROKEN = 'new-api v1.0.0-rc.48 的清单过不了检查，没有安装。这是这份目录有问题，不是你的操作不对：稍后再试，还不行请把这段话反馈给我们（/ additional properties \'future_feature\' not allowed）'
+  const HINT29 = '错误里带 needs_platform 的：先升级 AcornFox 到那个版本再装。不带的：是这份目录有问题，不是操作不对，过一会儿 acornfox catalog sync 后再试，还不行就把 message 反馈给我们；不要想办法绕过'
+  const FIRST = '要先升级到 0.6.0'
+
+  async function submitNewApi() {
+    await openStore()
+    fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
+    return dialog
+  }
+
+  it('提交后被拒绝（CAT-INST-08，带 needs_platform）：服务端的说明原样显示，下面说要先升级到哪个版本并给升级命令', async () => {
+    routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-08', message: MSG08, hint: HINT08, needs_platform: NEEDS } })
+    const dialog = await submitNewApi()
+    await within(dialog).findByText('CAT-INST-08 · ' + MSG08)
+    expect(within(dialog).getByText(HINT08)).toBeTruthy()
+    expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
+    expect(upgradeLines(dialog).length).toBe(2)
+  })
+
+  it('提交后被拒绝（CAT-INST-29，带 needs_platform）：说明原样显示，下面说要先升级并给升级命令', async () => {
+    routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-29', message: MSG29_UPGRADE, hint: HINT29, needs_platform: NEEDS } })
+    const dialog = await submitNewApi()
+    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_UPGRADE)
+    expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
+    expect(upgradeLines(dialog).length).toBe(2)
+  })
+
+  it('提交后被拒绝（CAT-INST-29，不带 needs_platform）：是目录有问题，只原样显示说明，不提升级、不给升级命令', async () => {
+    // 建议里有“升级”两个字（两种情况共用一句），不能因此给升级命令。
+    routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-29', message: MSG29_BROKEN, hint: HINT29 } })
+    const dialog = await submitNewApi()
+    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_BROKEN)
+    expect(within(dialog).getByText(HINT29)).toBeTruthy()
+    expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
+    expect(upgradeLines(dialog).length).toBe(0)
+  })
+
+  it('没带 needs_platform 的 CAT-INST-08 也只原样显示说明（只认这个字段，不按编号猜）', async () => {
+    routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-08', message: MSG08, hint: HINT08 } })
+    const dialog = await submitNewApi()
+    await within(dialog).findByText('CAT-INST-08 · ' + MSG08)
+    expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
+    expect(upgradeLines(dialog).length).toBe(0)
+  })
+
+  const fail29 = (message: string, needs?: string) => task({
+    status: 'failed',
+    steps: [{ app: 'new-api', name: 'check', label: '检查', status: 'failed', message }],
+    fault: { code: 'CAT-INST-29', message, hint: HINT29, ...(needs ? { needs_platform: needs } : {}) },
+  })
+
+  it('任务失败，fault 带 needs_platform：说明原样显示，下面说要先升级并给升级命令', async () => {
+    routes['POST /v1/catalog/install'] = () => json(202, task())
+    routes['GET /v1/catalog/install/t123'] = () => fail29(MSG29_UPGRADE, NEEDS)
+    const dialog = await submitNewApi()
+    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_UPGRADE)
+    expect(within(dialog).getByText('建议：' + HINT29)).toBeTruthy()
+    expect(within(dialog).getByText(/已经清理，升级后再装。/)).toBeTruthy()
+    expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
+    expect(upgradeLines(dialog).length).toBe(2)
+  })
+
+  it('任务失败，fault 不带 needs_platform：说明原样显示，不给升级命令', async () => {
+    routes['POST /v1/catalog/install'] = () => json(202, task())
+    routes['GET /v1/catalog/install/t123'] = () => fail29(MSG29_BROKEN)
+    const dialog = await submitNewApi()
+    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_BROKEN)
+    expect(within(dialog).getByText('建议：' + HINT29)).toBeTruthy()
+    expect(within(dialog).getByText(/已经清理，可以直接重装。/)).toBeTruthy()
+    expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
+    expect(upgradeLines(dialog).length).toBe(0)
+  })
+
+  // 给更新版本的 AcornFox 做的应用包，这台读不了：详情接口返回 409，错误里带 needs_platform。
+  const MSG_DETAIL = 'hermes-agent 要求 AcornFox 0.6.0 以上，这台是 0.5.1，请先升级 AcornFox 再装'
+  const tooOld = () => json(409, { error: { code: 'CAT-INST-08', message: MSG_DETAIL, hint: HINT08, needs_platform: NEEDS } })
+
+  it('详情页：应用包读不了（409，带 needs_platform）时用列表里的基本信息，说明要先升级并给升级命令，不是加载失败', async () => {
+    routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
+    routes['GET /v1/status'] = () => ({ runner: 'ok', version: '0.5.1' })
+    routes['GET /v1/catalog/apps/hermes-agent'] = tooOld
+    location.hash = '#item-hermes-agent'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Hermes 智能体' })
+    const page = screen.getByTestId('item-limited')
+    // 列表里已有的：简介、版本、内存、下载大小、支持的 CPU、命令
+    expect(within(page).getByText(catalog.apps[0].summary)).toBeTruthy()
+    expect(within(page).getByText('v0.23.0')).toBeTruthy()
+    expect(within(page).getByText('amd64、arm64')).toBeTruthy()
+    expect(within(page).getByText('acornfox install hermes-agent')).toBeTruthy()
+    // 说明：要升到哪个版本、为什么只有基本信息、服务端的原话
+    expect(within(page).getByText('要先升级到 0.6.0，才能看这个应用的完整介绍')).toBeTruthy()
+    expect(within(page).getByText(/读不了这个应用现在的安装包，所以这一页只有基本信息。升级后再打开，就能看到完整介绍并安装。/)).toBeTruthy()
+    expect(within(page).getByTestId('item-limited-message').textContent).toBe(MSG_DETAIL)
+    // 和能读详情时一样的位置：安装不可点，下面是那句话、现在的版本、两条升级命令
+    const note = within(page).getByTestId('needs-platform')
+    expect(within(note).getByText(SENTENCE)).toBeTruthy()
+    await within(note).findByText('0.5.1')
+    expect(upgradeLines(page).length).toBe(2)
+    expect((within(page).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByText(/回应用中心/)).toBeNull()
+  })
+
+  it('详情页：应用包读不了、但这个应用已经装过，照常能进管理，说明里给升级命令', async () => {
+    routes['GET /v1/catalog'] = () => ({ ...catalogNeedsUpgrade, apps: catalogNeedsUpgrade.apps.map((a) => (a.id === 'hermes-agent' ? { ...a, installed: ['hermes-agent'] } : a)) })
+    routes['GET /v1/catalog/apps/hermes-agent'] = tooOld
+    location.hash = '#item-hermes-agent'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Hermes 智能体' })
+    const page = screen.getByTestId('item-limited')
+    expect(within(page).getByRole('button', { name: '已安装 · 管理' })).toBeTruthy()
+    expect(within(page).getByText(/已经装好的照常运行，不受影响。/)).toBeTruthy()
+    expect(within(page).queryByTestId('needs-platform')).toBeNull()
+    expect(upgradeLines(page).length).toBe(2)
+  })
+
+  it('详情页：列表里没有这个应用时，仍说明要先升级并给升级命令', async () => {
+    routes['GET /v1/catalog/apps/ghost'] = () => json(409, { error: { code: 'CAT-INST-08', message: 'ghost 要求 AcornFox 0.6.0 以上，这台是 0.5.1，请先升级 AcornFox 再装', hint: HINT08, needs_platform: NEEDS } })
+    location.hash = '#item-ghost'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'ghost' })
+    const page = screen.getByTestId('item-limited')
+    expect(within(page).getByText(SENTENCE)).toBeTruthy()
+    expect(upgradeLines(page).length).toBe(2)
+  })
+
+  it('详情页：别的错误（不带 needs_platform）照旧显示服务端的说明', async () => {
+    routes['GET /v1/catalog/apps/new-api'] = () => json(500, { error: { code: 'CAT-INST-19', message: '应用包和目录对不上' } })
+    location.hash = '#item-new-api'
+    render(<App />)
+    await screen.findByText(/应用包和目录对不上/)
+    expect(screen.queryByTestId('item-limited')).toBeNull()
+    expect(upgradeLines(document.body).length).toBe(0)
+  })
+
+  it('安装弹窗：表单要读的应用详情读不了（409，带 needs_platform）时，说明原样显示并给升级命令', async () => {
+    routes['GET /v1/catalog/apps/new-api'] = () => json(409, { error: { code: 'CAT-INST-08', message: MSG08, hint: HINT08, needs_platform: NEEDS } })
+    await openStore()
+    fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByText(MSG08)
+    expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
+    expect(upgradeLines(dialog).length).toBe(2)
   })
 })
 

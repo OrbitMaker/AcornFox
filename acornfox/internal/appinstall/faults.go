@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/acornfox/acornfox/internal/installtiming"
 )
 
 // Fault codes of installing from the app catalog and of connecting private
@@ -19,7 +21,7 @@ const (
 	CodeNoPort        = "CAT-INST-07" // no free access port left on this server
 	CodeTooOld        = "CAT-INST-08" // this AcornFox is older than the app's min_platform
 	CodePlatformLLM   = "CAT-INST-09" // the platform model key is not available yet (coming soon)
-	CodeNoGateway     = "CAT-INST-10" // local model gateway chosen but none is installed and running here
+	CodeNoGateway     = "CAT-INST-10" // a local model gateway is needed (chosen, or the old app's on reuse_data) but none is installed, or it is stopped or not running
 	CodeGatewayToken  = "CAT-INST-11" // the local gateway would not issue a token (login or token API failed)
 	CodePull          = "CAT-INST-12" // the image could not be obtained from any source
 	CodeImageDigest   = "CAT-INST-13" // a gateway image archive did not match the catalog's signed checksum or size (not loaded)
@@ -35,9 +37,13 @@ const (
 	CodeUnsupported   = "CAT-INST-23" // the manifest uses something this version cannot install yet (several images, requires)
 	CodeOldVolumes    = "CAT-INST-24" // Docker still has data volumes of an earlier app of the same name (deleted with its data kept)
 	CodeDisconnected  = "CAT-INST-25" // the app or recipe comes from a private catalog that was disconnected (no new installs, no upgrades)
-	CodePrivateDenied = "CAT-INST-26" // a private catalog file could not be had from the download gateway (refused GW-CAT-*, gateway off or unreachable, retries used up, or the manifest names no image archive); no public fallback
+	CodePrivateDenied = "CAT-INST-26" // a private catalog file could not be had from the download gateway (refused GW-CAT-*, gateway off or unreachable, retries used up, or the manifest names no image archive or none for this machine's architecture); no public fallback
 	CodeNoDisk        = "CAT-INST-27" // not enough free disk where Docker keeps images for the apps' disk_mb.min
 	CodeBadPlatform   = "CAT-INST-28" // a platform variable change (--set platform.…) names an unknown variable, one that cannot be changed, or a bad value
+	CodeBadManifest   = "CAT-INST-29" // the app package's manifest uses a field, value or format version this AcornFox does not know (refused before anything is created or downloaded)
+	// CodeStuck is not an error: it is in a running task's timing when the
+	// running step is past its stuck threshold (internal/installtiming).
+	CodeStuck = installtiming.CodeStuck // CAT-INST-30
 
 	// Connecting a private catalog with a code (POST /v1/catalog/connect).
 	CodeConnFormat    = "CAT-CONN-01" // the code is not AFXC- plus 16 letters/digits (checked here, not sent)
@@ -61,16 +67,16 @@ type FaultDef struct {
 // the user (spending money, opening to the network, typing a key) say so.
 var Faults = []FaultDef{
 	{CodeUnknown, "目录里没有这个应用、配方或版本", "acornfox catalog list 看有哪些；目录太旧就 acornfox catalog sync"},
-	{CodeBadParams, "参数不对：没有这个参数、这个参数由平台生成不能填、格式不符或缺了必填项", "按 message 改 --set；acornfox catalog info <应用> 看参数"},
+	{CodeBadParams, "参数不对：没有这个参数、这个参数由平台生成不能填、格式不符或缺了必填项；接上旧数据重装时，原来用的本机模型网关已经不在本机了（删掉了），也报这个", "按 message 改 --set；acornfox catalog info <应用> 看参数。message 说原来用的本机网关本机没有了时，问用户要用哪个：--llm local（本机在运行的 New API）或 --llm own（自己的 Key）。网关只是停着报的是 CAT-INST-10，不是这个"},
 	{CodeNameTaken, "已经有同名的应用", "用 --name 换个名字；要重装先由用户确认后 acornfox delete 旧的"},
 	{CodeBusy, "同一个应用正在安装", "不要重复点安装；acornfox install status <task_id> 看进度"},
 	{CodeNoMemory, "整机分配给应用的内存不够", "问用户：调小别的应用（acornfox app set --memory）或调大整机上限（acornfox limits --memory）"},
 	{CodeArch, "这台机器的 CPU 架构不在应用支持的列表里", "换一台机器，或等应用出这个架构的版本"},
 	{CodeNoPort, "这台服务器的访问端口用完了", "删掉不用的应用后重试"},
-	{CodeTooOld, "AcornFox 版本比应用要求的旧", "先升级 AcornFox 再装"},
+	{CodeTooOld, "AcornFox 版本比应用要求的旧", "先升级 AcornFox 再装（错误里的 needs_platform 是要升到的版本）"},
 	{CodePlatformLLM, "平台 Key 还没开放", "改用 --llm local（本机 New API）或 --llm own（自己的 Key，要用户提供）"},
-	{CodeNoGateway, "选了本机网关，但本机没有在运行的 New API", "先 acornfox install new-api，或装配方 hermes-with-new-api"},
-	{CodeGatewayToken, "本机 New API 发不出令牌（登录或令牌接口失败）", "看 New API 是否在运行（acornfox status new-api）；管理员密码被改过时改用 --llm own"},
+	{CodeNoGateway, "要用本机的模型网关（选了 --llm local，或接上旧数据时原来用的就是它），但它没装、停着或没在运行", "看 message：说“装着但停着”的，先问用户，同意后 acornfox start <网关名>，acornfox status <网关名> 显示在运行后再装（不要再装一个 New API，同名的已经装着）；说“容器却没起来”的，acornfox status <网关名> 看它怎么了；本机还没有 New API 才 acornfox install new-api，或装配方 hermes-with-new-api。不想用本机网关就改 --llm own（自己的 Key，要用户提供）"},
+	{CodeGatewayToken, "本机 New API 发不出令牌（登录或令牌接口失败）", "看 New API 是否在运行（acornfox status new-api）；管理员密码被改过时改用 --llm own；message 里有 HTTP 429 是 New API 限制了登录和取令牌的次数（同一来源 20 分钟 20 次），等 20 分钟再装，不要反复重试"},
 	{CodePull, "镜像从所有来源都没拿到", "看 attempts；国内网络确认已配镜像加速；稍后重试"},
 	{CodeImageDigest, "下载网关给的镜像包和目录里签名的校验值或大小对不上，没有导入、已删掉", "公共目录的应用自动换公共源，都不对就等目录更新；私有目录的应用直接停下，不去公共源找，等目录更新或联系给码的人。不要手动绕过"},
 	{CodeFiles, "往数据卷里写配置文件失败", "看 message；检查磁盘空间和 Docker 状态（acornfox doctor）"},
@@ -83,11 +89,15 @@ var Faults = []FaultDef{
 	{CodeTaskNotFound, "没有这个安装任务", "检查任务编号"},
 	{CodeNotCatalogApp, "这个应用不是从应用中心装的，没有首次登录信息", "—"},
 	{CodeUnsupported, "清单用到了这个版本还不支持的写法（多个镜像、自带依赖）", "升级 AcornFox"},
-	{CodeOldVolumes, "这台机器上还留着以前同名应用的数据卷（删应用时保留了数据），默认不让新装悄悄接上旧数据，所以拒绝", "停下问用户：旧数据还要不要。要接着用就加 --reuse-data 重装（页面上是“接上旧数据重装”；删除时保留过参数的，账号密码和以前一样）；不要旧数据就用 --name 换个名字装，或者由用户执行 message 里卷名对应的 docker volume rm 后再装"},
+	{CodeOldVolumes, "这台机器上还留着以前同名应用的数据卷（删应用时保留了数据），默认不让新装悄悄接上旧数据，所以拒绝", "停下问用户：旧数据还要不要。要接着用就加 --reuse-data 重装（页面上是“接上旧数据重装”；删除时保留过参数的，账号密码、改过的平台变量、大模型来源和配置文件都按以前的，这次写了的以这次为准）；不要旧数据就用 --name 换个名字装，或者由用户执行 message 里卷名对应的 docker volume rm 后再装"},
 	{CodeDisconnected, "这个应用或配方来自已断开的私有目录（授权被撤销或目录被停用）；已装好的照常运行，但不能再装、不能升级", "告诉用户联系给连接码的人；拿到新连接码后 acornfox catalog connect 新码，再装"},
-	{CodePrivateDenied, "私有目录的文件（应用包或镜像）没从下载网关取到：网关不给（这台机器对这个目录没有授权了、目录停用，或文件不在目录里），或者这台服务器关掉了下载网关、连不上网关、本机时钟不准、下载多次都没下完，或者私有目录的清单没写镜像包。私有应用的文件只走下载网关，不去公共源找", "看 gateway_code：GW-CAT-* 先 acornfox catalog sync 看目录是否已断开，还连着就请给码的人检查目录；GW-AUTH-01 先校准本机时间（acornfox doctor 看 SETUP-CLOCK-01）；GW-NET-01 或下载中断就检查网络后重装；网关被关掉时问用户是否打开；message 说清单没写镜像包时，告诉用户联系给码的人补上"},
+	{CodePrivateDenied, "私有目录的文件（应用包或镜像）没从下载网关取到：网关不给（这台机器对这个目录没有授权了、目录停用，或文件不在目录里），或者这台服务器关掉了下载网关、连不上网关、本机时钟不准、下载多次都没下完，或者私有目录的清单没写镜像包、没有这台机器 CPU 架构的镜像包。私有应用的文件只走下载网关，不去公共源找", "看 gateway_code：GW-CAT-* 先 acornfox catalog sync 看目录是否已断开，还连着就请给码的人检查目录；GW-AUTH-01 先校准本机时间（acornfox doctor 看 SETUP-CLOCK-01）；GW-NET-01 或下载中断就检查网络后重装；网关被关掉时问用户是否打开；message 说清单没写镜像包、或没有这台机器架构（例如 linux/arm64）的镜像包时，告诉用户联系给码的人补上"},
 	{CodeNoDisk, "Docker 存镜像的分区剩余空间不够这次要装的应用（清单的 disk_mb.min 之和，含下载的镜像包和解开后的镜像）", "问用户：删掉不用的应用或镜像（acornfox delete、docker image prune 由用户确认后执行），或扩容磁盘；acornfox doctor 看各分区剩余空间"},
 	{CodeBadPlatform, "改平台变量不对：没有这个变量、这个变量不能改，或值的格式不对", "acornfox catalog platform-vars 看有哪些、哪些能改；按 message 改 --set platform.名字=值"},
+	// The action here covers both cases for the fault catalogue; a fault
+	// itself carries the hint of its own case (see checkPackage).
+	{CodeBadManifest, "应用包里的清单有这个版本的 AcornFox 不认识的写法（字段、取值或格式版本），安装前就拒绝了，什么都没建、没下载镜像", "错误里带 needs_platform 的：先升级 AcornFox 到那个版本再装。不带的：是这份目录有问题，不是操作不对，过一会儿 acornfox catalog sync 后再试，还不行就把 message 反馈给我们；不要想办法绕过"},
+	{CodeStuck, "安装任务还在进行，但正在做的那一步用的时间超过了它的卡住门槛（各步骤的正常时长和门槛写在程序里，install status 输出的 timing.step 有 normal_seconds、stuck_after_seconds）。这是提醒，不是失败：任务没有停，到了 AcornFox 自己的时限会判失败并清理（从公共源拉镜像 10 分钟、启动 15 分钟、健康检查按清单的 timeout_s、整次 60 分钟）", "先运行 next_command（就是 timing.step.look：下载镜像等步骤是 acornfox doctor --json，启动、健康检查、初始化是 acornfox logs 应用 --tail 200 --json）看原因，只读、不用问用户；把 say 和看到的要点告诉用户，问用户接着等还是不装了；不要自己删除、重装或重启服务"},
 	{CodeConnFormat, "连接码格式不对（应是 AFXC- 加 16 个字母数字），没有发给网关", "让用户照原样再抄一遍；0、1、8 会当成 O、I、B"},
 	{CodeConnNoGateway, "这台服务器关掉了下载网关，连不了私有目录", "问用户是否打开下载网关（去掉 ACORNFOX_GATEWAY=off 或 network.json 里的 \"gateway\": \"off\"）"},
 	{CodeConnUnknown, "连接码不存在、抄错了，或已经被别的机器用过（一码一机）", "让用户核对连接码；还不行就找给码的人要新码。不要反复试"},
@@ -112,7 +122,13 @@ type Fault struct {
 	Diagnosis any `json:"diagnosis,omitempty"`
 	// TaskID is the running task for CAT-INST-04.
 	TaskID string `json:"task_id,omitempty"`
-	err    error
+	// NeedsPlatform is the AcornFox version to upgrade to: set for
+	// CAT-INST-08 and for the CAT-INST-29 that an upgrade would cure, empty
+	// for every other fault (a CAT-INST-29 without it is a broken catalog).
+	// The same name as in the catalog list, so a page never has to guess
+	// "upgrade first" from the message text.
+	NeedsPlatform string `json:"needs_platform,omitempty"`
+	err           error
 	// answered: an init step got an answer that said no (HTTP 4xx/5xx or
 	// unexpected JSON), as opposed to a request that never got through.
 	answered bool
@@ -136,7 +152,7 @@ func (f *Fault) HTTPStatus() int {
 	case CodeBadParams, CodePlatformLLM, CodeUnsupported, CodeConnFormat, CodeBadPlatform:
 		return http.StatusBadRequest
 	case CodeNameTaken, CodeBusy, CodeNoMemory, CodeNoDisk, CodeArch, CodeNoPort, CodeTooOld, CodeNoGateway, CodeOldVolumes,
-		CodeDisconnected, CodeConnNoGateway:
+		CodeDisconnected, CodeConnNoGateway, CodeBadManifest:
 		return http.StatusConflict
 	case CodePrivateDenied, CodeConnDisabled:
 		return http.StatusForbidden
@@ -148,6 +164,14 @@ func (f *Fault) HTTPStatus() int {
 		return http.StatusBadGateway
 	}
 	return http.StatusInternalServerError
+}
+
+// The two hints of CAT-INST-29. With needs_platform an upgrade cures it;
+// without, the catalog is wrong and upgrading would not help.
+const hintBadManifestCatalog = "这是这份目录有问题，不是操作不对，升级 AcornFox 也没用：过一会儿 acornfox catalog sync 后再试，还不行就把 message 反馈给我们；不要想办法绕过"
+
+func badManifestUpgradeHint(need string) string {
+	return fmt.Sprintf("先升级到 %s：这台 AcornFox 版本太旧，升级后再装这个应用。升级要先问用户；Linux 服务器用 upgrade.sh", need)
 }
 
 func fault(code string, err error, format string, a ...any) *Fault {

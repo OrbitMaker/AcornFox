@@ -57,6 +57,11 @@ func NewConsole(cfg Config) http.Handler {
 	// entry (acornfox lan-console / public-console on the server), so a
 	// browser session can never widen who reaches the console.
 	api.HandleFunc("GET /v1/lan-console", s.getLANConsole)
+	// A logged-in browser may see and remove remembered devices (removing
+	// only takes access away); clearing the password stays trusted-only.
+	api.HandleFunc("GET /v1/lan-console/devices", s.getLANConsoleDevices)
+	api.HandleFunc("DELETE /v1/lan-console/devices", s.deleteLANConsoleDevices)
+	api.HandleFunc("DELETE /v1/lan-console/devices/{id}", s.deleteLANConsoleDevice)
 	api.HandleFunc("GET /v1/public-console", s.publicConsoleStatus)
 
 	// Wrap the /v1 API with the session + CSRF middleware.

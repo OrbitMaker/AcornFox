@@ -55,6 +55,9 @@ func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRu
 		DiskFree: func(ctx context.Context) (appinstall.DiskSpace, error) {
 			return appDiskFree(ctx, runnerAPI, uploadDir)
 		},
+		// "" is this machine's architecture; only a test build can set
+		// another one (testkeys_tag.go).
+		Arch: testAppArch(),
 	})
 }
 

@@ -345,6 +345,8 @@ export function faultForAI(t: TaskView): string {
     code: t.fault?.code || '',
     message: t.fault?.message || '',
     hint: t.fault?.hint || '',
+    // 原因是版本不够时才有：要升到的版本（建议里说的 needs_platform 就是它）。
+    ...(t.fault?.needs_platform ? { needs_platform: t.fault.needs_platform } : {}),
     failed_step: failed ? `${failed.app} · ${failed.label}${failed.message ? '：' + failed.message : ''}` : '',
     diagnosis: t.fault?.diagnosis ?? null,
     kept_volumes: t.keep_volumes_on_failure ? t.apps.flatMap((a) => a.volumes || []) : [],

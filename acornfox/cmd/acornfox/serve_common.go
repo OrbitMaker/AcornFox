@@ -216,6 +216,11 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	hist := apiserver.NewHostHistory(histSrc)
 	go hist.Run(ctx)
 	apiCfg.HostHistory = hist
+	// Per-app CPU and memory history for the app overview charts and
+	// `stats APP --history`.
+	appHist := apiserver.NewAppHistory(st, runnerAPI)
+	go appHist.Run(ctx)
+	apiCfg.AppHistory = appHist
 	if o.CheckPorts {
 		admin, lan := o.EdgeAdminPort, o.LANConsolePort
 		if admin == 0 {
@@ -289,22 +294,15 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		apiCfg.Setup = mgr
 		go mgr.Boot()
 	}
-	// The console handler shares the same dependencies plus the embedded
-	// assets; the LAN console gateway wraps it.
-	consoleCfg := apiCfg
-	consoleCfg.ConsoleFS = consoleFS
-	consoleHandler := apiserver.NewConsole(consoleCfg)
-
-	lan := publicconsole.NewLANManager(publicconsole.LANConfig{
+	entries := wireConsoles(apiCfg, consoleFS, publicconsole.LANConfig{
 		Store:    publicconsole.NewFileStore(filepath.Join(o.DataDir, "lan-console.json")),
 		Sessions: st,
-		Console:  consoleHandler,
 		Port:     o.LANConsolePort,
 		Host:     lanHost,
+		Refuse:   lanConsoleRefuse(o.ServerLAN),
 	})
-	apiCfg.LANConsole = lan
+	consoleHandler, trustedHandler, lan := entries.console, entries.trusted, entries.lan
 	lanRef.Store(lan)
-	trustedHandler := apiserver.New(apiCfg)
 	// Hooks are set by apiserver.New: now fail tasks a previous run left
 	// running and start the catalog's daily sync.
 	go appCenter.Start(ctx)
@@ -437,4 +435,66 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	stop()
 	<-recDone
 	return 0
+}
+
+// consoleEntries are the handlers that serve the API: the trusted unix
+// socket, the browser console (the loopback console listener, also behind
+// the public console gateway) and the LAN console manager, whose listener
+// wraps the browser console.
+type consoleEntries struct {
+	trusted http.Handler
+	console http.Handler
+	lan     *publicconsole.LANManager
+}
+
+// wireConsoles builds the three entries from the shared API config. The LAN
+// console wraps the browser console, and the browser console (设置 → 访问)
+// reads the LAN console's status and remembered devices, so each needs the
+// other. The LAN manager is built first with a forwarding handler; the
+// browser console is then built with LANConsole set, and the forwarder is
+// pointed at it. Copying apiCfg before LANConsole was set left the browser
+// console without it (GET /v1/lan-console answered 404 on 18800 and 18802).
+// Nothing listens before this returns, so no request sees the forwarder
+// empty. lanCfg.Console is ignored.
+func wireConsoles(apiCfg apiserver.Config, assets fs.FS, lanCfg publicconsole.LANConfig) consoleEntries {
+	fwd := &consoleForwarder{}
+	lanCfg.Console = fwd
+	lan := publicconsole.NewLANManager(lanCfg)
+	apiCfg.LANConsole = lan
+
+	consoleCfg := apiCfg
+	consoleCfg.ConsoleFS = assets
+	console := apiserver.NewConsole(consoleCfg)
+	fwd.set(console)
+	return consoleEntries{trusted: apiserver.New(apiCfg), console: console, lan: lan}
+}
+
+// consoleForwarder hands the LAN console's requests to the browser console,
+// set once both exist (wireConsoles). Before that it answers 503.
+type consoleForwarder struct{ h atomic.Pointer[http.Handler] }
+
+func (f *consoleForwarder) set(h http.Handler) { f.h.Store(&h) }
+
+func (f *consoleForwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h := f.h.Load(); h != nil {
+		(*h).ServeHTTP(w, r)
+		return
+	}
+	http.Error(w, "控制台还在启动，过几秒刷新页面", http.StatusServiceUnavailable)
+}
+
+// lanConsoleRefuse decides whether this machine may open the LAN console.
+// serverLAN is the Linux server's address on the user's own local network
+// ("" on a cloud or other public server, or while that is still unknown);
+// nil means a desktop, which may always open it.
+func lanConsoleRefuse(serverLAN func() string) func() string {
+	if serverLAN == nil {
+		return nil
+	}
+	return func() string {
+		if serverLAN() != "" {
+			return ""
+		}
+		return "这台服务器是云主机或公网服务器（或者还没判断出来），没有可信的局域网，不开局域网控制台。在自己电脑上运行 acornfox open 进控制台（经 SSH 隧道）；如果它确实在你的局域网里，等十几秒再试一次。"
+	}
 }

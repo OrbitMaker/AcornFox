@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/acornfox/acornfox/internal/client"
+	"github.com/acornfox/acornfox/internal/faults"
 )
 
 // Exit codes (stable; AI workbenches branch on them).
@@ -69,6 +70,9 @@ func (o *outputWriter) emitDiagnosisJSON(d client.Diagnosis) {
 	if d.RetryAfter > 0 {
 		diag["retry_after"] = d.RetryAfter
 	}
+	if d.NeedsPlatform != "" {
+		diag["needs_platform"] = d.NeedsPlatform
+	}
 	o.encodeRedacted(o.stdout, map[string]any{"ok": false, "diagnosis": diag})
 }
 
@@ -93,10 +97,18 @@ func (o *outputWriter) humanErr(format string, args ...any) {
 	fmt.Fprintln(o.stderr, o.redact(fmt.Sprintf(format, args...)))
 }
 
-// printDiagnosis renders a diagnosis for humans: message, hint and the log
-// excerpt, then the "give this to your AI" note.
+// printDiagnosis renders a diagnosis for humans: message, the code, hint and
+// the log excerpt, then the "give this to your AI" note. The code is printed
+// so that whoever passes this output on (often to an AI) keeps it: the Skill
+// looks a fault code up with `acornfox faults 编号`.
 func (o *outputWriter) printDiagnosis(d client.Diagnosis) {
 	o.humanErr("失败：%s", d.Message)
+	if line := codeLine(d.Code); line != "" {
+		o.humanErr("%s", line)
+	}
+	if d.NeedsPlatform != "" {
+		o.humanErr("要先升级到 %s：这台 AcornFox 版本太旧，升级 AcornFox 后再试", d.NeedsPlatform)
+	}
 	if d.Hint != "" {
 		o.humanErr("建议：%s", d.Hint)
 	}
@@ -104,6 +116,21 @@ func (o *outputWriter) printDiagnosis(d client.Diagnosis) {
 		o.humanErr("日志片段：\n%s", d.LogExcerpt)
 	}
 	o.humanErr("把以上内容交给 AI 修复。")
+}
+
+// codeLine is the human line naming a diagnosis code: a code of the fault
+// catalog comes with the command that explains it; the API's generic error
+// codes (not_found, invalid_app …, not faults) are named as they are; the
+// CLI's own fallback "unknown" means there is no code and prints nothing.
+func codeLine(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" || code == "unknown" {
+		return ""
+	}
+	if f, ok := faults.Find(code); ok {
+		return fmt.Sprintf("故障编号：%s（运行 acornfox faults %s 查处理办法）", f.Code, f.Code)
+	}
+	return "错误码：" + code
 }
 
 // exitCodeForError maps a client error to the contract exit code and its

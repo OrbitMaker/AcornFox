@@ -212,7 +212,7 @@ func VerifyDir(dir string, trusted []ed25519.PublicKey) (VerifyResult, error) {
 			return VerifyResult{}, newErr(CodeVerifyPackage, nil, a.Package.Path+" 的 sha256 或大小和 index.json 不一致")
 		}
 	}
-	return VerifyResult{Serial: idx.Serial, Apps: len(idx.Apps), Recipes: len(idx.Recipes), Packages: len(idx.Apps)}, nil
+	return VerifyResult{Serial: idx.Serial, Apps: len(idx.Apps), Recipes: len(idx.AllRecipes()), Packages: len(idx.Apps)}, nil
 }
 
 func parseSerial(b []byte) (int64, error) {

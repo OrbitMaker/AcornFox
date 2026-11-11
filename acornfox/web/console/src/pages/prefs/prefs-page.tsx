@@ -11,8 +11,9 @@ import { usePoll } from '@/lib/hooks'
 import { go } from '@/lib/router'
 import { timeText } from '@/lib/format'
 import { PRIVATE_CATALOG_UI } from '@/lib/features'
-import type { HostView, LANConsoleStatus, PublicConsoleStatus, RuntimeChecks } from '@/lib/types'
-import type { Theme } from '@/lib/theme'
+import { UPGRADE_CN, UPGRADE_GLOBAL } from '@/lib/upgrade'
+import type { HostView, LANConsoleStatus, LANDevice, PublicConsoleStatus, RuntimeChecks } from '@/lib/types'
+import { ACCENTS, type Theme } from '@/lib/theme'
 import { useConsole } from '@/state'
 import { KV, PageHead } from '@/components/bits'
 import { Badge } from '@/components/ui/badge'
@@ -21,6 +22,7 @@ import { Card } from '@/components/ui/card'
 import { Spinner, Switch, Tabs } from '@/components/ui/controls'
 import { CopyLine } from '@/components/ui/copy'
 import { Progress } from '@/components/ui/progress'
+import { useToast } from '@/components/ui/toast'
 import { ConnectCatalogDialog } from '../store/connect-dialog'
 
 export const PREF_NAV = [
@@ -33,9 +35,6 @@ export const PREF_NAV = [
   ['dev', '开发者与 AI', Bot],
 ] as const
 
-// 升级命令和 README 一致（管道运行就视为同意，不用 -y）。
-export const UPGRADE_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash'
-export const UPGRADE_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash'
 const CLI_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash'
 const CLI_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash'
 
@@ -66,12 +65,69 @@ function useChecks() {
 }
 
 function General() {
-  const { theme, setTheme } = useConsole()
+  const { theme, setTheme, accent, setAccent } = useConsole()
   return (
     <>
       <Row title="外观"><Tabs<Theme> value={theme} onChange={setTheme} label="外观" items={[['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']]} /></Row>
+      <Row title="主色" desc="按钮、开关这些主要动作的颜色；只记在这个浏览器里">
+        <div role="radiogroup" aria-label="主色" className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
+          {ACCENTS.map(([k, l, c]) => (
+            <button key={k} type="button" role="radio" aria-checked={accent === k} title={'主色：' + l} aria-label={'主色：' + l} onClick={() => setAccent(k)}
+              className={cn('size-6 rounded border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', accent === k ? 'border-foreground' : 'border-transparent')}>
+              <span className="block size-full rounded-sm" style={{ background: c }} />
+            </button>
+          ))}
+        </div>
+      </Row>
       <Row title="语言" desc="这一版只有中文"><Badge variant="outline">简体中文</Badge></Row>
     </>
+  )
+}
+
+function lanDesc(l: LANConsoleStatus): string {
+  if (!l.enabled) return '没开：控制台只在服务器本机（经 SSH 隧道）能打开'
+  const where = l.url || '端口 ' + l.port
+  if (l.password_set === false) return where + ' · 还没设密码：请现在就用局域网里的电脑打开它设一个'
+  if (l.generated_password) return where + ' · 用开启时生成的密码登录'
+  if (l.password_set_at) return `${where} · 密码是 ${timeText(l.password_set_at)} 从 ${l.password_set_from || '未知地址'} 设的`
+  return where + ' · 要密码登录'
+}
+
+// 记住的设备：列表和移除。移除只会让那台设备重新输密码，所以页面上可以点（要带会话的校验值）。
+function LANDevices() {
+  const toast = useToast()
+  const list = usePoll((s) => api.get<{ devices: LANDevice[] }>('/v1/lan-console/devices', s).then((b) => b.devices || []).catch(() => null), 0)
+  const [busy, setBusy] = React.useState('')
+  if (!list.data) return null
+  const remove = async (id: string) => {
+    setBusy(id || '*')
+    try {
+      await api.send('DELETE', '/v1/lan-console/devices' + (id ? '/' + encodeURIComponent(id) : ''))
+      toast(id ? '已移除这台设备' : '已移除全部设备', '它们要重新输密码才能进')
+      await list.refresh()
+    } catch (e) {
+      toast('没能移除', e instanceof Error ? e.message : '', 'error')
+    } finally {
+      setBusy('')
+    }
+  }
+  return (
+    <div className="mb-2.5 rounded-md border" data-testid="lan-devices">
+      <div className="flex items-center justify-between border-b px-3 py-2 text-xs font-medium">
+        <span>记住的设备 <span className="font-normal text-muted-foreground">登录时勾了“记住这台设备 90 天”的</span></span>
+        {list.data.length > 1 && <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => remove('')}>全部移除</Button>}
+      </div>
+      {list.data.length === 0 && <div className="px-3 py-2.5 text-xs text-muted-foreground">没有</div>}
+      {list.data.map((d) => (
+        <div key={d.id} className="flex items-center gap-3 border-b px-3 py-2 text-xs last:border-b-0">
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium">{d.name}</div>
+            <div className="truncate text-2xs text-muted-foreground">上次使用 {timeText(d.last_used_at)}{d.last_ip ? ' · ' + d.last_ip : ''} · {d.expires_at.slice(0, 10)} 到期</div>
+          </div>
+          <Button size="sm" variant="outline" disabled={!!busy} aria-label={'移除 ' + d.name} onClick={() => remove(d.id)}>移除</Button>
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -83,10 +139,15 @@ function Access() {
     <>
       {loading && <div className="flex items-center gap-2 py-2.5 text-xs text-muted-foreground"><Spinner />正在读取…</div>}
       {lan.data && (
-        <Row title="局域网控制台" desc={lan.data.enabled ? `${lan.data.url || '端口 ' + lan.data.port} · 要密码登录` : '没开：控制台只在服务器本机（经 SSH 隧道）能打开'}>
+        <Row title="局域网控制台" desc={lanDesc(lan.data)}>
           <Switch checked={lan.data.enabled} disabled label="局域网控制台" />
         </Row>
       )}
+      {lan.data?.enabled && lan.data.password_set_at && (
+        <p className="pb-2 text-2xs text-muted-foreground">设密码的时间和地址不是你？在服务器上运行下面的命令清掉密码，再打开局域网地址重新设；所有登录和记住的设备会一起作废。</p>
+      )}
+      {lan.data?.enabled && <CopyLine className="mb-2.5" text="acornfox lan-console reset-password" />}
+      {lan.data?.enabled && <LANDevices />}
       {lan.data && <CopyLine className="mb-2.5" text={lan.data.enabled ? 'acornfox lan-console disable' : 'acornfox lan-console enable'} />}
       {pub.data && (
         <Row title="公网控制台" desc={pub.data.enabled ? `${pub.data.url || pub.data.domain} · HTTPS · 要密码登录${pub.data.enabled_at ? ' · ' + timeText(pub.data.enabled_at) + ' 开的' : ''}` : pub.data.verifying ? `正在验证域名 ${pub.data.verifying}` : '没开：要用自己的域名'}>
@@ -96,7 +157,7 @@ function Access() {
       {pub.data && <CopyLine className="mb-2.5" text={pub.data.enabled ? 'acornfox public-console disable' : 'acornfox public-console enable 你的域名'} />}
       {!loading && !lan.data && !pub.data && <Row title="访问" desc="这台服务器不支持把控制台开到局域网或公网" />}
       {!loading && (lan.data || pub.data) && (
-        <p className="pb-2.5 text-2xs text-muted-foreground">开关只能在服务器上用上面的命令改：控制台页面不能把自己开放给更多人，开了以后会给一次密码，只显示这一次。</p>
+        <p className="pb-2.5 text-2xs text-muted-foreground">开关和清密码只能在服务器上用上面的命令做：控制台页面不能把自己开放给更多人。局域网控制台第一次打开时在浏览器里设密码，只给局域网里的地址用，云主机开不了；公网控制台开启时给一次密码，只显示这一次。</p>
       )}
     </>
   )

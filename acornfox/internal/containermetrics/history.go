@@ -398,15 +398,43 @@ func (h *History) Recent(id domain.ID, currentCID string, limit int, now time.Ti
 // It never queues catch-up reads; two in-flight reads leave observation slots
 // for interactive requests. Container RPC retains its own 10-second deadline.
 type Sampler struct {
-	Store       appcontracts.ImageMetricsTargetStore
-	History     *History
-	mu          sync.Mutex
-	client      appcontracts.ImageMetricsClient
-	cursor      int
-	active      [2]domain.ID
-	wg          sync.WaitGroup
-	interval    time.Duration // test-only shorter phase; zero retains production 5s
-	readTimeout time.Duration // test-only shorter phase; zero retains production 10s
+	Store   appcontracts.ImageMetricsTargetStore
+	History *History
+	mu      sync.Mutex
+	client  appcontracts.ImageMetricsClient
+	cursor  int
+	active  [2]domain.ID
+	wg      sync.WaitGroup
+	clock   samplerClock // test-only virtual time; nil uses the real clock
+}
+
+// samplerClock is the sampler's only source of time: the tick schedule, each
+// read's deadline and the record stamp. Production uses realClock; tests swap
+// in a virtual clock so the schedule is checked without waiting on real time.
+type samplerClock interface {
+	Now() time.Time
+	NewTicker(d time.Duration) (<-chan time.Time, func())
+	WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc)
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+func (realClock) NewTicker(d time.Duration) (<-chan time.Time, func()) {
+	ticker := time.NewTicker(d)
+	return ticker.C, ticker.Stop
+}
+
+func (realClock) WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, d)
+}
+
+func (s *Sampler) timeSource() samplerClock {
+	if s.clock != nil {
+		return s.clock
+	}
+	return realClock{}
 }
 
 func (s *Sampler) SetClient(client appcontracts.ImageMetricsClient) {
@@ -430,17 +458,13 @@ func (s *Sampler) Run(ctx context.Context) {
 	}
 	defer s.wg.Wait()
 	s.tick(ctx)
-	interval := s.interval
-	if interval <= 0 {
-		interval = sampleInterval
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	ticks, stop := s.timeSource().NewTicker(sampleInterval)
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 			s.tick(ctx)
 		}
 	}
@@ -458,6 +482,7 @@ func (s *Sampler) tick(ctx context.Context) {
 	if err = s.History.SetActiveTargets(selection); err != nil || len(targets) == 0 {
 		return
 	}
+	clock := s.timeSource()
 	s.mu.Lock()
 	client := s.client
 	if client == nil {
@@ -487,15 +512,11 @@ func (s *Sampler) tick(ctx context.Context) {
 		go func(slot int, q appcontracts.ImageMetricsRequest) {
 			defer s.wg.Done()
 			defer func() { s.mu.Lock(); s.active[slot] = ""; s.mu.Unlock() }()
-			budget := s.readTimeout
-			if budget <= 0 {
-				budget = readBudget
-			}
-			readCtx, cancel := context.WithTimeout(ctx, budget)
+			readCtx, cancel := clock.WithTimeout(ctx, readBudget)
 			defer cancel()
 			value, readErr := client.ReadManagedImageMetrics(readCtx, q)
 			if readErr == nil && readCtx.Err() == nil {
-				_ = s.History.Record(q.DeploymentID, value, time.Now().UTC())
+				_ = s.History.Record(q.DeploymentID, value, clock.Now().UTC())
 			}
 		}(slot, q)
 	}

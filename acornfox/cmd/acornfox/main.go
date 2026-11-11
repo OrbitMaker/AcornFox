@@ -63,6 +63,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runAdminToken(cmdArgs, stdout, stderr)
 		case "identity":
 			return runIdentity(cmdArgs, stdout, stderr)
+		case "faults":
+			return runFaults(cmdArgs, stdout, stderr)
 		}
 	}
 	// The default connector wraps client.Connect so internal/cli stays
@@ -93,6 +95,7 @@ func cliStopSignals(ignored func(os.Signal) bool) []os.Signal {
 var mainCommands = map[string]bool{
 	"server": true, "serve": true, "install": true, "uninstall": true, "doctor": true, "runner": true,
 	"proxy": true, "version": true, "init": true, "migrate": true, "admin-token": true, "identity": true,
+	"faults": true,
 }
 
 // noJSONCommands are user-facing commands handled here that have no JSON

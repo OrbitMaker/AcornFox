@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -40,6 +41,13 @@ type fakeAPI struct {
 	// N4.3
 	hostMetricsFn func(ctx context.Context) (client.HostMetrics, error)
 	appMetricsFn  func(ctx context.Context, app string) (client.AppMetrics, error)
+	appHistoryFn  func(ctx context.Context, app, rng string) (client.AppHistory, error)
+
+	lanStatus  client.LANConsoleStatus
+	lanDevices []client.LANConsoleDevice
+	lanRemoved int
+	lanErr     error
+	lanCalls   []string
 
 	// N3
 	consoleTokenFn func(ctx context.Context) (string, error)
@@ -244,6 +252,38 @@ func (f *fakeAPI) AppMetrics(ctx context.Context, app string) (client.AppMetrics
 		return f.appMetricsFn(ctx, app)
 	}
 	return client.AppMetrics{App: app}, nil
+}
+
+func (f *fakeAPI) AppHistory(ctx context.Context, app, rng string) (client.AppHistory, error) {
+	if f.appHistoryFn != nil {
+		return f.appHistoryFn(ctx, app, rng)
+	}
+	return client.AppHistory{App: app, Range: rng, Ranges: []string{}, Points: []client.AppHistoryPoint{}}, nil
+}
+
+// ---- LAN console (client.LANConsoleAPI) ----
+
+func (f *fakeAPI) LANConsoleStatus(context.Context) (client.LANConsoleStatus, error) {
+	return f.lanStatus, f.lanErr
+}
+func (f *fakeAPI) LANConsoleEnable(_ context.Context, reset bool) (client.LANConsoleStatus, string, error) {
+	f.lanCalls = append(f.lanCalls, fmt.Sprintf("enable reset=%v", reset))
+	return f.lanStatus, "", f.lanErr
+}
+func (f *fakeAPI) LANConsoleDisable(context.Context) error {
+	f.lanCalls = append(f.lanCalls, "disable")
+	return f.lanErr
+}
+func (f *fakeAPI) LANConsoleResetPassword(context.Context) (client.LANConsoleStatus, error) {
+	f.lanCalls = append(f.lanCalls, "reset-password")
+	return f.lanStatus, f.lanErr
+}
+func (f *fakeAPI) LANConsoleDevices(context.Context) ([]client.LANConsoleDevice, error) {
+	return f.lanDevices, f.lanErr
+}
+func (f *fakeAPI) LANConsoleRemoveDevice(_ context.Context, id string) (int, error) {
+	f.lanCalls = append(f.lanCalls, "forget "+id)
+	return f.lanRemoved, f.lanErr
 }
 
 func (f *fakeAPI) Close() error { f.closed = true; return nil }

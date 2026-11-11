@@ -40,7 +40,8 @@ function yMax(d: TS, stacked: boolean): number {
   return niceMax(vmax * 1.08)
 }
 
-function TimeChart({ d, type }: { d: TS; type: 'area' | 'line' | 'column' }) {
+// gaps：空点处断开，不连线（应用概览用：应用停着的那段没有数据）。
+export function TimeChart({ d, type, gaps }: { d: TS; type: 'area' | 'line' | 'column'; gaps?: boolean }) {
   const multi = d.series.length > 1
   const stacked = type !== 'line' && multi
   const data = React.useMemo(() => tsRows(d), [d])
@@ -70,14 +71,14 @@ function TimeChart({ d, type }: { d: TS; type: 'area' | 'line' | 'column' }) {
     chart = (
       <LineChart {...common}>
         {axes}
-        {d.series.map((s) => <Line key={s.key} dataKey={s.key} type="monotone" stroke={`var(--color-${s.key})`} strokeWidth={1.75} dot={false} connectNulls isAnimationActive={false} />)}
+        {d.series.map((s) => <Line key={s.key} dataKey={s.key} type="monotone" stroke={`var(--color-${s.key})`} strokeWidth={1.75} dot={false} connectNulls={!gaps} isAnimationActive={false} />)}
       </LineChart>
     )
   } else {
     chart = (
       <AreaChart {...common}>
         {axes}
-        {d.series.map((s) => <Area key={s.key} dataKey={s.key} type="monotone" stackId={stacked ? 'a' : undefined} stroke={`var(--color-${s.key})`} fill={`var(--color-${s.key})`} fillOpacity={stacked ? 0.28 : 0.14} strokeWidth={1.75} connectNulls isAnimationActive={false} />)}
+        {d.series.map((s) => <Area key={s.key} dataKey={s.key} type="monotone" stackId={stacked ? 'a' : undefined} stroke={`var(--color-${s.key})`} fill={`var(--color-${s.key})`} fillOpacity={stacked ? 0.28 : 0.14} strokeWidth={1.75} connectNulls={!gaps} isAnimationActive={false} />)}
       </AreaChart>
     )
   }

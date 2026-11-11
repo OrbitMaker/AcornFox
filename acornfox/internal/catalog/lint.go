@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
@@ -35,12 +36,22 @@ const (
 	CodeArtifact    = "CAT-LINT-14" // image artifact without artifact_sha256 (warning: the gateway will not be used for it)
 	CodeURL         = "CAT-LINT-15" // a link shown to users (homepage, source_code, delivery.video) is not an http(s) URL
 	CodePlatformVar = "CAT-LINT-16" // refers to a platform variable that does not exist, or to one only an llm_provider parameter may use
+	CodeMinPlatform = "CAT-LINT-17" // declares a lower min_platform than what the manifest or recipe uses needs
+	CodeAutoTier    = "CAT-LINT-18" // delivery.tier auto, but some parameter must be filled in by the user
+	CodeGaps        = "CAT-LINT-19" // gaps.yaml (missing-variable register) is unreadable or malformed; reported by CheckGaps, not Lint
 	LevelError      = "error"
 	LevelWarning    = "warning"
 	manifestName    = "manifest.yaml"
 	recipeName      = "recipe.yaml"
 	manifestSchemaF = "schema/manifest.schema.json"
 	recipeSchemaF   = "schema/recipe.schema.json"
+	gapsSchemaF     = "schema/gaps.schema.json"
+)
+
+// Problem codes for the per-architecture image archives (arch.go).
+const (
+	CodeArchArtifact = "CAT-LINT-20" // artifacts contradict: both forms written, an archive for an architecture not in resources.platforms, or one archive named for two architectures
+	CodeArchMissing  = "CAT-LINT-21" // warning: per-architecture form, but an architecture in resources.platforms has no archive (pulled from public sources there; a private catalog's app cannot be installed there)
 )
 
 // Problem is one finding of Lint.
@@ -57,7 +68,31 @@ type Report struct {
 	Apps     []string  `json:"apps"`
 	Recipes  []string  `json:"recipes"`
 	Problems []Problem `json:"problems"`
+	// MinPlatform gives, for every app and recipe that could be read, the
+	// platform version it declares and the one worked out from what it uses.
+	MinPlatform MinPlatformReport `json:"min_platform"`
 }
+
+// MinPlatformReport is Report.MinPlatform: app id / recipe id → versions.
+type MinPlatformReport struct {
+	Apps    map[string]MinPlatformInfo `json:"apps"`
+	Recipes map[string]MinPlatformInfo `json:"recipes"`
+}
+
+// MinPlatformInfo compares what a manifest or recipe declares with what it
+// needs. Declared is lifecycle.min_platform (a recipe's min_platform, "" when
+// it has none); Computed and Reasons are the MinPlatform worked out from the
+// file. Declared lower than Computed is CAT-LINT-17.
+type MinPlatformInfo struct {
+	Declared string        `json:"declared"`
+	Computed string        `json:"computed"`
+	Reasons  []Requirement `json:"reasons"`
+}
+
+// Required is the version that actually applies: the higher of Declared and
+// Computed. An author may declare more than the format needs (the app relies
+// on a behaviour, not on a field).
+func (i MinPlatformInfo) Required() string { return maxVersion(i.Computed, i.Declared) }
 
 // Errors counts problems of level error.
 func (r Report) Errors() int {
@@ -80,15 +115,16 @@ var templateRef = regexp.MustCompile(`\{\{\s*([a-z]+)\.([a-z0-9_]+(?:\.[a-z0-9_]
 // Lint checks the catalog rooted at dir (the directory holding apps/ and
 // recipes/). It never modifies anything.
 func Lint(dir string) (Report, error) {
-	mSchema, err := compileSchema(manifestSchemaF)
+	mSchema, err := compiledSchema(manifestSchemaF)
 	if err != nil {
 		return Report{}, err
 	}
-	rSchema, err := compileSchema(recipeSchemaF)
+	rSchema, err := compiledSchema(recipeSchemaF)
 	if err != nil {
 		return Report{}, err
 	}
-	rep := Report{Apps: []string{}, Recipes: []string{}, Problems: []Problem{}}
+	rep := Report{Apps: []string{}, Recipes: []string{}, Problems: []Problem{},
+		MinPlatform: MinPlatformReport{Apps: map[string]MinPlatformInfo{}, Recipes: map[string]MinPlatformInfo{}}}
 	add := func(code, level, file, path, format string, args ...any) {
 		rep.Problems = append(rep.Problems, Problem{Code: code, Level: level, File: file, Path: path, Message: fmt.Sprintf(format, args...)})
 	}
@@ -97,22 +133,45 @@ func Lint(dir string) (Report, error) {
 	for _, sub := range listDirs(filepath.Join(dir, "apps")) {
 		rel := filepath.ToSlash(filepath.Join("apps", sub, manifestName))
 		var m Manifest
-		if !loadAndValidate(filepath.Join(dir, rel), rel, mSchema, &m, add) {
+		doc, ok := loadAndValidate(filepath.Join(dir, rel), rel, mSchema, &m, add)
+		if !ok {
 			continue
 		}
 		rep.Apps = append(rep.Apps, sub)
 		manifests[sub] = m
 		checkManifest(dir, rel, sub, m, add)
 		checkPackable(filepath.Join(dir, "apps", sub), sub, add)
+		mp, err := manifestMinPlatform(doc, &m)
+		if err != nil {
+			return Report{}, err
+		}
+		info := MinPlatformInfo{Declared: m.Lifecycle.MinPlatform, Computed: mp.Version, Reasons: mp.Reasons}
+		rep.MinPlatform.Apps[sub] = info
+		checkMinPlatform(rel, "/lifecycle/min_platform", "lifecycle.min_platform", info, add)
+	}
+	appMin := map[string]string{}
+	for id, info := range rep.MinPlatform.Apps {
+		appMin[id] = info.Required()
 	}
 	for _, sub := range listDirs(filepath.Join(dir, "recipes")) {
 		rel := filepath.ToSlash(filepath.Join("recipes", sub, recipeName))
 		var r Recipe
-		if !loadAndValidate(filepath.Join(dir, rel), rel, rSchema, &r, add) {
+		doc, ok := loadAndValidate(filepath.Join(dir, rel), rel, rSchema, &r, add)
+		if !ok {
 			continue
 		}
 		rep.Recipes = append(rep.Recipes, sub)
 		checkRecipe(rel, sub, r, manifests, add)
+		mp, err := recipeMinPlatform(doc, &r, appMin)
+		if err != nil {
+			return Report{}, err
+		}
+		info := MinPlatformInfo{Declared: r.MinPlatform, Computed: mp.Version, Reasons: mp.Reasons}
+		rep.MinPlatform.Recipes[sub] = info
+		// A recipe may leave min_platform out: build works it out.
+		if r.MinPlatform != "" {
+			checkMinPlatform(rel, "/min_platform", "min_platform", info, add)
+		}
 	}
 	if len(rep.Apps) == 0 && len(rep.Recipes) == 0 && len(rep.Problems) == 0 {
 		add(CodeEmpty, LevelError, ".", "", "没找到 apps/<id>/manifest.yaml 或 recipes/<id>/recipe.yaml，确认传入的是目录仓库的根目录")
@@ -167,6 +226,37 @@ func packableName(rel string) bool {
 	return true
 }
 
+// checkMinPlatform is CAT-LINT-17: the declared version is lower than what
+// the file uses. The declared version is all an older platform looks at
+// before it installs, so it would install something it does not understand.
+func checkMinPlatform(rel, ptr, field string, info MinPlatformInfo, add addFunc) {
+	if CompareVersions(info.Declared, info.Computed) >= 0 {
+		return
+	}
+	var why []string
+	for _, r := range info.Reasons {
+		why = append(why, fmt.Sprintf("%s（%s，%s 起）", r.Where, r.Feature, r.Since))
+	}
+	add(CodeMinPlatform, LevelError, rel, ptr, "%s 写的是 %s，但用到的写法要 AcornFox %s 起才有：%s。把 %s 改成 \"%s\"",
+		field, info.Declared, info.Computed, strings.Join(why, "；"), field, info.Computed)
+}
+
+var compiledSchemas sync.Map // schema file name → *jsonschema.Schema
+
+// compiledSchema returns an embedded schema compiled once. Lint, the manifest
+// check before an install and the gaps check all validate with these.
+func compiledSchema(name string) (*jsonschema.Schema, error) {
+	if v, ok := compiledSchemas.Load(name); ok {
+		return v.(*jsonschema.Schema), nil
+	}
+	sch, err := compileSchema(name)
+	if err != nil {
+		return nil, err
+	}
+	v, _ := compiledSchemas.LoadOrStore(name, sch)
+	return v.(*jsonschema.Schema), nil
+}
+
 func compileSchema(name string) (*jsonschema.Schema, error) {
 	b, err := schemaFS.ReadFile(name)
 	if err != nil {
@@ -200,30 +290,49 @@ func listDirs(dir string) []string {
 
 // loadAndValidate reads a YAML file, validates it against the schema and
 // decodes it into out. It reports problems and returns false when the file
-// cannot be used for the cross-file checks.
-func loadAndValidate(path, rel string, sch *jsonschema.Schema, out any, add addFunc) bool {
+// cannot be used for the cross-file checks. The first result is the document
+// as plain JSON values (which fields are written, for the feature table).
+func loadAndValidate(path, rel string, sch *jsonschema.Schema, out any, add addFunc) (any, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		add(CodeRead, LevelError, rel, "", "读不了：%v", err)
-		return false
+		return nil, false
 	}
+	doc, parsed, ok := validateBytes(b, rel, sch, add)
+	if !parsed {
+		return nil, false
+	}
+	if err := yaml.Unmarshal(b, out); err != nil {
+		add(CodeRead, LevelError, rel, "", "字段类型不对：%v", err)
+		return nil, false
+	}
+	return doc, ok
+}
+
+// validateBytes parses YAML bytes and validates them against the schema. It
+// returns the document as plain JSON values, whether it could be parsed at
+// all, and whether it matches the schema.
+func validateBytes(b []byte, rel string, sch *jsonschema.Schema, add addFunc) (doc any, parsed, valid bool) {
 	var raw any
 	if err := yaml.Unmarshal(b, &raw); err != nil {
 		add(CodeRead, LevelError, rel, "", "不是合法的 YAML：%v", err)
-		return false
+		return nil, false, false
 	}
 	// Round-trip through JSON so the validator sees JSON types only.
 	js, err := json.Marshal(raw)
 	if err != nil {
 		add(CodeRead, LevelError, rel, "", "转成 JSON 失败（键必须是字符串）：%v", err)
-		return false
+		return nil, false, false
 	}
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(js))
 	if err != nil {
 		add(CodeRead, LevelError, rel, "", "转成 JSON 失败：%v", err)
-		return false
+		return nil, false, false
 	}
-	ok := true
+	if err := json.Unmarshal(js, &doc); err != nil {
+		add(CodeRead, LevelError, rel, "", "转成 JSON 失败：%v", err)
+		return nil, false, false
+	}
 	if err := sch.Validate(inst); err != nil {
 		var ve *jsonschema.ValidationError
 		if errors.As(err, &ve) {
@@ -233,13 +342,57 @@ func loadAndValidate(path, rel string, sch *jsonschema.Schema, out any, add addF
 		} else {
 			add(CodeSchema, LevelError, rel, "", "%v", err)
 		}
-		ok = false
+		return doc, true, false
 	}
-	if err := yaml.Unmarshal(b, out); err != nil {
-		add(CodeRead, LevelError, rel, "", "字段类型不对：%v", err)
-		return false
+	return doc, true, true
+}
+
+// decodeYAMLDoc parses YAML bytes into plain JSON values (maps, slices,
+// strings, float64, bool).
+func decodeYAMLDoc(b []byte) (any, error) {
+	var raw any
+	if err := yaml.Unmarshal(b, &raw); err != nil {
+		return nil, err
 	}
-	return ok
+	js, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var doc any
+	if err := json.Unmarshal(js, &doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// ValidateManifest checks manifest.yaml bytes against the built-in manifest
+// schema, the very one Lint uses, and returns what is wrong (CAT-LINT-01: not
+// readable YAML; CAT-LINT-02: a field, value or format version this program
+// does not know). An empty result means the manifest uses nothing this
+// program does not understand. It applies the schema only, not Lint's other
+// rules, and it never looks at the catalog around the manifest: the install
+// engine runs it on a downloaded package before installing.
+func ValidateManifest(raw []byte) []Problem {
+	return validateWith(raw, manifestName, manifestSchemaF)
+}
+
+// ValidateRecipe is ValidateManifest for recipe.yaml bytes.
+func ValidateRecipe(raw []byte) []Problem {
+	return validateWith(raw, recipeName, recipeSchemaF)
+}
+
+func validateWith(raw []byte, file, schemaFile string) []Problem {
+	problems := []Problem{}
+	add := func(code, level, file, path, format string, args ...any) {
+		problems = append(problems, Problem{Code: code, Level: level, File: file, Path: path, Message: fmt.Sprintf(format, args...)})
+	}
+	sch, err := compiledSchema(schemaFile)
+	if err != nil {
+		add(CodeSchema, LevelError, file, "", "%v", err)
+		return problems
+	}
+	validateBytes(raw, file, sch, add)
+	return problems
 }
 
 func leaves(e *jsonschema.ValidationError) []*jsonschema.ValidationError {
@@ -379,12 +532,67 @@ func checkManifest(dir, rel, sub string, m Manifest, add addFunc) {
 		if img.Artifact != "" && img.ArtifactSHA256 == "" {
 			add(CodeArtifact, LevelWarning, rel, fmt.Sprintf("/release/images/%d", i), "镜像 %s 填了 artifact 但没填 artifact_sha256：安装时不会走下载网关，只能从公共源拉", img.Name)
 		}
+		checkArchArtifacts(rel, fmt.Sprintf("/release/images/%d", i), img, m.Resources.Platforms, add)
 	}
 	if d := m.Exposure.Default; d != "" && d != DefaultExposure {
 		add(CodeExposure, LevelWarning, rel, "/exposure/default", "默认访问方式是 %s 不是 local：上架审核时要确认它有登录保护", d)
 	}
 	if m.Delivery.Tier == "steps" && len(m.Delivery.UserSteps) == 0 {
 		add(CodeUserSteps, LevelError, rel, "/delivery", "交付方式是“几步”，但没写 user_steps")
+	}
+	if m.Delivery.Tier == "auto" {
+		var must []string
+		for _, v := range ClassifyVars(&m) {
+			if v.Class == ClassUserRequired {
+				must = append(must, strings.TrimPrefix(v.Name, "params."))
+			}
+		}
+		if len(must) > 0 {
+			add(CodeAutoTier, LevelError, rel, "/delivery/tier", "交付方式是“全自动”（auto），但有 %d 个参数必须用户填：%s。给它们默认值或 generate，或者把 delivery.tier 改成 steps 并写 user_steps",
+				len(must), strings.Join(must, "、"))
+		}
+	}
+}
+
+// checkArchArtifacts checks the per-architecture image archives of one image
+// (arch.go): CAT-LINT-20 for what contradicts, CAT-LINT-21 (warning) for an
+// architecture the app runs on that has no archive. Architecture names other
+// than amd64 and arm64, and a missing file, sha256 or size, are schema errors.
+func checkArchArtifacts(rel, at string, img Image, platforms []string, add addFunc) {
+	if len(img.Artifacts) == 0 {
+		return
+	}
+	if img.Artifact != "" || img.ArtifactSHA256 != "" || img.ArtifactSize != 0 {
+		add(CodeArchArtifact, LevelError, rel, at, "镜像 %s 同时写了按架构的 artifacts 和旧写法 artifact、artifact_sha256、artifact_size，只能用一种：用 artifacts 时把旧写法的三项删掉", img.Name)
+	}
+	runs := map[string]bool{}
+	for _, p := range platforms {
+		runs[strings.TrimPrefix(p, "linux/")] = true
+	}
+	archs := make([]string, 0, len(img.Artifacts))
+	for arch := range img.Artifacts {
+		archs = append(archs, arch)
+	}
+	sort.Strings(archs)
+	byFile, bySum := map[string]string{}, map[string]string{}
+	for _, arch := range archs {
+		a := img.Artifacts[arch]
+		where := at + "/artifacts/" + arch
+		if !runs[arch] {
+			add(CodeArchArtifact, LevelError, rel, where, "镜像 %s 写了 %s 的镜像包，但 resources.platforms 里没有 linux/%s：应用支持这种架构就把 linux/%s 加进 platforms，不支持就删掉这个镜像包", img.Name, arch, arch, arch)
+		}
+		if other, dup := byFile[a.File]; dup && a.File != "" {
+			add(CodeArchArtifact, LevelError, rel, where, "镜像 %s 的 %s 和 %s 写了同一个网关文件 %s：一个镜像包只含一种架构的镜像，每种架构要分别导出（docker save）、分别上传", img.Name, other, arch, a.File)
+		} else if other, dup := bySum[strings.ToLower(a.SHA256)]; dup && a.SHA256 != "" {
+			add(CodeArchArtifact, LevelError, rel, where, "镜像 %s 的 %s 和 %s 的镜像包校验值相同，是同一个文件：一个镜像包只含一种架构的镜像，每种架构要分别导出、分别上传", img.Name, other, arch)
+		}
+		byFile[a.File], bySum[strings.ToLower(a.SHA256)] = arch, arch
+	}
+	for _, p := range platforms {
+		arch := strings.TrimPrefix(p, "linux/")
+		if _, ok := img.Artifacts[arch]; !ok {
+			add(CodeArchMissing, LevelWarning, rel, at+"/artifacts", "镜像 %s 没有 %s 的镜像包：公共目录里，这种机器不走下载网关，从公共源按 digest 拉（较慢）；私有目录里，这种机器装不了这个应用", img.Name, p)
+		}
 	}
 }
 

@@ -69,7 +69,17 @@
               "size_mb": { "type": "integer", "minimum": 1 },
               "artifact": { "type": "string", "description": "镜像文件在下载网关上的文件编号（大镜像经网关下发时填）" },
               "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "网关上那个镜像包（docker save 出来的 tar）的 SHA256；下载后先按它核对再导入，不填就不走网关" },
-              "artifact_size": { "type": "integer", "minimum": 1, "description": "那个镜像包的字节数" }
+              "artifact_size": { "type": "integer", "minimum": 1, "description": "那个镜像包的字节数" },
+              "artifacts": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "description": "按 CPU 架构分开的镜像包（AcornFox 0.5.1 起）。键是架构名，只能写 amd64、arm64（和 resources.platforms 里 linux/ 后面那段相同，不写 x86_64、aarch64）；值是那种架构的镜像包。写了它就不再写 artifact、artifact_sha256、artifact_size（那种旧写法只算 amd64 的）。哪种架构没有包，那种架构的机器就从公共源按 digest 拉；私有目录的应用在那种机器上装不了",
+                "properties": {
+                  "amd64": { "$ref": "#/$defs/archArtifact" },
+                  "arm64": { "$ref": "#/$defs/archArtifact" }
+                }
+              }
             }
           }
         }
@@ -297,6 +307,17 @@
       "additionalProperties": false,
       "required": ["min"],
       "properties": { "min": { "type": "integer", "minimum": 64 }, "recommended": { "type": "integer", "minimum": 64 } }
+    },
+    "archArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "size"],
+      "description": "一种架构的镜像包（docker save 出来的 tar，只含这一种架构的镜像），经下载网关下发",
+      "properties": {
+        "file": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "description": "镜像包在下载网关上的文件编号" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "镜像包的 SHA256；下载后先按它核对再导入" },
+        "size": { "type": "integer", "minimum": 1, "description": "镜像包的字节数" }
+      }
     }
   }
 }

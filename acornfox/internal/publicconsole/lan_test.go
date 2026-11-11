@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func lanRequest(h http.Handler, method, host, path string, form url.Values, cookie, origin, remote string) *httptest.ResponseRecorder {
@@ -112,19 +113,30 @@ func TestLANManagerEnableDisable(t *testing.T) {
 		t.Fatal("must start disabled")
 	}
 	st, pw, err := m.Enable(ctx, false)
-	if err != nil || pw == "" || !st.Enabled || st.URL != "http://192.168.31.20:"+strconv.Itoa(port) {
-		t.Fatalf("enable = %+v %q %v", st, pw, err)
+	if err != nil || pw != "" || !st.Enabled || st.PasswordSet || st.URL != "http://192.168.31.20:"+strconv.Itoa(port) {
+		t.Fatalf("enable must open without a password = %+v %q %v", st, pw, err)
 	}
 	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/login")
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("listener not serving: %v", err)
 	}
 	resp.Body.Close()
-	if _, again, _ := m.Enable(ctx, false); again != "" {
-		t.Fatal("enabling again must keep the password and not reveal it")
+	// A password and a remembered device appear (as the browser flow would
+	// leave them); enabling again keeps both, reset clears both.
+	hash, _ := HashPassword("correct horse")
+	_ = store.Update(func(c *Config) {
+		c.PasswordHash = hash
+		c.Devices = []Device{{ID: "d1", Digest: "x", ExpiresAt: time.Now().Add(time.Hour)}}
+		c.Sessions = []IssuedSession{{Digest: "s1", IssuedAt: time.Now(), DeviceID: "d1"}}
+	})
+	if st, _, _ := m.Enable(ctx, false); !st.PasswordSet || st.Devices != 1 {
+		t.Fatalf("enabling again must change nothing: %+v", st)
 	}
-	if _, reset, _ := m.Enable(ctx, true); reset == "" || reset == pw {
-		t.Fatal("reset must generate a new password")
+	if st, _, _ := m.Enable(ctx, true); st.PasswordSet || st.Devices != 0 {
+		t.Fatalf("enable --reset-password must clear the password and devices: %+v", st)
+	}
+	if c, _ := store.Load(); c == nil || len(c.Sessions) != 0 {
+		t.Fatal("clearing the password must end every session and keep the LAN console open")
 	}
 	if err := m.Disable(ctx); err != nil {
 		t.Fatal(err)

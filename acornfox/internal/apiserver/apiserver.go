@@ -173,6 +173,9 @@ type Config struct {
 	// HostHistory keeps the last 24 hours of host CPU, memory and disk in
 	// memory; nil => GET /v1/metrics/host/history lists no ranges.
 	HostHistory *HostHistory
+	// AppHistory keeps the last 24 hours of every app's CPU and memory in
+	// memory; nil => GET /v1/metrics/apps/{app}/history lists no ranges.
+	AppHistory *AppHistory
 	// CheckPorts are the ports GET /v1/runtime/checks checks on Linux (the
 	// gateway admin port, the LAN console port, the apps' range); zero =>
 	// no port check.
@@ -221,6 +224,7 @@ type server struct {
 	deployLogs      *deploylog.Store
 	appCenter       *appinstall.Engine
 	hostHistory     *HostHistory
+	appHistory      *AppHistory
 	checkPorts      hostcheck.Ports
 	sources         func() DownloadSources
 	version         string
@@ -284,6 +288,7 @@ func newServer(cfg Config) *server {
 		deployLogs:      cfg.DeployLogs,
 		appCenter:       cfg.AppCenter,
 		hostHistory:     cfg.HostHistory,
+		appHistory:      cfg.AppHistory,
 		checkPorts:      cfg.CheckPorts,
 		sources:         cfg.Sources,
 		version:         cfg.Version,
@@ -337,10 +342,13 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/setup", s.getSetup)
 	mux.HandleFunc("GET /v1/setup/events", s.getSetupEvents)
 	mux.HandleFunc("GET /v1/setup/faults", s.getSetupFaults)
+	mux.HandleFunc("GET /v1/faults", s.getFaults)
+	mux.HandleFunc("GET /v1/faults/{code}", s.getFault)
 	mux.HandleFunc("POST /v1/setup/start", s.postSetupStart)
 	mux.HandleFunc("POST /v1/setup/resume", s.postSetupResume)
 	mux.HandleFunc("POST /v1/setup/pause", s.postSetupPause)
 	mux.HandleFunc("GET /v1/metrics/host/history", s.getHostHistory)
+	mux.HandleFunc("GET /v1/metrics/apps/{app}/history", s.getAppHistory)
 	mux.HandleFunc("GET /v1/runtime/checks", s.getRuntimeChecks)
 	s.registerCatalog(mux)
 }
@@ -365,6 +373,10 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("GET /v1/lan-console", s.getLANConsole)
 	mux.HandleFunc("POST /v1/lan-console", s.postLANConsole)
 	mux.HandleFunc("DELETE /v1/lan-console", s.deleteLANConsole)
+	mux.HandleFunc("POST /v1/lan-console/reset-password", s.postLANConsoleResetPassword)
+	mux.HandleFunc("GET /v1/lan-console/devices", s.getLANConsoleDevices)
+	mux.HandleFunc("DELETE /v1/lan-console/devices", s.deleteLANConsoleDevices)
+	mux.HandleFunc("DELETE /v1/lan-console/devices/{id}", s.deleteLANConsoleDevice)
 	return mux
 }
 

@@ -125,6 +125,11 @@ describe('安装任务', () => {
     expect(s).toContain('acornfox install status t123')
     expect(s).toContain('"code": "CAT-INST-12"')
     expect(s).toContain('new-api · 下载镜像：所有来源都失败')
+    expect(s).not.toContain('needs_platform')
+  })
+  it('原因是版本不够时，给 AI 的诊断带上要升到的版本', () => {
+    const t = task({ status: 'failed', fault: { code: 'CAT-INST-08', message: '要求 AcornFox 0.6.0 以上', hint: '先升级 AcornFox 再装', needs_platform: '0.6.0' } })
+    expect(faultForAI(t)).toContain('"needs_platform": "0.6.0"')
   })
   it('正在装的应用名（复用的不算）', () => {
     const t = task({ apps: [{ app: 'new-api', catalog_id: 'new-api', version: 'x', reused: true, created: false }, { app: 'hermes-agent', catalog_id: 'hermes-agent', version: 'y', reused: false, created: true }] })

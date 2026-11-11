@@ -64,6 +64,8 @@ acf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 **重要**：复制并保存管理员令牌，后续需要使用。
 
+服务器在家里或办公室的局域网里（私网地址、不是云主机）时，第一次安装还会打开局域网控制台，安装输出里给出地址 `http://服务器局域网地址:18802`；第一次打开时在浏览器里自己设密码。不想打开就加 `--no-lan-console`：`curl … | sudo bash -s -- --no-lan-console`。云服务器不会打开。
+
 ### 2. 安装客户端 CLI
 
 在你的本地电脑（macOS 或 Linux）执行：
@@ -178,6 +180,12 @@ acornfox diagnose          # 本机最近一次部署
 acornfox diagnose 部署ID    # 指定部署
 ```
 
+输出里带故障编号时，可以查它的原因和处理办法（只读，不连服务器）：
+
+```bash
+acornfox faults 编号
+```
+
 常见错误和修复方法：[使用手册的常见问题](user-guide.md#常见问题)
 
 ## 从应用中心装一个应用
@@ -189,7 +197,7 @@ acornfox catalog list        # 看目录里有哪些应用和配方
 acornfox install new-api     # 约 1 分钟，装好后显示首次登录的账号，密码默认遮住
 ```
 
-要显示密码，用输出里的任务编号运行 `acornfox install status 任务编号 --show-secrets`，或在控制台“我的应用”里点开应用查看。
+要显示密码，用输出里的任务编号运行 `acornfox install status 任务编号 --show-secrets`，或在控制台“我的应用”里点开应用查看。用 `--no-wait` 只提交时，`acornfox install status 任务编号 --wait` 会等到装好或失败再返回（最多等 90 秒，没装完再运行一次）。
 
 从应用中心装的应用默认只有服务器本机能打开。在你自己的电脑上运行下面的命令打开它（经 SSH 隧道，不用放行安全组），看完按 Ctrl+C 关闭：
 
@@ -334,5 +342,7 @@ sudo cat /etc/docker/daemon.json
 ### 需要帮助？
 
 - 查看命令帮助: `acornfox --help`
+- 查故障编号: `acornfox faults 编号`
+- 服务器自检: `sudo acornfox doctor`
 - 常见问题: [使用手册](user-guide.md#常见问题)
 - GitHub Issues: https://github.com/OrbitMaker/AcornFox/issues

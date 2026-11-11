@@ -621,7 +621,7 @@ custom_docker_source() {
 #   18800 控制台、18801 公网控制台网关、18808 Caddy 管理网关（都只听本机，被占服务就起不来）
 #   18810-18899 应用端口（Caddy 容器用宿主网络直接监听；被占的端口一旦分给应用，Caddy 整份配置都加载不了）
 #   80、443 绑定域名、HTTPS 和公网控制台时才用
-#   18802 局域网控制台，默认不开
+#   18802 局域网控制台：局域网服务器全新安装时默认开，其余情况默认不开
 # 自己的进程（acornfox、Caddy 容器 acornfox-caddy、v0.3.x 装在宿主机上的 Caddy）占着不算冲突。
 
 # port_listeners：每行 "端口 进程名 PID"（只看 TCP 监听）
@@ -753,7 +753,7 @@ check_ports() {
         fi
     fi
     if [ -n "$lan" ]; then
-        log_warn "局域网控制台端口被占用（${lan}）；这个功能默认不开，开启前要先让出 18802"
+        log_warn "局域网控制台端口被占用（${lan}）；局域网控制台这次开不了，要用的话先让出 18802 再运行 acornfox lan-console enable"
     fi
     return 0
 }
@@ -771,6 +771,9 @@ parse_args() {
     PUBLIC_CONSOLE_DOMAIN=""
     FORCE_OS=false
     ALLOW_BUSY_WEB=false
+    # 局域网控制台：局域网服务器全新安装时默认打开；--no-lan-console 或 ACORNFOX_LAN_CONSOLE=0 不开
+    LAN_CONSOLE=true
+    case "${ACORNFOX_LAN_CONSOLE:-}" in 0|false|no|off) LAN_CONSOLE=false ;; esac
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -821,6 +824,10 @@ parse_args() {
                 ;;
             --force-os)
                 FORCE_OS=true
+                shift
+                ;;
+            --no-lan-console)
+                LAN_CONSOLE=false
                 shift
                 ;;
             --allow-busy-80-443)
@@ -875,6 +882,11 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     --allow-busy-80-443    80/443 已被宝塔、1Panel、nginx 等占用时仍然安装（与它们共存）：
                            应用照常用 http://服务器IP:端口 访问，但不能在 AcornFox 里绑定域名、
                            开 HTTPS 和公网控制台。没有这个参数时 80/443 被占会停下（INSTALL-PORT-02）
+    --no-lan-console       不默认打开局域网控制台。不加这个参数时：服务器在家里或办公室的局域网里
+                           （地址是 192.168.x.x 这类私网地址，并且不是云主机）、又是第一次安装，
+                           装完就在 18802 端口打开控制台，第一次打开时在浏览器里设密码；
+                           云主机、公网服务器、重装和升级都不会自动打开。以后开关:
+                           acornfox lan-console enable / disable
     --force-os             在不在支持列表里的 Ubuntu/Debian 版本上也继续安装（自行承担风险）；
                            对 CentOS、Alibaba Cloud Linux、OpenCloudOS 等其他系统无效
     --cloud 名称           只用于测试：把本机当作某个云厂商的大陆地域，跳过元数据探测；
@@ -893,6 +905,7 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     ACORNFOX_REPO             发布仓库，默认 OrbitMaker/AcornFox
     ACORNFOX_GITEE_REPO       中国大陆优先使用的 Gitee 镜像，默认 VIP13390/AcornFox；设为空则不用
     ACORNFOX_CLOUD_OVERRIDE   同 --cloud，只用于测试
+    ACORNFOX_LAN_CONSOLE      设为 0 同 --no-lan-console
     ACORNFOX_DOCKER_CE_MIRROR docker-ce 软件源地址（企业内网镜像，或用 apt 缓存代理时用 http
                               地址，如 http://mirrors.huaweicloud.com/docker-ce），排在所有
                               docker-ce 候选源最前面，先探测，用不了再换默认的源。
@@ -1639,6 +1652,46 @@ enable_public_console() {
     fi
 }
 
+# private_ipv4 地址：是 10.x、172.16～31.x、192.168.x 这三段私网地址时返回 0。
+private_ipv4() {
+    case "$1" in
+        10.*.*.*|192.168.*.*) return 0 ;;
+        172.1[6-9].*.*|172.2[0-9].*.*|172.3[0-1].*.*) return 0 ;;
+    esac
+    return 1
+}
+
+# 局域网服务器全新安装时默认打开局域网控制台（第一次打开时在浏览器里设密码）。
+# 条件（都满足才开）：没有 --no-lan-console；这台机器以前没装过（FRESH_INSTALL）；没识别出云厂商；
+# 应用访问地址是私网地址。服务端还会自己再判断一次是不是云主机（探测云元数据地址），是就拒绝
+# （LAN-CONSOLE-01）；刚启动时还没探测完也会先拒绝，所以这里最多等 30 秒。
+# 没开成不影响安装结果，以后可以运行 acornfox lan-console enable。重复运行不会出错（已开着就不变）。
+enable_lan_console() {
+    LAN_CONSOLE_RESULT=""
+    $LAN_CONSOLE || return 0
+    $FRESH_INSTALL || return 0
+    [ -z "${CLOUD:-}" ] || return 0
+    private_ipv4 "${PUBLIC_HOST:-}" || return 0
+    log_info "这台服务器在局域网里，打开局域网控制台（端口 18802）..."
+    local i out=""
+    for i in $(seq 1 15); do
+        if [ -S /run/acornfox/api.sock ]; then
+            out=$(curl -s --max-time 5 --unix-socket /run/acornfox/api.sock -X POST http://acornfox/v1/lan-console 2>/dev/null || true)
+            case "$out" in *'"enabled":true'*) break ;; esac
+        fi
+        sleep 2
+    done
+    case "$out" in
+        *'"enabled":true'*)
+            LAN_CONSOLE_RESULT="http://${PUBLIC_HOST}:18802"
+            log_success "局域网控制台已打开: ${LAN_CONSOLE_RESULT}"
+            ;;
+        *)
+            log_warn "局域网控制台没有打开（${out:-后台服务没有应答}）；安装本身不受影响，需要时运行 acornfox lan-console enable"
+            ;;
+    esac
+}
+
 # 显示安装摘要
 show_summary() {
     # “下一步”分两种情况，和 AcornFox Skill 第 7 步的情况甲、乙一致：
@@ -1696,7 +1749,14 @@ ${step_a}     1. 登记本机（不用装 CLI，服务器上已经有 acornfox �
      在服务器上按“甲”操作；AI 工作台在 Windows 上时，让它经 ssh 在服务器上运行 acornfox。
 
   用 AcornFox Skill 的 AI 工作台：接着按 Skill 的自检、登记服务器、部署三步做。
-${PUBLIC_CONSOLE_RESULT:+
+${LAN_CONSOLE_RESULT:+
+${BLUE}局域网控制台（已默认打开）:${NC}
+  用同一局域网里的电脑或手机的浏览器打开: ${YELLOW}${LAN_CONSOLE_RESULT}${NC}
+  ${YELLOW}现在还没有密码：请现在就打开设一个（至少 8 位）。谁先打开谁设，别拖。${NC}
+  登录时可以勾“记住这台设备 90 天”。只在可信的网络里用（局域网里不加密）。
+  看状态: ${YELLOW}acornfox lan-console status${NC}   忘了密码: ${YELLOW}acornfox lan-console reset-password${NC}
+  关闭: ${YELLOW}acornfox lan-console disable${NC}   （安装时不想开: 加 --no-lan-console）
+}${PUBLIC_CONSOLE_RESULT:+
 ${BLUE}公网访问控制台:${NC}
   ${PUBLIC_CONSOLE_RESULT}
   关闭: ${YELLOW}acornfox public-console disable${NC}
@@ -1722,6 +1782,8 @@ show_plan() {
   3. 准备网关组件（Caddy 容器镜像），创建系统账号 acornfox、acornfox-exec 和数据目录 /var/lib/acornfox
   4. 安装 /usr/local/bin/acornfox，注册并启动 acornfox-server、acornfox-runner 两个服务
   5. 生成管理员令牌（保存在 /root/.acornfox-token）
+  6. 服务器在局域网里（私网地址、不是云主机）并且是第一次安装时：打开局域网控制台（端口 18802，
+     第一次打开时在浏览器里设密码）。不想开加 --no-lan-console；云主机不会开
 
 EOF
 }
@@ -1743,6 +1805,11 @@ main() {
     # 解析参数（只记下选项，不改系统）
     parse_args "$@"
     check_root
+    # 以前没装过才算全新安装（重装、卸载后保留数据再装都不算）：只有全新安装才默认打开局域网控制台
+    FRESH_INSTALL=true
+    if [ -x /usr/local/bin/acornfox ] || [ -e /var/lib/acornfox/acornfox.db ] || [ -e "$INSTALLED_VERSION_FILE" ]; then
+        FRESH_INSTALL=false
+    fi
     show_plan
 
     # 开始改动系统之前的检查：不满足就带故障编号停下
@@ -1791,6 +1858,7 @@ main() {
     start_services
     wait_caddy_container
     enable_public_console
+    enable_lan_console
 
     # 显示摘要
     show_summary

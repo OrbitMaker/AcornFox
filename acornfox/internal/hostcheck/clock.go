@@ -13,11 +13,14 @@ package hostcheck
 //   - whether network time sync is on and the clock is synchronized:
 //     `timedatectl show` (systemd 239 and later), else `timedatectl status`,
 //     else the file /run/systemd/timesync/synchronized (systemd-timesyncd);
-//   - when a reference address is given (the download gateway's address, the
-//     clock that actually matters), one HEAD request with a 3-second timeout
-//     whose Date header is compared with this machine's clock. No network,
-//     no gateway or no Date header: the comparison is skipped, never an
-//     error.
+//   - when the download gateway is on (the clock that actually matters), the
+//     Date header of one HEAD request to its /v1/health compared with this
+//     machine's clock. `acornfox doctor` and the runtime page build the
+//     readers with DefaultGatewayProbes (appcenter.go): the clock check and
+//     the gateway check (SETUP-GW-01) share that one request, at most 5
+//     seconds in all. No network, no gateway or no Date header: the
+//     comparison is skipped, never an error. The Date header counts whole
+//     seconds, so the difference is known to about a second.
 //
 // Thresholds: 300 seconds or more off fails (the gateway refuses); 60 seconds
 // or more warns; sync switched off or not yet synchronized warns. It never
@@ -41,7 +44,8 @@ import (
 const (
 	ClockFailSkew = 300 * time.Second // the gateway's allowed window
 	ClockWarnSkew = 60 * time.Second
-	// ClockProbeTimeout bounds each of timedatectl and the HEAD request.
+	// ClockProbeTimeout bounds timedatectl, and the reference when
+	// ClockProbe.ReferenceTimeout is not set.
 	ClockProbeTimeout = 3 * time.Second
 )
 
@@ -59,10 +63,14 @@ type ClockProbe struct {
 	Sync func(ctx context.Context) (SyncStatus, error)
 	// Reference returns a trusted current time (nil: no comparison).
 	Reference func(ctx context.Context) (time.Time, error)
+	// ReferenceTimeout bounds Reference (0: ClockProbeTimeout).
+	ReferenceTimeout time.Duration
 }
 
 // DefaultClockProbe reads timedatectl and, when refURL is not empty, the
-// Date header of a HEAD request to refURL.
+// Date header of a HEAD request of its own to refURL/v1/health. doctor and
+// the runtime page use DefaultGatewayProbes instead, which shares the request
+// with the gateway check.
 func DefaultClockProbe(refURL string) ClockProbe {
 	p := ClockProbe{Now: time.Now, Sync: readSyncStatus}
 	if refURL = strings.TrimSpace(refURL); refURL != "" {
@@ -85,7 +93,11 @@ func CheckClock(ctx context.Context, r Reporter, p ClockProbe) {
 	var skew time.Duration
 	compared := false
 	if p.Reference != nil {
-		rctx, cancel := context.WithTimeout(ctx, ClockProbeTimeout)
+		limit := p.ReferenceTimeout
+		if limit <= 0 {
+			limit = ClockProbeTimeout
+		}
+		rctx, cancel := context.WithTimeout(ctx, limit)
 		start := p.Now()
 		ref, err := p.Reference(rctx)
 		end := p.Now()

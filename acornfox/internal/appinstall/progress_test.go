@@ -95,6 +95,10 @@ func TestGatewayDownloadProgress(t *testing.T) {
 	if err != nil || len(tv.Steps) != 1 || tv.Steps[0].Progress == nil {
 		t.Fatalf("saved task %+v %v", tv.Steps, err)
 	}
+	// ... with the verdict: still running, in the image step.
+	if tm := tv.Timing; tm == nil || tm.Done || tm.Step == nil || tm.Step.Name != "image" || tm.NextCommand != "acornfox --json install status "+tr.id+" --wait" {
+		t.Fatalf("timing %+v", tv.Timing)
+	}
 	tr.step(context.Background(), "hermes-agent", "image", StepDone, "从下载网关下载")
 	if s := tr.snapshot().Steps[0]; s.Progress != nil {
 		t.Fatalf("progress kept after the step: %+v", s.Progress)

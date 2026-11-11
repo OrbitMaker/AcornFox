@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/catalog"
+	"github.com/acornfox/acornfox/internal/installtiming"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -33,7 +34,9 @@ type fakeWorld struct {
 	failDeploy  map[string]bool
 	wrote       []runner.WriteFilesRequest
 	failWrite   bool
-	adopted     map[string]bool // digest present locally
+	adopted     map[string]bool   // digest present locally
+	localArch   map[string]string // digest -> CPU of the local image ("" = not said)
+	adoptArchs  []string          // Arch of each AdoptImage request
 	pulled      []string
 	removed     []string // image refs removed
 	deleted     []string // apps deleted (with ",volumes" when volumes)
@@ -45,6 +48,9 @@ type fakeWorld struct {
 	loads       []runner.LoadImageRequest
 	loadErr     error
 	failPull    bool
+	// volFiles is what the fake runner wrote into each volume (volume ->
+	// path -> content), so that keeping and copying aside can be seen.
+	volFiles map[string]map[string]string
 }
 
 func newWorld(t *testing.T) *fakeWorld {
@@ -127,8 +133,10 @@ func (w *fakeWorld) ListContainers(ctx context.Context, app string) ([]runner.Co
 	if err != nil || a.CurrentDeployment == "" {
 		return nil, nil
 	}
+	// A stopped app (acornfox stop) keeps its deployment but its container
+	// does not run.
 	return []runner.ContainerInfo{{Name: runner.ContainerName(app, a.CurrentDeployment), App: app, DeploymentID: a.CurrentDeployment,
-		Role: runner.RoleApp, Running: true, HostPort: w.hostPort(a.CatalogID)}}, nil
+		Role: runner.RoleApp, Running: a.Desired != state.DesiredStopped, HostPort: w.hostPort(a.CatalogID)}}, nil
 }
 func (w *fakeWorld) RemoveImage(ctx context.Context, app, ref string) error {
 	w.mu.Lock()
@@ -139,7 +147,9 @@ func (w *fakeWorld) RemoveImage(ctx context.Context, app, ref string) error {
 func (w *fakeWorld) AdoptImage(ctx context.Context, req runner.AdoptImageRequest) (runner.ImageInfo, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.adopted[req.Digest] {
+	w.adoptArchs = append(w.adoptArchs, req.Arch)
+	// Like Docker.AdoptImage: an image of another architecture is passed over.
+	if have := w.localArch[req.Digest]; w.adopted[req.Digest] && (req.Arch == "" || have == "" || have == req.Arch) {
 		return runner.ImageInfo{ID: req.Digest, App: req.App}, nil
 	}
 	return runner.ImageInfo{}, runner.ErrNotFound
@@ -154,14 +164,60 @@ func (w *fakeWorld) LoadImage(ctx context.Context, req runner.LoadImageRequest) 
 	return runner.LoadImageResponse{Loaded: []string{"nousresearch/hermes-agent:v0.23.0"},
 		Image: &runner.ImageInfo{ID: "sha256:" + strings.Repeat("2", 64), App: req.App, DeploymentID: req.DeploymentID}}, nil
 }
-func (w *fakeWorld) WriteVolumeFiles(ctx context.Context, req runner.WriteFilesRequest) error {
+func (w *fakeWorld) WriteVolumeFiles(ctx context.Context, req runner.WriteFilesRequest) (runner.WriteFilesResult, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.failWrite {
-		return errors.New("disk full")
+		return runner.WriteFilesResult{}, errors.New("disk full")
+	}
+	if err := runner.ValidateWriteFiles(req); err != nil {
+		return runner.WriteFilesResult{}, err
 	}
 	w.wrote = append(w.wrote, req)
-	return nil
+	if w.volFiles == nil {
+		w.volFiles = map[string]map[string]string{}
+	}
+	vf := w.volFiles[req.Volume]
+	if vf == nil {
+		vf = map[string]string{}
+		w.volFiles[req.Volume] = vf
+	}
+	res := runner.WriteFilesResult{OK: true}
+	for _, f := range req.Files {
+		old, have := vf[f.Path]
+		if have && !f.Overwrite {
+			res.Kept = append(res.Kept, f.Path)
+			continue
+		}
+		if have && f.Backup != "" {
+			vf[f.Backup] = old
+			res.Backups = append(res.Backups, runner.FileBackup{Path: f.Path, Backup: f.Backup})
+		}
+		vf[f.Path] = string(f.Content)
+		res.Written = append(res.Written, f.Path)
+	}
+	return res, nil
+}
+
+// volFile is the content the fake runner holds for path in volume.
+func (w *fakeWorld) volFile(volume, path string) (string, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	c, ok := w.volFiles[volume][path]
+	return c, ok
+}
+
+// editVolFile plays the user (or the app) changing a file in a volume.
+func (w *fakeWorld) editVolFile(volume, path, content string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.volFiles == nil {
+		w.volFiles = map[string]map[string]string{}
+	}
+	if w.volFiles[volume] == nil {
+		w.volFiles[volume] = map[string]string{}
+	}
+	w.volFiles[volume][path] = content
 }
 
 // hooks
@@ -237,6 +293,15 @@ type fakeNewAPI struct {
 	nextID    int
 	options   map[string]any // PUT /api/option/ calls (key → value)
 	failOpt   bool
+	// salt changes every token value: a gateway set up anew hands out other
+	// values under the same numbers. disabled: token ids turned off.
+	salt     string
+	disabled map[int]bool
+	keyCalls int // POST /api/token/{id}/key (counted by New API as critical)
+}
+
+func (f *fakeNewAPI) keyOf(id string) string {
+	return "K" + id + f.salt + strings.Repeat("x", 46)
 }
 
 func (f *fakeNewAPI) handler() http.Handler {
@@ -315,7 +380,40 @@ func (f *fakeNewAPI) handler() http.Handler {
 			no(w, "unauthorized")
 			return
 		}
-		ok(w, map[string]any{"key": "K" + r.PathValue("id") + strings.Repeat("x", 46)})
+		id, _ := strconv.Atoi(r.PathValue("id"))
+		f.mu.Lock()
+		_, have := f.tokens[id]
+		f.mu.Unlock()
+		if !have {
+			no(w, "record not found")
+			return
+		}
+		f.mu.Lock()
+		key := f.keyOf(r.PathValue("id"))
+		f.keyCalls++
+		f.mu.Unlock()
+		ok(w, map[string]any{"key": key})
+	})
+	// one token, its value masked as New API shows it
+	mux.HandleFunc("GET /api/token/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !auth(r) {
+			no(w, "unauthorized")
+			return
+		}
+		id, _ := strconv.Atoi(r.PathValue("id"))
+		f.mu.Lock()
+		name, have := f.tokens[id]
+		key := f.keyOf(r.PathValue("id"))
+		status := 1
+		if f.disabled[id] {
+			status = 2
+		}
+		f.mu.Unlock()
+		if !have {
+			no(w, "record not found")
+			return
+		}
+		ok(w, map[string]any{"id": id, "name": name, "status": status, "key": key[:4] + "**********" + key[len(key)-4:]})
 	})
 	mux.HandleFunc("PUT /api/option/", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(r) {
@@ -546,6 +644,12 @@ func TestInstallHermesWithLocalGateway(t *testing.T) {
 	}
 	if len(v.newapi.tokens) != 1 || v.newapi.tokens[1] != "acornfox-hermes-agent" {
 		t.Fatalf("tokens %v", v.newapi.tokens)
+	}
+	// Read back, the task carries the verdict by the server's clock: over,
+	// every step timed, the no-quota token a must-tell.
+	if tm := tv.Timing; tm == nil || !tm.Done || tm.Stuck || tm.Clock != "server" || len(tm.Steps) != 7 || tm.Step != nil ||
+		len(tm.MustTell) != 1 || tm.MustTell[0] != installtiming.TokenNote("hermes-agent", "new-api") {
+		t.Fatalf("timing %+v", tv.Timing)
 	}
 	envs, _ := v.w.st.ListEnv(ctx, "hermes-agent")
 	found := false

@@ -452,6 +452,31 @@ CREATE TABLE kept_catalog_secrets (
 );
 `
 
+// migration0013 keeps, for every app installed from the app catalog, the
+// manifest it was installed with (the manifest.yaml bytes of the app package,
+// and their sha256): what was written into the app is only explainable, and
+// later re-appliable, against that exact manifest, not against whatever the
+// catalog holds today. source says where the row came from: "install" (saved
+// by the install itself) or "backfill" (an app installed before this table
+// existed, whose package was still on this machine). The row goes with the
+// app. kept_catalog_secrets gets the same manifest for an app deleted with
+// its data kept (empty when the app had none saved).
+const migration0013 = `
+CREATE TABLE app_catalog_manifests (
+    app             TEXT PRIMARY KEY NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+    catalog_id      TEXT NOT NULL CHECK (length(catalog_id) > 0),
+    catalog_version TEXT NOT NULL,
+    catalog_origin  TEXT NOT NULL DEFAULT '',
+    manifest        TEXT NOT NULL CHECK (length(manifest) > 0),
+    manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+    source          TEXT NOT NULL CHECK (source IN ('install', 'backfill')),
+    saved_at        TEXT NOT NULL,
+    CHECK (saved_at GLOB '` + timePattern + `')
+);
+ALTER TABLE kept_catalog_secrets ADD COLUMN manifest TEXT NOT NULL DEFAULT '';
+ALTER TABLE kept_catalog_secrets ADD COLUMN manifest_sha256 TEXT NOT NULL DEFAULT '';
+`
+
 // migrationList is the complete, ordered schema history. Never edit a shipped
 // entry; append a new one instead.
 func migrationList() []migration {
@@ -468,6 +493,7 @@ func migrationList() []migration {
 		{"0010_app_catalog", migration0010},
 		{"0011_app_catalog_origin", migration0011},
 		{"0012_kept_catalog_secrets", migration0012},
+		{"0013_app_catalog_manifests", migration0013},
 	}
 }
 

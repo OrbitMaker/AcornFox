@@ -39,6 +39,9 @@ type Diagnosis struct {
 	// for "too many tries", the seconds to wait.
 	GatewayCode string `json:"gateway_code,omitempty"`
 	RetryAfter  int    `json:"retry_after,omitempty"`
+	// NeedsPlatform is the AcornFox version to upgrade to first (app center:
+	// CAT-INST-08, and CAT-INST-29 when an upgrade is the cure).
+	NeedsPlatform string `json:"needs_platform,omitempty"`
 }
 
 // Error is returned by every Client method on failure. Connect failures have
@@ -279,6 +282,8 @@ type API interface {
 	Logs(ctx context.Context, app string, tail int) ([]string, error)
 	HostMetrics(ctx context.Context) (HostMetrics, error)           // N4.3: GET /v1/metrics/host
 	AppMetrics(ctx context.Context, app string) (AppMetrics, error) // N4.3: GET /v1/metrics/apps/{app}
+	// AppHistory: GET /v1/metrics/apps/{app}/history?range=1h|24h (read-only).
+	AppHistory(ctx context.Context, app, rng string) (AppHistory, error)
 	SetEnv(ctx context.Context, app, key, value string, secret bool) error
 	UnsetEnv(ctx context.Context, app, key string) error
 	AddVolume(ctx context.Context, app, path string) error
@@ -384,6 +389,27 @@ type HostMetrics struct {
 	DiskTotal     *uint64  `json:"disk_total,omitempty"`
 	Load1         *float64 `json:"load1,omitempty"`
 	UptimeSeconds *float64 `json:"uptime_seconds,omitempty"`
+}
+
+// AppHistoryPoint is one sample (or 5-minute average) of an app's history; a
+// metric that was not readable at that time is nil.
+type AppHistoryPoint struct {
+	T             time.Time `json:"t"`
+	CPUPercent    *float64  `json:"cpu_percent,omitempty"`
+	MemoryUsageMB *float64  `json:"memory_usage_mb,omitempty"`
+	MemoryLimitMB *float64  `json:"memory_limit_mb,omitempty"`
+}
+
+// AppHistory mirrors GET /v1/metrics/apps/{app}/history. Ranges is empty when
+// the server keeps no history; Since is the oldest sample kept (the history
+// lives in memory and restarts with the service).
+type AppHistory struct {
+	App         string            `json:"app"`
+	Range       string            `json:"range"`
+	StepSeconds int               `json:"step_seconds"`
+	Ranges      []string          `json:"ranges"`
+	Since       *time.Time        `json:"since,omitempty"`
+	Points      []AppHistoryPoint `json:"points"`
 }
 
 // AppMetrics mirrors the app metrics response.

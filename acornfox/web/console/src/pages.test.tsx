@@ -177,6 +177,24 @@ describe('运行环境', () => {
 })
 
 describe('设置', () => {
+  it('通用：主色四选一，选了就换 data-accent 并记在浏览器里，选回中性就去掉', async () => {
+    location.hash = '#prefs'
+    render(<App />)
+    const group = await screen.findByRole('radiogroup', { name: '主色' })
+    const radios = within(group).getAllByRole('radio')
+    expect(radios.map((r) => r.getAttribute('aria-label'))).toEqual(['主色：中性', '主色：蓝', '主色：绿', '主色：橙'])
+    expect(radios[0].getAttribute('aria-checked')).toBe('true')
+    expect(document.documentElement.hasAttribute('data-accent')).toBe(false)
+    fireEvent.click(radios[1])
+    expect(document.documentElement.getAttribute('data-accent')).toBe('blue')
+    expect(localStorage.getItem('afx-accent')).toBe('blue')
+    expect(within(group).getByRole('radio', { name: '主色：蓝' }).getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(within(group).getByRole('radio', { name: '主色：中性' }))
+    expect(document.documentElement.hasAttribute('data-accent')).toBe(false)
+    expect(localStorage.getItem('afx-accent')).toBeNull()
+    expect(calls.some((c) => c.method !== 'GET')).toBe(false)
+  })
+
   it('访问：只显示局域网、公网控制台的状态和命令，开关不能在页面上点', async () => {
     location.hash = '#prefs/access'
     render(<App />)
@@ -188,6 +206,42 @@ describe('设置', () => {
     expect(screen.getByText('acornfox lan-console disable')).toBeTruthy()
     expect(screen.getByText('acornfox public-console enable 你的域名')).toBeTruthy()
     expect(calls.some((c) => c.method !== 'GET')).toBe(false)
+  })
+
+  it('访问：局域网控制台显示密码是何时从哪设的、记住的设备，能移除一台；清密码只给命令', async () => {
+    routes['GET /v1/lan-console'] = () => ({ enabled: true, url: 'http://192.168.1.10:18802', port: 18802, password_set: true, password_set_at: '2026-11-10T03:00:00Z', password_set_from: '192.168.1.23', devices: 2 })
+    let devices = [
+      { id: 'd1', name: 'Mac · Chrome', created_at: '2026-11-10T03:00:00Z', last_used_at: '2026-11-10T03:05:00Z', last_ip: '192.168.1.23', expires_at: '2027-02-08T03:00:00Z' },
+      { id: 'd2', name: 'iPhone · Safari', created_at: '2026-11-10T04:00:00Z', last_used_at: '2026-11-10T04:00:00Z', last_ip: '192.168.1.40', expires_at: '2027-02-08T04:00:00Z' },
+    ]
+    routes['GET /v1/lan-console/devices'] = () => ({ devices })
+    routes['DELETE /v1/lan-console/devices/d2'] = () => { devices = devices.filter((d) => d.id !== 'd2'); return { ok: true, removed: true } }
+    location.hash = '#prefs/access'
+    render(<App />)
+    expect(await screen.findByText(/从 192\.168\.1\.23 设的/)).toBeTruthy()
+    expect(screen.getByText('acornfox lan-console reset-password')).toBeTruthy()
+    const box = await screen.findByTestId('lan-devices')
+    expect(within(box).getByText('Mac · Chrome')).toBeTruthy()
+    expect(within(box).getByText(/192\.168\.1\.40 · 2027-02-08 到期/)).toBeTruthy()
+    fireEvent.click(within(box).getByRole('button', { name: '移除 iPhone · Safari' }))
+    await vi.waitFor(() => expect(within(box).queryByText('iPhone · Safari')).toBeNull())
+    const del = calls.find((c) => c.method === 'DELETE')
+    expect(del?.url).toBe('/v1/lan-console/devices/d2')
+    expect(calls.filter((c) => c.method !== 'GET').length).toBe(1)
+  })
+
+  it('访问：局域网控制台开着但还没设密码时提醒现在就去设；没开时不显示设备和清密码', async () => {
+    routes['GET /v1/lan-console'] = () => ({ enabled: true, url: 'http://192.168.1.10:18802', port: 18802, password_set: false, devices: 0 })
+    routes['GET /v1/lan-console/devices'] = () => ({ devices: [] })
+    location.hash = '#prefs/access'
+    const first = render(<App />)
+    expect(await screen.findByText(/还没设密码：请现在就用局域网里的电脑打开它设一个/)).toBeTruthy()
+    first.unmount()
+    routes['GET /v1/lan-console'] = () => ({ enabled: false, port: 18802 })
+    render(<App />)
+    await screen.findByText('acornfox lan-console enable')
+    expect(screen.queryByTestId('lan-devices')).toBeNull()
+    expect(screen.queryByText('acornfox lan-console reset-password')).toBeNull()
   })
 
   it('没有后端支撑的分区（提醒、账号）不显示；升级给当前版本和命令', async () => {
@@ -310,5 +364,43 @@ describe('应用中心的私有目录', () => {
     const { container } = render(<App />)
     await screen.findAllByTestId('catalog-app')
     expect(container.querySelectorAll('[data-testid="catalog-app"] img').length).toBe(2)
+  })
+})
+
+describe('应用概览的小图', () => {
+  const appHistory = (ranges: string[], n = 6) => ({
+    app: 'new-api', range: '1h', step_seconds: 30, ranges, since: n ? '2026-11-06T00:00:00Z' : undefined,
+    points: Array.from({ length: n }, (_, i) => ({ t: new Date(Date.UTC(2026, 10, 6, 0, 0, 30 * i)).toISOString(), cpu_percent: 1 + i, memory_usage_mb: 200 + i })),
+  })
+  beforeEach(() => {
+    routes['GET /v1/apps/new-api'] = () => app({ name: 'new-api', catalog_id: 'new-api' })
+  })
+
+  it('有历史时显示内存、CPU 两张图，能切到 24 小时', async () => {
+    routes['GET /v1/metrics/apps/new-api/history'] = () => appHistory(['1h', '24h'])
+    location.hash = '#app-new-api'
+    render(<App />)
+    const box = await screen.findByTestId('app-history')
+    expect(within(box).getByText('内存')).toBeTruthy()
+    expect(within(box).getByText('CPU')).toBeTruthy()
+    expect(within(box).getAllByText('近 1 小时').length).toBe(2)
+    expect(within(box).queryByText(/还没有记录/)).toBeNull()
+    fireEvent.click(within(box).getByRole('button', { name: '24 小时' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/v1/metrics/apps/new-api/history?range=24h')).toBe(true))
+  })
+
+  it('刚启动还没有点时说明原因；旧服务端没有这个接口时两张图不显示', async () => {
+    routes['GET /v1/metrics/apps/new-api/history'] = () => appHistory(['1h', '24h'], 0)
+    location.hash = '#app-new-api'
+    const first = render(<App />)
+    const box = await screen.findByTestId('app-history')
+    expect(within(box).getAllByText(/还没有记录，每 30 秒记一次/).length).toBe(2)
+    first.unmount()
+
+    delete routes['GET /v1/metrics/apps/new-api/history']
+    render(<App />)
+    await screen.findByText('来源')
+    await vi.waitFor(() => expect(calls.some((c) => c.url.startsWith('/v1/metrics/apps/new-api/history'))).toBe(true))
+    expect(screen.queryByTestId('app-history')).toBeNull()
   })
 })

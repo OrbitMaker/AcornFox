@@ -8,7 +8,7 @@ import { Header } from './components/shell/header'
 import { Sidebar } from './components/shell/sidebar'
 import { CommandPalette } from './components/shell/command-palette'
 import { Logo } from './components/bits'
-import { Button } from './components/ui/button'
+import { Button, buttonVariants } from './components/ui/button'
 import { Spinner } from './components/ui/controls'
 import { Sheet } from './components/ui/dialog'
 import { ToastProvider } from './components/ui/toast'
@@ -40,7 +40,30 @@ export function App() {
   )
 }
 
+// 从局域网或公网入口进来的（地址不是本机回环）：重新登录是打开 /login，不是 acornfox open。
+function viaGateway(): boolean {
+  return !['127.0.0.1', 'localhost', '[::1]', '::1'].includes(location.hostname)
+}
+
+// 登录过期时自动回到首页一次：记住的设备会在那里直接拿到新的登录，没记住的会被带到登录页。
+// 10 秒内只试一次，免得来回跳。
+function reloadOnce(): boolean {
+  try {
+    const last = Number(sessionStorage.getItem('afx-relogin') || 0)
+    if (Date.now() - last < 10000) return false
+    sessionStorage.setItem('afx-relogin', String(Date.now()))
+  } catch {
+    return false
+  }
+  location.replace('/' + location.hash)
+  return true
+}
+
 function SignedOut({ reason, message }: { reason: 'expired' | 'logout' | 'error'; message?: string }) {
+  const gateway = viaGateway()
+  useEffect(() => {
+    if (gateway && reason === 'expired') reloadOnce()
+  }, [gateway, reason])
   const title = reason === 'logout' ? '已退出登录' : reason === 'expired' ? '需要重新登录' : '连不上控制台'
   return (
     <div className="flex min-h-full items-center justify-center p-6">
@@ -48,9 +71,10 @@ function SignedOut({ reason, message }: { reason: 'expired' | 'logout' | 'error'
         <Logo className="size-8" />
         <h1 className="text-base font-semibold">{title}</h1>
         <p className="text-xs text-muted-foreground">
-          {reason === 'error' ? message : <>在服务器上运行 <code className="rounded bg-muted px-1">acornfox open</code>，用它给的新链接打开控制台。</>}
+          {reason === 'error' ? message : gateway ? '用密码重新登录。' : <>在服务器上运行 <code className="rounded bg-muted px-1">acornfox open</code>，用它给的新链接打开控制台。</>}
         </p>
         {reason === 'error' && <Button variant="outline" size="sm" onClick={() => location.reload()}>重试</Button>}
+        {reason !== 'error' && gateway && <a href="/login" className={buttonVariants({ size: 'sm' })}>重新登录</a>}
       </div>
     </div>
   )

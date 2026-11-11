@@ -238,8 +238,15 @@ func (a *app) renderAppStatus(app client.App) int {
 
 // cmdApps implements `apps`.
 func (a *app) cmdApps(ctx context.Context, args []string) int {
-	if len(args) != 0 {
-		return a.out.usageError("apps 不接受参数")
+	if len(args) > 0 {
+		switch args[0] {
+		case "vars":
+			return a.cmdAppsVars(ctx, args[1:])
+		case "-h", "--help", "help":
+			fmt.Fprintln(a.out.stdout, appsUsage)
+			return exitOK
+		}
+		return a.out.usageError("apps 不接受参数 %s；列出应用用 acornfox apps，看一个应用的变量用 acornfox apps vars 应用", args[0])
 	}
 	// apps does not need an app name, only a target.
 	t, _, err := a.resolveTarget()
@@ -603,7 +610,8 @@ const deleteUsage = `用法：acornfox delete [应用名] [--volumes]
 
 用途：删除一个应用：停掉并删掉它的容器、网络和记录。不写应用名时，用 --app 或当前目录对应的应用。
   默认保留数据卷（以后同名重装会被 CAT-INST-24 拦下，先问用户旧数据还要不要）；加 --volumes 连数据一起删，不能恢复。
-  从应用中心装的、用了本机 New API 的应用（例如 Hermes），会顺带吊销给它发的令牌；
+  从应用中心装的、用了本机 New API 的应用（例如 Hermes）：加 --volumes 时顺带吊销给它发的令牌；
+  保留数据时令牌和设置跟着数据留下，以后 install 应用 --reuse-data 接上旧数据时接着用；
   被别的应用连着的模型网关（例如 Hermes 还在用的 New API）拒绝删除，先删用它的应用。
 副作用：会删数据，执行前必须得到用户明确同意。
 例子：

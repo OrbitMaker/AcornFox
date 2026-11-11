@@ -44,6 +44,10 @@ type CatalogAppView struct {
 	// already on this machine (the list never downloads; see icons.go).
 	Icon     string `json:"icon,omitempty"`
 	IconType string `json:"icon_type,omitempty"`
+	// NeedsPlatform is the AcornFox version to upgrade to before this app
+	// can be installed here ("0.6.0"); "" when this version can install it.
+	// From the index's min_platform, so the list still downloads nothing.
+	NeedsPlatform string `json:"needs_platform"`
 }
 
 // RecipeView is one recipe in the list.
@@ -51,6 +55,9 @@ type RecipeView struct {
 	catalog.Recipe
 	Source  SourceRef `json:"source"`
 	Command string    `json:"command"`
+	// NeedsPlatform as in CatalogAppView: the highest of the recipe's own
+	// min_platform and its apps', when this AcornFox is older than it.
+	NeedsPlatform string `json:"needs_platform"`
 }
 
 // catalogFlag is the --catalog part of an install command ("" for public).
@@ -93,11 +100,20 @@ func (e *Engine) List(ctx context.Context) (CatalogView, error) {
 				Keywords: a.Keywords, Tags: a.Tags, MemoryMB: a.MemoryMB, Platforms: a.Platforms, SizeMB: a.SizeMB,
 				Delivery: a.Delivery, Uses: a.Uses, Provides: a.Provides, Supported: e.archSupported(a.Platforms),
 				Installed: names, Source: src, Command: "acornfox install " + a.ID + catalogFlag(cv.origin),
-				Icon: icon, IconType: iconType,
+				Icon: icon, IconType: iconType, NeedsPlatform: e.needsPlatform(a.MinPlatform),
 			})
 		}
-		for _, r := range cv.idx.Recipes {
-			v.Recipes = append(v.Recipes, RecipeView{Recipe: r, Source: src, Command: "acornfox install --recipe " + r.ID + catalogFlag(cv.origin)})
+		appMin := map[string]string{}
+		for _, a := range cv.idx.Apps {
+			appMin[a.ID] = a.MinPlatform
+		}
+		for _, r := range cv.idx.AllRecipes() {
+			mins := []string{r.MinPlatform}
+			for _, ra := range r.Apps {
+				mins = append(mins, appMin[ra.App])
+			}
+			v.Recipes = append(v.Recipes, RecipeView{Recipe: r, Source: src, Command: "acornfox install --recipe " + r.ID + catalogFlag(cv.origin),
+				NeedsPlatform: e.needsPlatform(mins...)})
 		}
 	}
 	return v, nil
@@ -135,6 +151,8 @@ type AppDetail struct {
 	Installed []string          `json:"installed"`
 	Source    SourceRef         `json:"source"`
 	Command   string            `json:"command"`
+	// NeedsPlatform as in CatalogAppView ("" when installable here).
+	NeedsPlatform string `json:"needs_platform"`
 }
 
 // ParamView is one form field.
@@ -184,6 +202,13 @@ func (e *Engine) Detail(ctx context.Context, id string) (AppDetail, error) {
 func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, error) {
 	a, err := e.cfg.Catalog.AppIn(ctx, from, id)
 	if err != nil {
+		// A package made for a newer platform may not even be readable here:
+		// say "upgrade first", not "the package is broken".
+		if _, ia, ferr := e.cfg.Catalog.find(from, id); ferr == nil {
+			if need := e.needsPlatform(ia.MinPlatform); need != "" {
+				return AppDetail{}, e.tooOld(ia.ID, need)
+			}
+		}
 		return AppDetail{}, err
 	}
 	m := a.Manifest
@@ -204,7 +229,8 @@ func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, erro
 		Supported: e.archSupported(m.Resources.Platforms), SizeMB: a.Index.SizeMB, Exposure: exposure,
 		Delivery: m.Delivery, Provides: a.Index.Provides, Uses: m.Uses, Installed: []string{},
 		Command: "acornfox install " + m.ID + catalogFlag(a.Origin), Params: []ParamView{}, Source: a.Source(),
-		Platform: e.appPlatformViews(m),
+		Platform:      e.appPlatformViews(m),
+		NeedsPlatform: e.needsPlatform(a.Index.MinPlatform, m.Lifecycle.MinPlatform),
 	}
 	if icon, ok := a.Files[m.App.Icon]; ok && m.App.Icon != "" {
 		d.Icon, d.IconType = iconView(m.App.Icon, icon)

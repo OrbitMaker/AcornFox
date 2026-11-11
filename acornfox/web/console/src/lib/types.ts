@@ -142,6 +142,9 @@ export interface HostView {
 
 // GET /v1/metrics/host/history?range=1h|24h：只存在内存里，服务重启后从头记。
 export interface HostPoint { t: string; cpu_percent?: number; memory_used?: number; memory_total?: number; disk_used?: number; disk_total?: number }
+// GET /v1/metrics/apps/{app}/history?range=1h|24h：一个应用的 CPU、内存；规则同上，应用停着的时候不记。
+export interface AppPoint { t: string; cpu_percent?: number; memory_usage_mb?: number; memory_limit_mb?: number }
+export interface AppHistory { app: string; range: string; step_seconds: number; ranges: string[]; since?: string; points: AppPoint[] }
 export interface HostHistory { range: string; step_seconds: number; ranges: string[]; since?: string; points: HostPoint[] }
 
 // GET /v1/runtime/checks：和 acornfox doctor 同一套故障编号。
@@ -152,7 +155,11 @@ export interface RuntimeChecks { os: string; checked_at: string; ok: boolean; it
 // GET /v1/setup/faults：故障编号的说明（单一来源在服务端）。
 export interface FaultDef { code: string; title: string; causes: string[]; next: string; needs_user: boolean }
 
-export interface LANConsoleStatus { enabled: boolean; url?: string; port: number }
+// GET /v1/lan-console。password_set 为 false：开着但还没人设密码（局域网里谁先打开谁设）；
+// password_set_at / password_set_from：密码是什么时候、从哪个地址设的；generated_password：旧版本开的，还在用生成的密码。
+export interface LANConsoleStatus { enabled: boolean; url?: string; port: number; password_set?: boolean; password_set_at?: string; password_set_from?: string; generated_password?: boolean; devices?: number }
+// GET /v1/lan-console/devices：登录时勾了“记住这台设备 90 天”的浏览器。
+export interface LANDevice { id: string; name: string; created_at: string; last_used_at: string; last_ip?: string; expires_at: string }
 export interface PublicConsoleStatus { enabled: boolean; domain?: string; url?: string; enabled_at?: string; verifying?: string }
 
 // GET /v1/catalog/sources：公共目录和连过的私有目录（已断开的也在）。
@@ -200,6 +207,8 @@ export interface CatalogApp {
   // 安装包已在本机时才有（列表不下载安装包），没有就显示名称缩写。
   icon?: string
   icon_type?: string
+  // 要先把 AcornFox 升到这个版本才能装（例如 "0.6.0"）；不用升级是空串，旧服务端没有这一项。
+  needs_platform?: string
 }
 
 export interface CatalogSource { id: string; name: string }
@@ -214,6 +223,8 @@ export interface Recipe {
   delivery: Delivery
   command: string
   source?: CatalogSource
+  // 配方自己或其中任何一个应用要先升级 AcornFox 时有值，含义同应用的 needs_platform。
+  needs_platform?: string
 }
 
 // 找专人部署：目录的运营数据里有才显示（现在的目录还没有这一项）。
@@ -290,9 +301,12 @@ export interface AppDetail {
   installed: string[]
   command: string
   source?: CatalogSource
+  // 要先把 AcornFox 升到这个版本才能装（例如 "0.6.0"）；不用升级是空串，旧服务端没有这一项。
+  needs_platform?: string
 }
 
-export interface Fault { code: string; message: string; hint?: string; diagnosis?: unknown; task_id?: string }
+// needs_platform：原因是“AcornFox 版本不够”时有，值是要升到的版本（例如 "0.6.0"）；别的错误没有这个键。
+export interface Fault { code: string; message: string; hint?: string; diagnosis?: unknown; task_id?: string; needs_platform?: string }
 
 // StepProgress：正在进行的一步能自己量出进度时有（经下载网关下载镜像包：download；下完导入：load）。
 export interface StepProgress { phase: 'download' | 'load' | string; done_bytes: number; total_bytes?: number; bytes_per_sec?: number; eta_seconds?: number }
