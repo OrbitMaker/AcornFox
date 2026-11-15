@@ -247,9 +247,10 @@ func (g *contractGateway) issue(w http.ResponseWriter, iid string, body []byte) 
 		"sha256": sha256hex(b), "size": len(b), "backend": "fake", "quota": map[string]any{"day_used": 1, "day_limit": 20}})
 }
 
-// publish puts a private catalog built from the test catalog (signed with
-// priv, bound to id) on the gateway, with its packages as private files
-// catpkg-<id>-<ver>.
+// publish puts a private catalog made of the test material (testdata/good:
+// its two apps, its recipe and a one-app recipe for each, its service
+// types; signed with priv, bound to id) on the gateway, with its packages
+// as private files catpkg-<id>-<ver>.
 func (g *contractGateway) publish(t *testing.T, id, name string, serial int64, priv ed25519.PrivateKey) *catalog.Bundle {
 	return g.publishAs(t, id, id, name, serial, priv)
 }
@@ -258,10 +259,8 @@ func (g *contractGateway) publish(t *testing.T, id, name string, serial int64, p
 // an unlabelled index).
 func (g *contractGateway) publishAs(t *testing.T, id, label, name string, serial int64, priv ed25519.PrivateKey) *catalog.Bundle {
 	t.Helper()
-	b, err := catalog.BuildFor(filepath.Join("..", "catalog", "testdata", "good"), serial, label)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := withServiceTypes(t, fixtureBundle(t, serial, label, []fixApp{{manifest: goodManifest(t, "new-api")}, {manifest: goodManifest(t, "hermes-agent")}},
+		[]catalog.Recipe{goodRecipe(t, "hermes-with-new-api"), oneAppRecipe("new-api"), oneAppRecipe("hermes-agent")}, nil), goodDir)
 	b.Sign(priv)
 	idx, _ := catalog.ParseIndex(b.Index)
 	g.mu.Lock()
@@ -303,10 +302,10 @@ func privateSetup(t *testing.T) (*env, *contractGateway, ed25519.PrivateKey, *ga
 		t.Fatal(err)
 	}
 	gc := &gatewayclient.Client{BaseURL: g.srv.URL, Identity: id, Info: gatewayclient.DefaultInfo("0.5.0-test")}
-	// The public catalog source is unreachable: only the snapshot and the
-	// private catalogs are in play.
+	// The public catalog source is unreachable: only the snapshot (the
+	// test material, as setup has it) and the private catalogs are in play.
 	v.e.cfg.Catalog = NewCatalog(CatalogConfig{CacheDir: filepath.Join(t.TempDir(), "catalog"), Keys: []ed25519.PublicKey{pub},
-		Sources: []string{"http://127.0.0.1:1"}, Gateway: gc})
+		Snapshot: bundleFS(goodBundle(t)), Sources: []string{"http://127.0.0.1:1"}, Gateway: gc})
 	return v, g, priv, gc
 }
 

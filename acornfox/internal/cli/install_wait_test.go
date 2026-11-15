@@ -62,15 +62,15 @@ const runningTask = `{"id":"5961fd8ff351","kind":"app","target":"hermes-agent","
 {"app":"hermes-agent","name":"init","label":"初始化","status":"pending"}],
 "apps":[{"app":"hermes-agent","catalog_id":"hermes-agent","version":"v0.23.0","reused":false,"created":true}]}`
 
-// The same task done: the old token could not be revoked (only said once
-// the task is over, in carried).
+// The same task done: an old credential could not be taken back (only said
+// once the task is over, in carried).
 const succeededTask = `{"id":"5961fd8ff351","kind":"app","target":"hermes-agent","status":"succeeded","created_at":"2026-11-11T04:10:39Z","finished_at":"2026-11-11T04:10:57Z",
 "steps":[` + doneSteps + `
 {"app":"hermes-agent","name":"start","label":"启动","status":"done","message":"已上线","started_at":"2026-11-11T04:10:43Z","finished_at":"2026-11-11T04:10:55Z"},
 {"app":"hermes-agent","name":"health","label":"健康检查","status":"done","started_at":"2026-11-11T04:10:55Z","finished_at":"2026-11-11T04:10:56Z"},
 {"app":"hermes-agent","name":"init","label":"初始化","status":"skipped","started_at":"2026-11-11T04:10:56Z","finished_at":"2026-11-11T04:10:57Z"}],
 "apps":[{"app":"hermes-agent","catalog_id":"hermes-agent","version":"v0.23.0","reused":false,"created":true,"url":"http://127.0.0.1:18811",
-"reused_volumes":["af-hermes-agent-1"],"carried":["接上了旧数据（af-hermes-agent-1）","没能吊销以前在 new-api 里给 hermes-agent 的令牌（编号 1，结尾 rvRH）：new-api 停着。这把令牌不限额、不过期"]}]}`
+"reused_volumes":["af-hermes-agent-1"],"carried":["接上了旧数据（af-hermes-agent-1）","CAT-INST-35 没能收回发给 hermes-agent 的凭据（提供它的应用 provider-app 停着）：请到 provider-app 里手工删掉给 hermes-agent 建的那一项（名字或备注里带编号 0a1b2c3d）"]}]}`
 
 // --wait asks until the task is over and the output says, without
 // judgement left to the reader, that it is done and what must be told.
@@ -90,7 +90,7 @@ func TestInstallStatusWaitUntilDone(t *testing.T) {
 		t.Fatalf("nothing to run once succeeded: %s", out)
 	}
 	tell := m["must_tell"].([]any)
-	if len(tell) != 1 || !strings.HasPrefix(tell[0].(string), "没能吊销以前在 new-api 里给 hermes-agent 的令牌") {
+	if len(tell) != 1 || !strings.HasPrefix(tell[0].(string), "CAT-INST-35 没能收回发给 hermes-agent 的凭据") {
 		t.Fatalf("must_tell %v", tell)
 	}
 	tm := m["timing"].(map[string]any)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,7 +16,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/catalog"
-	"github.com/acornfox/acornfox/internal/installtiming"
+	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -48,6 +49,10 @@ type fakeWorld struct {
 	loads       []runner.LoadImageRequest
 	loadErr     error
 	failPull    bool
+	pullFailure *runner.Failure // the failure a failing pull answers (nil: a plain one)
+	pullErr     error           // a transport error instead
+	pullDelay   time.Duration   // how long a pull takes (it ends early when its context does)
+	noLive      bool            // a Kick does not bring the deployment live
 	// volFiles is what the fake runner wrote into each volume (volume ->
 	// path -> content), so that keeping and copying aside can be seen.
 	volFiles map[string]map[string]string
@@ -78,9 +83,22 @@ func (w *fakeWorld) hostPort(catalogID string) int {
 func (w *fakeWorld) PullImage(ctx context.Context, app, id, ref string) (runner.PullResponse, error) {
 	w.mu.Lock()
 	w.pulled = append(w.pulled, ref)
-	fail := w.failPull
+	fail, pf, perr, delay := w.failPull, w.pullFailure, w.pullErr, w.pullDelay
 	w.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return runner.PullResponse{}, ctx.Err()
+		}
+	}
+	if perr != nil {
+		return runner.PullResponse{}, perr
+	}
 	if fail {
+		if pf != nil {
+			return runner.PullResponse{OK: false, Failure: pf}, nil
+		}
 		return runner.PullResponse{OK: false, Failure: &runner.Failure{Stage: "image", Code: "pull_failed", Message: "拉不到"}}, nil
 	}
 	return runner.PullResponse{OK: true, Image: &runner.ImageInfo{ID: "sha256:" + strings.Repeat("1", 64), App: app}}, nil
@@ -259,6 +277,12 @@ func (w *fakeWorld) withApp(ctx context.Context, app string, fn func() error) er
 	return fn()
 }
 func (w *fakeWorld) kick(app string) {
+	w.mu.Lock()
+	noLive := w.noLive
+	w.mu.Unlock()
+	if noLive {
+		return
+	}
 	ctx := context.Background()
 	a, err := w.st.GetApp(ctx, app)
 	if err != nil {
@@ -279,8 +303,12 @@ func (w *fakeWorld) kick(app string) {
 	}
 }
 
-// fakeNewAPI is a New API with setup, login and tokens.
-type fakeNewAPI struct {
+// fakeIssuingApp is an app that hands out tokens to other apps: the one the
+// test material's model gateway manifest is written for (setup, login,
+// options; tokens made, found by name, read with their value masked, their
+// value fetched, deleted). The platform knows nothing of it: what it is
+// asked is what the manifest's steps say.
+type fakeIssuingApp struct {
 	mu        sync.Mutex
 	admin     string
 	password  string
@@ -293,18 +321,39 @@ type fakeNewAPI struct {
 	nextID    int
 	options   map[string]any // PUT /api/option/ calls (key → value)
 	failOpt   bool
-	// salt changes every token value: a gateway set up anew hands out other
+	failMake  bool // POST /api/token/ says no
+	limited   bool // every token call answers 429
+	// salt changes every token value: an app set up anew hands out other
 	// values under the same numbers. disabled: token ids turned off.
 	salt     string
 	disabled map[int]bool
-	keyCalls int // POST /api/token/{id}/key (counted by New API as critical)
+	keyCalls int // POST /api/token/{id}/key
+	logins   int
 }
 
-func (f *fakeNewAPI) keyOf(id string) string {
+func (f *fakeIssuingApp) keyOf(id string) string {
 	return "K" + id + f.salt + strings.Repeat("x", 46)
 }
 
-func (f *fakeNewAPI) handler() http.Handler {
+// tokenNamed is the id of the token named name (0 when none).
+func (f *fakeIssuingApp) tokenNamed(prefix string) (int, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, n := range f.tokens {
+		if strings.HasPrefix(n, prefix) {
+			return id, n
+		}
+	}
+	return 0, ""
+}
+
+func (f *fakeIssuingApp) tokenCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.tokens)
+}
+
+func (f *fakeIssuingApp) handler() http.Handler {
 	mux := http.NewServeMux()
 	ok := func(w http.ResponseWriter, data any) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "", "data": data})
@@ -312,8 +361,20 @@ func (f *fakeNewAPI) handler() http.Handler {
 	no := func(w http.ResponseWriter, msg string) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": msg})
 	}
-	auth := func(r *http.Request) bool {
-		return r.Header.Get("Authorization") == "Bearer at-1" && r.Header.Get("New-Api-User") == "1"
+	auth := func(w http.ResponseWriter, r *http.Request) bool {
+		f.mu.Lock()
+		limited := f.limited
+		f.mu.Unlock()
+		if limited {
+			w.WriteHeader(http.StatusTooManyRequests)
+			no(w, "too many requests")
+			return false
+		}
+		if r.Header.Get("Authorization") != "Bearer at-1" || r.Header.Get("New-Api-User") != "1" {
+			no(w, "unauthorized")
+			return false
+		}
+		return true
 	}
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { ok(w, map[string]any{"version": "x"}) })
 	mux.HandleFunc("POST /api/setup", func(w http.ResponseWriter, r *http.Request) {
@@ -338,6 +399,7 @@ func (f *fakeNewAPI) handler() http.Handler {
 		var b map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.mu.Lock()
+		f.logins++
 		good := b["username"] == f.admin && b["password"] == f.password && f.admin != ""
 		f.mu.Unlock()
 		if !good {
@@ -347,37 +409,41 @@ func (f *fakeNewAPI) handler() http.Handler {
 		ok(w, map[string]any{"access_token": "at-1", "user": map[string]any{"id": 1}})
 	})
 	mux.HandleFunc("POST /api/token/", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) {
-			no(w, "unauthorized")
+		if !auth(w, r) {
 			return
 		}
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failMake {
+			no(w, "令牌建不了")
+			return
+		}
 		f.nextID++
 		if f.tokens == nil {
 			f.tokens = map[int]string{}
 		}
 		f.tokens[f.nextID] = b["name"].(string)
-		f.mu.Unlock()
 		ok(w, nil)
 	})
-	mux.HandleFunc("GET /api/token/", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) {
-			no(w, "unauthorized")
+	mux.HandleFunc("GET /api/token/search", func(w http.ResponseWriter, r *http.Request) {
+		if !auth(w, r) {
 			return
 		}
+		kw := r.URL.Query().Get("keyword")
 		f.mu.Lock()
 		items := []map[string]any{}
 		for id, n := range f.tokens {
-			items = append(items, map[string]any{"id": id, "name": n})
+			if n == kw {
+				items = append(items, map[string]any{"id": id, "name": n})
+			}
 		}
 		f.mu.Unlock()
 		ok(w, map[string]any{"items": items, "total": len(items)})
 	})
 	mux.HandleFunc("POST /api/token/{id}/key", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) {
-			no(w, "unauthorized")
+		if !auth(w, r) {
 			return
 		}
 		id, _ := strconv.Atoi(r.PathValue("id"))
@@ -394,10 +460,9 @@ func (f *fakeNewAPI) handler() http.Handler {
 		f.mu.Unlock()
 		ok(w, map[string]any{"key": key})
 	})
-	// one token, its value masked as New API shows it
+	// one token, its value masked
 	mux.HandleFunc("GET /api/token/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) {
-			no(w, "unauthorized")
+		if !auth(w, r) {
 			return
 		}
 		id, _ := strconv.Atoi(r.PathValue("id"))
@@ -416,8 +481,7 @@ func (f *fakeNewAPI) handler() http.Handler {
 		ok(w, map[string]any{"id": id, "name": name, "status": status, "key": key[:4] + "**********" + key[len(key)-4:]})
 	})
 	mux.HandleFunc("PUT /api/option/", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) {
-			no(w, "unauthorized")
+		if !auth(w, r) {
 			return
 		}
 		var b struct {
@@ -438,49 +502,62 @@ func (f *fakeNewAPI) handler() http.Handler {
 		ok(w, nil)
 	})
 	mux.HandleFunc("DELETE /api/token/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !auth(w, r) {
+			return
+		}
 		id, _ := strconv.Atoi(r.PathValue("id"))
 		f.mu.Lock()
+		defer f.mu.Unlock()
+		if _, have := f.tokens[id]; !have {
+			no(w, "record not found")
+			return
+		}
 		f.deleted = append(f.deleted, id)
 		delete(f.tokens, id)
-		f.mu.Unlock()
 		ok(w, nil)
 	})
 	return mux
 }
 
 type env struct {
-	w      *fakeWorld
-	e      *Engine
-	newapi *fakeNewAPI
+	w *fakeWorld
+	e *Engine
+	// tokens is the fake of the test catalog's token-issuing app (catalog
+	// id new-api in the test material).
+	tokens *fakeIssuingApp
 }
 
 func setup(t *testing.T) *env { return setupWith(t, nil) }
 
-// setupWith is setup with the engine's Config changed by mod first.
+// setupWith is setup with the engine's Config changed by mod first. The
+// catalog is the test material written the current way (testdata/good):
+// an app that provides a model API and hands each consumer a token of its
+// own, an app that needs one, and recipes (goodBundle). Nothing comes from
+// the catalog built into the program.
 func setupWith(t *testing.T, mod func(*Config)) *env {
 	w := newWorld(t)
-	na := &fakeNewAPI{}
-	naSrv := httptest.NewServer(na.handler())
-	t.Cleanup(naSrv.Close)
-	hermes := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	ta := &fakeIssuingApp{}
+	taSrv := httptest.NewServer(ta.handler())
+	t.Cleanup(taSrv.Close)
+	agent := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		_, _ = rw.Write([]byte(`{"version":"0.23.0"}`))
 	}))
-	t.Cleanup(hermes.Close)
-	w.servers["new-api"], w.servers["hermes-agent"] = naSrv, hermes
+	t.Cleanup(agent.Close)
+	w.servers["new-api"], w.servers["hermes-agent"] = taSrv, agent
 
 	dir := t.TempDir()
 	cfg := Config{
-		Store: w.st, Runner: w, Catalog: NewCatalog(CatalogConfig{CacheDir: filepath.Join(dir, "catalog")}),
-		DataDir: dir, UploadDir: dir, Version: "0.5.0", Arch: "amd64", Poll: 10 * time.Millisecond, DeployTimeout: 5 * time.Second,
+		Store: w.st, Runner: w,
+		Catalog: NewCatalog(CatalogConfig{CacheDir: filepath.Join(dir, "catalog"), Snapshot: bundleFS(goodBundle(t)), Sources: []string{"http://127.0.0.1:1"}}),
+		DataDir: dir, UploadDir: dir, Version: "0.6.0", Arch: "amd64", Poll: 10 * time.Millisecond, DeployTimeout: 5 * time.Second,
 	}
 	if mod != nil {
 		mod(&cfg)
 	}
 	e := New(cfg)
-	e.SetHooks(Hooks{Reserve: w.reserve, Delete: w.delete, WithApp: w.withApp, Kick: w.kick,
-		URL: func(ctx context.Context, a state.App) string { return "http://127.0.0.1:" + strconv.Itoa(a.PublicPort) }})
+	e.SetHooks(Hooks{Reserve: w.reserve, Delete: w.delete, WithApp: w.withApp, Kick: w.kick})
 	t.Cleanup(e.Close)
-	return &env{w: w, e: e, newapi: na}
+	return &env{w: w, e: e, tokens: ta}
 }
 
 func (v *env) install(t *testing.T, req Request) TaskView {
@@ -520,7 +597,9 @@ func code(err error) string {
 // ---- tests ----
 
 func TestInstallNewAPI(t *testing.T) {
-	v := setup(t)
+	// The server is reached at 192.168.1.20 (what its address on the LAN
+	// would be).
+	v := setupWith(t, func(c *Config) { c.Platform.Host.PublicHost = "192.168.1.20" })
 	tv := v.install(t, Request{App: "new-api"})
 	if tv.Status != state.TaskSucceeded || tv.Catalog != PublicSource {
 		t.Fatalf("task %+v", tv)
@@ -544,34 +623,63 @@ func TestInstallNewAPI(t *testing.T) {
 		t.Fatalf("SESSION_SECRET %+v", session)
 	}
 	// init called with the generated password, self-use mode on
-	if v.newapi.admin != "admin" || len(v.newapi.password) != 20 || v.newapi.setupBody["SelfUseModeEnabled"] != true || v.newapi.setupBody["confirmPassword"] != v.newapi.password {
-		t.Fatalf("setup %+v", v.newapi.setupBody)
+	if v.tokens.admin != "admin" || len(v.tokens.password) != 20 || v.tokens.setupBody["SelfUseModeEnabled"] != true || v.tokens.setupBody["confirmPassword"] != v.tokens.password {
+		t.Fatalf("setup %+v", v.tokens.setupBody)
 	}
-	// self-service sign-up is turned off right after setup
-	if v.newapi.options["RegisterEnabled"] != false {
-		t.Fatalf("options %+v", v.newapi.options)
+	// self-service sign-up is turned off right after setup: a step of the
+	// manifest's init like the others
+	if v.tokens.options["RegisterEnabled"] != false {
+		t.Fatalf("options %+v", v.tokens.options)
 	}
-	if s := stepOf(tv, "new-api", "init"); s == nil || !strings.Contains(s.Message, "已关闭自助注册") {
+	if s := stepOf(tv, "new-api", "init"); s == nil || s.Status != StepDone || s.Message != "3 步" {
 		t.Fatalf("init step %+v", s)
 	}
 	if len(v.w.pulled) != 1 || !strings.HasPrefix(v.w.pulled[0], "calciumion/new-api@sha256:51401a46") {
 		t.Fatalf("pulled %v", v.w.pulled)
 	}
+	// what it provides is registered, named after the app
+	sv, err := registry(t, v).GetService(ctx, "new-api")
+	if err != nil || sv.Kind != "llm_gateway" || sv.Source != state.ServiceFromApp || sv.App != "new-api" || sv.Values["base_url"] != "http://new-api:3000/v1" ||
+		sv.Values["api_key"] != "" || len(tv.Apps[0].Services) != 1 {
+		t.Fatalf("registered %+v %v (%+v)", sv, err, tv.Apps[0])
+	}
 	// first login masked in the task, revealed on request
-	if len(tv.FirstLogin) != 1 || tv.FirstLogin[0].Fields[1].Value != Masked || tv.FirstLogin[0].Fields[0].Value != "admin" {
+	// The address only opens on the server itself: the login says so.
+	if len(tv.FirstLogin) != 1 || tv.FirstLogin[0].Fields[1].Value != Masked || tv.FirstLogin[0].Fields[0].Value != "admin" ||
+		!strings.HasPrefix(tv.FirstLogin[0].URL, "http://127.0.0.1:") || tv.FirstLogin[0].URLNote != LoopbackURLNote {
 		t.Fatalf("first login %+v", tv.FirstLogin)
 	}
+	// The note is said to the user as it is: no field name in it.
+	if strings.Contains(LoopbackURLNote, "open_hint") || strings.Contains(LoopbackURLNote, "_") || !strings.Contains(LoopbackURLNote, "怎么打开") {
+		t.Fatalf("url_note names a field: %q", LoopbackURLNote)
+	}
 	fl, err := v.e.FirstLogin(ctx, "new-api", true)
-	if err != nil || fl.Fields[1].Value != v.newapi.password {
+	if err != nil || fl.Fields[1].Value != v.tokens.password || fl.URLNote != LoopbackURLNote {
 		t.Fatalf("reveal %+v %v", fl, err)
+	}
+	// The app is opened to the local network afterwards: reading the task
+	// again gives the address of now, without the note (the record keeps
+	// the one it was installed with).
+	h := v.e.h()
+	h.Where = func(ctx context.Context, a state.App) platformvar.Where {
+		return platformvar.Where{Exposure: state.ExposureLAN, Port: a.PublicPort}
+	}
+	v.e.SetHooks(h)
+	again, err := v.e.Task(ctx, tv.ID)
+	if err != nil || len(again.FirstLogin) != 1 || !strings.HasPrefix(again.FirstLogin[0].URL, "http://192.168.1.20:") || again.FirstLogin[0].URLNote != "" ||
+		again.FirstLogin[0].Fields[1].Value != Masked {
+		t.Fatalf("task read again %+v %v", again.FirstLogin, err)
+	}
+	if list, err := v.e.Tasks(ctx, 5); err != nil || len(list) == 0 || len(list[0].FirstLogin) != 1 || list[0].FirstLogin[0].URLNote != "" {
+		t.Fatalf("tasks %+v %v", list, err)
 	}
 	// stored encrypted: the password is not in the database text
 	cs, _ := v.w.st.GetCatalogSecrets(ctx, "new-api")
-	if strings.Contains(cs.ParamsEnc+cs.FirstLoginEnc, v.newapi.password) || !strings.HasPrefix(cs.ParamsEnc, "v1:") {
+	if strings.Contains(cs.ParamsEnc+cs.FirstLoginEnc, v.tokens.password) || !strings.HasPrefix(cs.ParamsEnc, "v1:") {
 		t.Fatal("secrets stored in clear")
 	}
 	raw, _ := v.w.st.GetInstallTask(ctx, tv.ID)
-	if strings.Contains(raw.Data, v.newapi.password) || strings.Contains(raw.Data, session.Value) {
+	if strings.Contains(raw.Data, v.tokens.password) || strings.Contains(raw.Data, session.Value) {
 		t.Fatal("task data holds a secret")
 	}
 	for _, s := range tv.Steps {
@@ -585,18 +693,21 @@ func TestInstallNewAPI(t *testing.T) {
 	}
 }
 
-// TestInstallNewAPISignUpNotClosed: turning off sign-up is best effort; the
-// install goes on and the init step says how to do it by hand.
-func TestInstallNewAPISignUpNotClosed(t *testing.T) {
+// An init step that does not pass fails the install, every one of them:
+// turning sign-up off is a step of the manifest like setting up the admin,
+// and an app left with sign-up open is not left behind.
+func TestInstallFailsWhenAnInitStepFails(t *testing.T) {
 	v := setup(t)
-	v.newapi.failOpt = true
+	v.tokens.failOpt = true
 	tv := v.install(t, Request{App: "new-api"})
-	if tv.Status != state.TaskSucceeded {
-		t.Fatalf("task %+v", tv)
+	if tv.Status != state.TaskFailed || tv.Fault == nil || tv.Fault.Code != CodeInit || !strings.Contains(tv.Fault.Message, "close-sign-up") {
+		t.Fatalf("task %+v", tv.Fault)
 	}
-	s := stepOf(tv, "new-api", "init")
-	if s == nil || s.Status != StepDone || !strings.Contains(s.Message, "没能关闭自助注册") || !strings.Contains(s.Message, "允许新用户注册") {
-		t.Fatalf("init step %+v", s)
+	if _, err := v.w.st.GetApp(context.Background(), "new-api"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("app left behind: %v", err)
+	}
+	if _, err := registry(t, v).GetService(context.Background(), "new-api"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("service left behind: %v", err)
 	}
 }
 
@@ -610,14 +721,18 @@ func stepOf(tv TaskView, app, name string) *StepView {
 	return nil
 }
 
-func TestInstallHermesWithLocalGateway(t *testing.T) {
+// An app that needs a model API, installed after the app that provides one:
+// its need is plugged into that app's service, the provider makes it a
+// token of its own by the provider's manifest steps, and only what is used
+// later of what those steps saved is kept.
+func TestInstallConsumerOfProvidedService(t *testing.T) {
 	v := setup(t)
 	if tv := v.install(t, Request{App: "new-api"}); tv.Status != state.TaskSucceeded {
 		t.Fatalf("new-api %+v", tv.Fault)
 	}
 	hermesDigest := "sha256:adb7890916de63245523492be8f68f9d2095fecbec4e2a6dab7960381f0fc002"
 	v.w.adopted[hermesDigest] = true // pre-loaded image
-	tv := v.install(t, Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "local_gateway"}}})
+	tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatalf("hermes %+v", tv.Fault)
 	}
@@ -639,16 +754,38 @@ func TestInstallHermesWithLocalGateway(t *testing.T) {
 		t.Fatalf("file %+v", wr)
 	}
 	if !strings.Contains(cfg, `base_url: "http://new-api:3000/v1"`) || !strings.Contains(cfg, `api_key: "sk-K1`) ||
-		!strings.Contains(cfg, `default: "deepseek-chat"`) || !strings.Contains(cfg, "mode: manual") {
+		!strings.Contains(cfg, `default: "demo-model"`) || !strings.Contains(cfg, "mode: manual") {
 		t.Fatalf("config:\n%s", cfg)
 	}
-	if len(v.newapi.tokens) != 1 || v.newapi.tokens[1] != "acornfox-hermes-agent" {
-		t.Fatalf("tokens %v", v.newapi.tokens)
+	id, name := v.tokens.tokenNamed("acornfox-hermes-agent-")
+	if v.tokens.tokenCount() != 1 || id != 1 || len(name) != len("acornfox-hermes-agent-")+8 {
+		t.Fatalf("tokens %v", v.tokens.tokens)
+	}
+	// The binding holds the credential: the key handed out and what the
+	// revoke and check steps read (the token's number and the issue
+	// number), not the login's access token or user id.
+	b, err := registry(t, v).GetBinding(ctx, "hermes-agent", "llm")
+	if err != nil || b.Service != "new-api" {
+		t.Fatalf("binding %+v %v", b, err)
+	}
+	keys := []string{}
+	for k := range b.Issued {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if strings.Join(keys, ",") != "api_key,issue_id,token_id" || b.Issued["token_id"] != "1" || !strings.HasPrefix(b.Issued["api_key"], "sk-K1") ||
+		name != "acornfox-hermes-agent-"+b.Issued["issue_id"] {
+		t.Fatalf("credential keys %v (%s)", keys, name)
+	}
+	if r := tv.Apps[0]; len(r.Bindings) != 1 || !r.Bindings[0].Issued || len(r.Issuing) != 0 {
+		t.Fatalf("task record %+v", r)
 	}
 	// Read back, the task carries the verdict by the server's clock: over,
-	// every step timed, the no-quota token a must-tell.
+	// every step timed, the command that shows the password. Nothing to
+	// pass on: the one item New API's manifest asks the user to fill in
+	// (its default model) is not one Hermes refers to.
 	if tm := tv.Timing; tm == nil || !tm.Done || tm.Stuck || tm.Clock != "server" || len(tm.Steps) != 7 || tm.Step != nil ||
-		len(tm.MustTell) != 1 || tm.MustTell[0] != installtiming.TokenNote("hermes-agent", "new-api") {
+		len(tm.MustTell) != 0 || len(tv.Apps[0].Tell) != 0 || tm.ShowSecretsCommand != "acornfox install status "+tv.ID+" --show-secrets" {
 		t.Fatalf("timing %+v", tv.Timing)
 	}
 	envs, _ := v.w.st.ListEnv(ctx, "hermes-agent")
@@ -661,23 +798,31 @@ func TestInstallHermesWithLocalGateway(t *testing.T) {
 	if !found {
 		t.Fatalf("dashboard password env %+v", envs)
 	}
+	raw, _ := v.w.st.GetInstallTask(ctx, tv.ID)
+	if strings.Contains(raw.Data, b.Issued["api_key"]) {
+		t.Fatal("the task record holds the credential")
+	}
 }
 
 func TestRecipeLinksAndReuse(t *testing.T) {
 	v := setup(t)
-	tv := v.install(t, Request{Recipe: "hermes-with-new-api", Params: map[string]any{"hermes-agent.llm": map[string]any{"model": "qwen-max"}}})
+	tv := v.install(t, Request{Recipe: "hermes-with-new-api", Params: hermesModel()})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatalf("recipe %+v", tv.Fault)
 	}
 	if len(tv.Apps) != 2 || tv.Apps[0].App != "new-api" || tv.Apps[1].App != "hermes-agent" || len(tv.FirstLogin) != 2 {
 		t.Fatalf("apps %+v", tv.Apps)
 	}
-	if !strings.Contains(string(v.w.wrote[0].Files[0].Content), `default: "qwen-max"`) {
-		t.Fatalf("model not kept:\n%s", v.w.wrote[0].Files[0].Content)
+	if !strings.Contains(string(v.w.wrote[0].Files[0].Content), `base_url: "http://new-api:3000/v1"`) {
+		t.Fatalf("not wired to the recipe's provider:\n%s", v.w.wrote[0].Files[0].Content)
 	}
-	a, _ := v.w.st.GetApp(context.Background(), "hermes-agent")
-	if a.CatalogSource != "recipe:hermes-with-new-api" {
-		t.Fatalf("source %q", a.CatalogSource)
+	ctx := context.Background()
+	a, _ := v.w.st.GetApp(ctx, "hermes-agent")
+	if a.CatalogSource != "recipe:hermes-with-new-api" || len(a.Links) != 1 || a.Links[0] != "new-api" {
+		t.Fatalf("source %q links %v", a.CatalogSource, a.Links)
+	}
+	if b, err := registry(t, v).GetBinding(ctx, "hermes-agent", "llm"); err != nil || b.Service != "new-api" {
+		t.Fatalf("binding %+v %v", b, err)
 	}
 	// The single-app recipe now reuses the installed New API.
 	tv = v.install(t, Request{Recipe: "new-api"})
@@ -688,7 +833,7 @@ func TestRecipeLinksAndReuse(t *testing.T) {
 
 func TestInitFailureCleansUp(t *testing.T) {
 	v := setup(t)
-	v.newapi.failSetup = true
+	v.tokens.failSetup = true
 	tv := v.install(t, Request{App: "new-api"})
 	if tv.Status != state.TaskFailed || tv.Fault == nil || tv.Fault.Code != CodeInit {
 		t.Fatalf("task %+v", tv)
@@ -704,8 +849,8 @@ func TestInitFailureCleansUp(t *testing.T) {
 	if len(v.w.removedVols) != 1 || v.w.removedVols[0] != "af-new-api-1" || len(v.w.volumes["new-api"]) != 0 {
 		t.Fatalf("volumes removed=%v left=%v", v.w.removedVols, v.w.volumes)
 	}
-	if v.newapi.setups != 1 {
-		t.Fatalf("a refused setup must not be sent again: %d calls", v.newapi.setups)
+	if v.tokens.setups != 1 {
+		t.Fatalf("a refused setup must not be sent again: %d calls", v.tokens.setups)
 	}
 	if tv.Apps[0].URL != "" {
 		t.Fatal("url kept after cleanup")
@@ -730,19 +875,28 @@ func TestKeepVolumesOnFailure(t *testing.T) {
 	}
 }
 
-func TestFilesFailureDeletesGatewayToken(t *testing.T) {
+// A failure after the credential was issued takes it back by the provider's
+// revoke steps, and the binding goes with it.
+func TestFilesFailureTakesBackCredential(t *testing.T) {
 	v := setup(t)
 	v.install(t, Request{App: "new-api"})
 	v.w.failWrite = true
-	tv := v.install(t, Request{App: "hermes-agent", Params: map[string]any{"llm": "local"}})
+	tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
 	if tv.Fault == nil || tv.Fault.Code != CodeFiles {
 		t.Fatalf("task %+v", tv.Fault)
 	}
-	if len(v.newapi.deleted) != 1 || len(v.newapi.tokens) != 0 {
-		t.Fatalf("token not removed: deleted=%v tokens=%v", v.newapi.deleted, v.newapi.tokens)
+	if len(v.tokens.deleted) != 1 || v.tokens.tokenCount() != 0 {
+		t.Fatalf("token not removed: deleted=%v tokens=%v", v.tokens.deleted, v.tokens.tokens)
 	}
-	if _, err := v.w.st.GetApp(context.Background(), "new-api"); err != nil {
-		t.Fatal("the reused gateway must stay")
+	ctx := context.Background()
+	if _, err := v.w.st.GetApp(ctx, "new-api"); err != nil {
+		t.Fatal("the provider must stay")
+	}
+	if _, err := registry(t, v).GetBinding(ctx, "hermes-agent", "llm"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("binding left: %v", err)
+	}
+	if len(carriedRevoke(tv, "hermes-agent")) != 0 {
+		t.Fatalf("a credential taken back is not a warning: %+v", tv.Apps)
 	}
 }
 
@@ -762,11 +916,11 @@ func TestRefusals(t *testing.T) {
 		{"pattern", Request{App: "new-api", Params: map[string]any{"admin_username": "bad name!"}}, CodeBadParams},
 		{"short secret", Request{App: "new-api", Params: map[string]any{"admin_password": "short"}}, CodeBadParams},
 		{"bad name", Request{App: "new-api", Name: "Bad"}, CodeBadParams},
-		{"platform", Request{App: "hermes-agent", Params: map[string]any{"llm": "platform"}}, CodePlatformLLM},
-		{"no gateway", Request{App: "hermes-agent", Params: map[string]any{"llm": "local"}}, CodeNoGateway},
-		{"llm missing", Request{App: "hermes-agent"}, CodeBadParams},
-		{"own incomplete", Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "own", "api_key": "k"}}}, CodeBadParams},
-		{"own newline", Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "own", "base_url": "https://a/v1", "api_key": "k\nx", "model": "m"}}}, CodeBadParams},
+		{"a setting of the former model kind", Request{App: "hermes-agent", Params: map[string]any{"llm": "local"}}, CodeBadParams},
+		{"no service here", Request{App: "hermes-agent", Params: hermesModel()}, CodeNoService},
+		{"the model it uses not given", Request{App: "hermes-agent", Use: map[string]string{"llm": "nope"}}, CodeBadParams},
+		{"no such service", Request{App: "hermes-agent", Params: hermesModel(), Use: map[string]string{"llm": "nope"}}, CodeBadUse},
+		{"no such need", Request{App: "new-api", Use: map[string]string{"llm": "nope"}}, CodeBadUse},
 	}
 	for _, c := range cases {
 		if _, err := v.e.StartInstall(ctx, c.req); code(err) != c.want {
@@ -774,11 +928,11 @@ func TestRefusals(t *testing.T) {
 		}
 	}
 
-	old := New(Config{Store: v.w.st, Runner: v.w, Catalog: v.e.cfg.Catalog, DataDir: t.TempDir(), Version: "0.4.9", Arch: "amd64"})
+	old := New(Config{Store: v.w.st, Runner: v.w, Catalog: v.e.cfg.Catalog, DataDir: t.TempDir(), Version: "0.5.9", Arch: "amd64"})
 	if _, err := old.StartInstall(ctx, Request{App: "new-api"}); code(err) != CodeTooOld {
 		t.Errorf("too old: %v", err)
 	}
-	arm := New(Config{Store: v.w.st, Runner: v.w, Catalog: v.e.cfg.Catalog, DataDir: t.TempDir(), Version: "0.5.0", Arch: "riscv64"})
+	arm := New(Config{Store: v.w.st, Runner: v.w, Catalog: v.e.cfg.Catalog, DataDir: t.TempDir(), Version: "0.6.0", Arch: "riscv64"})
 	if _, err := arm.StartInstall(ctx, Request{App: "new-api"}); code(err) != CodeArch {
 		t.Errorf("arch: %v", err)
 	}
@@ -891,8 +1045,10 @@ func TestListAndDetail(t *testing.T) {
 			t.Fatal("hidden param shown")
 		}
 	}
-	if len(d.Params) != 1 || d.Params[0].LLM == nil || d.Params[0].LLM.Local.Available || d.Params[0].LLM.Platform.Code != CodePlatformLLM {
-		t.Fatalf("params %+v", d.Params)
+	// What it needs is a service, not a setting: no form field for it. The
+	// one field is its own setting, the model it uses.
+	if len(d.Params) != 1 || d.Params[0].Key != "model" || !d.Params[0].Required || len(d.Uses) != 1 || d.Uses[0].UseName != "llm" || d.Uses[0].Kind != "llm_gateway" || d.Uses[0].KindLabel != "大模型接口" || !d.Uses[0].Required {
+		t.Fatalf("params %+v uses %+v", d.Params, d.Uses)
 	}
 	if !strings.Contains(d.Icon, "<svg") || d.IconType != "svg" || d.Port != 9119 || d.Exposure != "local" {
 		t.Fatalf("detail %+v", d)

@@ -210,6 +210,11 @@ ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
     local version="$1" asset="$2" out="$3"
+    # 测试或自建镜像：设了 ACORNFOX_RELEASE_BASE 就只从那里取（目录结构 <地址>/releases/download/<版本>/<文件>）
+    if [ -n "${ACORNFOX_RELEASE_BASE:-}" ]; then
+        curl -fsSL --connect-timeout 10 --max-time 600 -o "$out" "${ACORNFOX_RELEASE_BASE%/}/releases/download/${version}/${asset}"
+        return
+    fi
     if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
         log_info "从 Gitee 镜像下载 ${asset}"
         if curl -fL --progress-bar --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15 -o "$out" \
@@ -354,6 +359,13 @@ EOF
 
 FORCE_NET=""
 
+# 版本戳：发行版里的这份脚本在构建时被写成它所属的版本号（scripts/build-release.sh 改下面这一行），
+# 只处理这个版本的程序。仓库里的源码是 dev：没有绑定版本，不能直接拿来用，只在开发、测试时设 ACORNFOX_DEV_SCRIPT=1。
+# 为什么：脚本和程序各走各的路到用户手里时，新脚本会配上旧程序（2026-11 出过一次）。现在用户入口是 get.sh，
+# 它取的是“要装的那个版本自带的”脚本；这里再把一道关：脚本自己不处理别的版本。
+SCRIPT_VERSION="dev"
+ver_norm() { echo "${1#v}"; }
+
 main() {
     local version="latest"
     while [ $# -gt 0 ]; do
@@ -370,6 +382,26 @@ main() {
     echo ""
     log_info "AcornFox CLI 安装脚本"
     echo ""
+
+    # 带版本戳的脚本只装自己这个版本的命令行；源码脚本不能直接用（开发、测试时设 ACORNFOX_DEV_SCRIPT=1）
+    if [ "$SCRIPT_VERSION" = dev ]; then
+        if [ "${ACORNFOX_DEV_SCRIPT:-}" != 1 ]; then
+            log_error "这是源码仓库里的脚本，没有绑定版本，不能直接用来安装。什么都没改。"
+            echo "    用一行命令装命令行（它会取和程序同一个版本的脚本）:"
+            echo "      国内: curl -fsSL https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/get.sh | bash -s -- cli"
+            echo "      海外: curl -fsSL https://github.com/${ACORNFOX_REPO}/releases/latest/download/get.sh | bash -s -- cli"
+            echo "故障编号: INSTALL-SRC-01"
+            exit 1
+        fi
+        log_warn "开发模式：用的是源码里的脚本（ACORNFOX_DEV_SCRIPT=1）"
+    elif [ "$version" = latest ]; then
+        version="$SCRIPT_VERSION"
+    elif [ "$(ver_norm "$version")" != "$(ver_norm "$SCRIPT_VERSION")" ]; then
+        log_error "这份脚本是 ${SCRIPT_VERSION} 的，只装 ${SCRIPT_VERSION} 的命令行；要装的是 ${version}。什么都没改。"
+        echo "    要装别的版本: curl -fsSL https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/get.sh | bash -s -- cli --version ${version}"
+        echo "故障编号: INSTALL-VER-01"
+        exit 1
+    fi
 
     detect_platform
     download_cli "$version"

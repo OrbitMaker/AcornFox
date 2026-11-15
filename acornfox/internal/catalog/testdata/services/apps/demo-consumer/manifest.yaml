@@ -1,0 +1,65 @@
+# Test material: an app that needs services the new way (uses by kind, items
+# referred to as uses.<name>.<item>). Not a real app.
+id: demo-consumer
+schema: 3
+source: official
+maintainer: acornfox
+
+app:
+  name: 样例使用方
+  summary: 需要样例令牌服务，邮箱可有可无，只为测试清单格式
+  category: dev
+  icon: icon.svg
+  homepage: https://example.com/demo-consumer
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64]
+
+release:
+  version: v1.0.0
+  images:
+    - name: app
+      repository: example/demo-consumer
+      tag: v1.0.0
+      digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+
+endpoints:
+  - name: web
+    port: 8081
+    protocol: http
+    primary: true
+    health:
+      path: /healthz
+
+volumes:
+  - name: data
+    path: /data
+
+uses:
+  - { name: demo, kind: demo_token }
+  - { name: mail, kind: smtp, optional: true, without: 能用，但发不了通知邮件 }
+
+env:
+  - { key: DEMO_URL, from: uses.demo.url }
+  - { key: DEMO_TOKEN, from: uses.demo.token, secret: true }
+  - { key: SMTP_HOST, from: uses.mail.host, optional: true }
+  - { key: SMTP_PORT, from: uses.mail.port, optional: true }
+
+files:
+  - volume: data
+    path: demo.conf
+    template: |
+      url = {{uses.demo.url}}
+
+delivery:
+  tier: auto
+  minutes: 1
+
+uninstall:
+  data: [volumes.data]

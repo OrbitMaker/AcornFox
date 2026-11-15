@@ -1,186 +1,260 @@
 {
   "schema": 1,
-  "serial": 3,
-  "apps": [
+  "serial": 4,
+  "apps": [],
+  "recipes": [],
+  "service_types": [
     {
-      "id": "hermes-agent",
-      "version": "v0.23.0",
-      "name": "Hermes 智能体",
-      "summary": "常驻的 AI 智能体，可以接飞书、钉钉、企业微信、微信等做机器人",
-      "category": "ai-agent",
-      "keywords": [
-        "hermes",
-        "hermes agent",
-        "爱马仕",
-        "爱马仕智能体"
-      ],
-      "tags": [
-        "ai",
-        "agent"
-      ],
-      "min_platform": "0.5.0",
-      "status": "active",
-      "memory_mb": {
-        "min": 1024,
-        "recommended": 2048
-      },
-      "platforms": [
-        "linux/amd64",
-        "linux/arm64"
-      ],
-      "size_mb": 1150,
-      "delivery": {
-        "tier": "auto",
-        "minutes": 3,
-        "user_steps": [
-          "打开控制台，用应用详情里的密码登录",
-          "要接飞书、企业微信等机器人时，在控制台里填机器人凭据"
-        ]
-      },
-      "uses": [
-        {
-          "name": "llm_gateway",
-          "kind": "llm_gateway",
-          "for_param": "llm",
-          "optional": true
-        }
-      ],
-      "provides": [],
-      "package": {
-        "path": "apps/hermes-agent/v0.23.0.tar.gz",
-        "sha256": "5e0a19ccecff394d213511b6b7d345c682bfa6191524fe9c311789a7af0431cd",
-        "size": 2484
-      }
-    },
-    {
-      "id": "new-api",
-      "version": "v1.0.0-rc.48",
-      "name": "New API",
-      "summary": "把多家大模型合成一个 OpenAI 兼容的接口，统一管理 Key、令牌和额度",
-      "category": "ai-gateway",
-      "keywords": [],
-      "tags": [
-        "ai",
-        "llm",
-        "gateway"
-      ],
-      "min_platform": "0.5.0",
-      "status": "active",
-      "memory_mb": {
-        "min": 256,
-        "recommended": 512
-      },
-      "platforms": [
-        "linux/amd64",
-        "linux/arm64"
-      ],
-      "size_mb": 78,
-      "delivery": {
-        "tier": "auto",
-        "minutes": 1,
-        "user_steps": [
-          "登录后在“渠道”里新建一个渠道，填上游的 Key 和模型，点“测试”",
-          "在“令牌”里新建一把令牌，客户端的接口地址填 http://服务器:端口/v1"
-        ]
-      },
-      "uses": [],
-      "provides": [
-        "llm_gateway"
-      ],
-      "package": {
-        "path": "apps/new-api/v1.0.0-rc.48.tar.gz",
-        "sha256": "f6c3df4d1b2a764246cadd2f465d2c27cd6e8060383072055dad658e6e3ef04f",
-        "size": 2400
-      }
-    }
-  ],
-  "recipes": [
-    {
-      "id": "hermes-agent",
       "schema": 1,
-      "title": "Hermes 智能体",
-      "summary": "常驻的 AI 智能体，可以接飞书、钉钉、企业微信做机器人",
-      "keywords": [
-        "hermes",
-        "爱马仕",
-        "爱马仕智能体",
-        "智能体",
-        "agent"
-      ],
-      "apps": [
+      "kind": "llm_gateway",
+      "label": "大模型接口",
+      "summary": "兼容 OpenAI 接口的大模型服务，给要调用大模型的应用用",
+      "fields": [
         {
-          "app": "hermes-agent"
-        }
-      ],
-      "delivery": {
-        "tier": "auto",
-        "minutes": 3,
-        "memory_mb": 2048,
-        "user_steps": [
-          "打开控制台，用应用详情里的密码登录",
-          "要接飞书、企业微信等机器人时，在控制台里填机器人凭据"
-        ]
-      }
-    },
-    {
-      "id": "hermes-with-new-api",
-      "schema": 1,
-      "title": "Hermes 智能体 + New API",
-      "summary": "装好智能体和模型网关并连起来，只要在网关里加一次上游 Key",
-      "keywords": [
-        "hermes",
-        "爱马仕",
-        "newapi",
-        "智能体"
-      ],
-      "apps": [
-        {
-          "app": "new-api"
+          "key": "base_url",
+          "label": "接口地址",
+          "type": "url",
+          "required": true
         },
         {
-          "app": "hermes-agent"
-        }
-      ],
-      "links": [
+          "key": "api_key",
+          "label": "API Key",
+          "type": "string",
+          "required": true,
+          "secret": true
+        },
         {
-          "from": "new-api",
-          "to": "hermes-agent",
-          "uses": "llm_gateway"
+          "key": "model",
+          "label": "默认模型",
+          "type": "string"
         }
       ],
-      "delivery": {
-        "tier": "auto",
-        "minutes": 4,
-        "memory_mb": 2560,
-        "user_steps": [
-          "在 New API 里新建一个渠道，填上游的 Key 和模型（上下文要不少于 64K）",
-          "打开 Hermes 控制台，用应用详情里的密码登录",
-          "要接飞书、企业微信等机器人时，在 Hermes 控制台里填机器人凭据"
-        ]
+      "test": {
+        "http": {
+          "url": "{{base_url}}/models",
+          "bearer": "{{api_key}}",
+          "expect_status": [
+            200
+          ]
+        }
       }
     },
     {
-      "id": "new-api",
       "schema": 1,
-      "title": "New API 模型网关",
-      "summary": "一个接口接多家大模型，统一发令牌、看用量",
-      "keywords": [
-        "newapi",
-        "模型网关",
-        "大模型接口"
-      ],
-      "apps": [
+      "kind": "mysql",
+      "label": "MySQL 数据库",
+      "summary": "一个 MySQL 库和能用它的账号，给要存数据的应用用",
+      "fields": [
         {
-          "app": "new-api"
+          "key": "host",
+          "label": "地址",
+          "type": "string",
+          "required": true,
+          "hint": "数据库服务器的主机名或 IP，不带端口"
+        },
+        {
+          "key": "port",
+          "label": "端口",
+          "type": "int",
+          "default": 3306
+        },
+        {
+          "key": "database",
+          "label": "库名",
+          "type": "string",
+          "required": true
+        },
+        {
+          "key": "username",
+          "label": "账号",
+          "type": "string",
+          "required": true
+        },
+        {
+          "key": "password",
+          "label": "密码",
+          "type": "string",
+          "required": true,
+          "secret": true
+        },
+        {
+          "key": "url",
+          "label": "连接串",
+          "type": "string",
+          "secret": true,
+          "hint": "形如 mysql://账号:密码@地址:端口/库名，可以不填"
         }
       ],
-      "delivery": {
-        "tier": "auto",
-        "minutes": 1,
-        "memory_mb": 512,
-        "user_steps": [
-          "登录后新建一个渠道，填上游的 Key 和模型，点“测试”"
-        ]
+      "test": {
+        "tcp": {
+          "host": "{{host}}",
+          "port": "{{port}}"
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "postgres",
+      "label": "PostgreSQL 数据库",
+      "summary": "一个 PostgreSQL 库和能用它的账号，给要存数据的应用用",
+      "fields": [
+        {
+          "key": "host",
+          "label": "地址",
+          "type": "string",
+          "required": true,
+          "hint": "数据库服务器的主机名或 IP，不带端口"
+        },
+        {
+          "key": "port",
+          "label": "端口",
+          "type": "int",
+          "default": 5432
+        },
+        {
+          "key": "database",
+          "label": "库名",
+          "type": "string",
+          "required": true
+        },
+        {
+          "key": "username",
+          "label": "账号",
+          "type": "string",
+          "required": true
+        },
+        {
+          "key": "password",
+          "label": "密码",
+          "type": "string",
+          "required": true,
+          "secret": true
+        },
+        {
+          "key": "sslmode",
+          "label": "加密连接",
+          "type": "enum",
+          "default": "disable",
+          "options": [
+            "disable",
+            "require",
+            "verify-full"
+          ],
+          "hint": "同一台机器上的数据库选 disable；连外面的云数据库一般选 require"
+        },
+        {
+          "key": "url",
+          "label": "连接串",
+          "type": "string",
+          "secret": true,
+          "hint": "形如 postgres://账号:密码@地址:端口/库名，可以不填"
+        }
+      ],
+      "test": {
+        "tcp": {
+          "host": "{{host}}",
+          "port": "{{port}}"
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "redis",
+      "label": "Redis 缓存",
+      "summary": "一个 Redis，给要用缓存或消息队列的应用用",
+      "fields": [
+        {
+          "key": "host",
+          "label": "地址",
+          "type": "string",
+          "required": true,
+          "hint": "Redis 服务器的主机名或 IP，不带端口"
+        },
+        {
+          "key": "port",
+          "label": "端口",
+          "type": "int",
+          "default": 6379
+        },
+        {
+          "key": "username",
+          "label": "账号",
+          "type": "string",
+          "hint": "没开账号功能的 Redis 填 default 或留空"
+        },
+        {
+          "key": "password",
+          "label": "密码",
+          "type": "string",
+          "secret": true,
+          "hint": "没设密码就留空"
+        },
+        {
+          "key": "url",
+          "label": "连接串",
+          "type": "string",
+          "secret": true,
+          "hint": "形如 redis://default:密码@地址:端口，可以不填"
+        }
+      ],
+      "test": {
+        "tcp": {
+          "host": "{{host}}",
+          "port": "{{port}}"
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "smtp",
+      "label": "邮箱（发信）",
+      "summary": "给应用发通知邮件用的发信服务器",
+      "fields": [
+        {
+          "key": "host",
+          "label": "服务器地址",
+          "type": "string",
+          "required": true
+        },
+        {
+          "key": "port",
+          "label": "端口",
+          "type": "int",
+          "default": 587
+        },
+        {
+          "key": "username",
+          "label": "账号",
+          "type": "string"
+        },
+        {
+          "key": "password",
+          "label": "密码",
+          "type": "string",
+          "secret": true
+        },
+        {
+          "key": "from",
+          "label": "发件人地址",
+          "type": "string"
+        },
+        {
+          "key": "tls",
+          "label": "加密方式",
+          "type": "enum",
+          "default": "starttls",
+          "options": [
+            "starttls",
+            "tls",
+            "none"
+          ]
+        }
+      ],
+      "test": {
+        "tcp": {
+          "host": "{{host}}",
+          "port": "{{port}}"
+        }
       }
     }
   ]

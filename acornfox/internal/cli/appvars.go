@@ -14,18 +14,23 @@ const appsUsage = `用法：acornfox apps
       acornfox apps vars 应用 [--reveal]
 
 apps            列出服务器上的所有应用：名字、状态、地址。只读
+                --json 里只本机能打开的应用另带 open_hint（怎么从自己电脑打开：ask、ask_yes_command、
+                lan_url_after_expose、command、tunnel_command 等），各项的含义看 acornfox status -h
 apps vars 应用  看一个从应用中心装的应用是用什么设置装的。只读（acornfox apps vars -h 看详情）`
 
 const appsVarsUsage = `用法：acornfox apps vars 应用 [--reveal]
 
 用途：看一个从应用中心装的应用是用什么设置装的。每个变量一行：
   名字       params.名字 是应用自己的参数（自定义变量），platform.名字 是平台给的（系统变量）；
-             大模型参数拆成 params.名字.source、base_url、api_key、model 几行
-  类别       系统给、平台生成、有默认值、可选、要选模型来源、必须用户填（和 catalog vars 同一套）
+             用旧格式的清单装的应用，以前的大模型设置项拆成 params.名字.项 几行，一律按密码遮住
+  类别       系统给、平台生成、有默认值、可选、必须用户填（和 catalog vars 同一套）
   现在的值   安装时保存的值
   值从哪来   用户填的、配方预填的、清单默认值、平台生成的、平台算的、用户改的（--set platform.名字=值）、
              接上旧数据时恢复的；旧版本装的应用那时不记这个，照实写“装时的值”
   能不能改   清单写的（不能改、随时能改、重装才能改）；平台变量只能在安装时改
+  和现在的不一样  平台变量是装的时候算好写进应用的；装好后改了对外方式、绑了域名（或本机设置变了），
+             现在算出来的不一样时，那一行下面写 APP-VARS-01 和现在的值。这一版不会自动改写应用，
+             应用里用的还是装时的值（acornfox faults APP-VARS-01 看怎么办）
   还会说明保存的清单是安装时存的、后来补存的，还是没存。清单没存的应用只列保存的值，分不出类别，
   自定义变量一律按密码遮住。
   这一版只能看，不能改：改设置的功能还没有。
@@ -35,13 +40,17 @@ const appsVarsUsage = `用法：acornfox apps vars 应用 [--reveal]
 输出（--json）：{"ok":true,"app":…,"from_catalog":true,"catalog_id":…,"version":…,"source":{id,name},
   "manifest":{saved, source(install|backfill|""), source_label, sha256, saved_at},"revealed":false,"can_change":false,
   "vars":[{name, layer(system|custom), layer_label, class, class_label, label, value, secret, masked,
-           origin, origin_label, editable, editable_label, used}],"notes":[…]}
+           origin, origin_label, editable, editable_label, used,
+           value_now, differs, code, fix}],"notes":[…]}
+  平台变量的行另有 value_now（现在算出来的值；value 是装时的、应用现在用的）；两个不一样、清单又用到它时
+  differs 为 true，code 是 APP-VARS-01，fix 是怎么办，notes 里也有一句。
   不是从应用中心装的应用：from_catalog 是 false，vars 为空，notes 里说明该看哪里，退出码 0。
+  用旧格式的清单装的应用：照常列出，notes 里说明“这个应用是用旧格式的清单装的……重装后才能用新功能”，退出码 0。
 退出码：0 正常；2 参数不对；3 连不上服务器；4 服务器拒绝（没有这个应用是 CAT-INST-22）。
 例子：
-  acornfox apps vars new-api
-  acornfox apps vars hermes-agent --reveal
-  acornfox --json apps vars new-api`
+  acornfox apps vars demo-app
+  acornfox apps vars demo-app --reveal
+  acornfox --json apps vars demo-app`
 
 func (a *app) cmdAppsVars(ctx context.Context, args []string) int {
 	fs := a.catalogFlags("apps vars", appsVarsUsage)
@@ -121,6 +130,13 @@ func (a *app) cmdAppsVars(ctx context.Context, args []string) int {
 		}
 		a.out.human("  %s = %s", head, val)
 		a.out.human("      [%s] %s；%s%s", class, x.OriginLabel, x.EditableLabel, note)
+		if x.Differs && x.ValueNow != nil {
+			now := *x.ValueNow
+			if now == "" {
+				now = "（空）"
+			}
+			a.out.human("      %s 现在算出来是 %s，和装时的不一样；应用里用的还是装时的值", x.Code, now)
+		}
 	}
 	if len(v.Vars) == 0 {
 		a.out.human("没有保存的变量。")

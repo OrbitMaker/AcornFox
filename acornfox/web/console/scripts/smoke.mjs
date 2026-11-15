@@ -1,7 +1,8 @@
 // 冒烟测试：用 Playwright 打开真的 acornfox 控制台，走一遍应用中心，深浅色各截一张图。
 //
-// 做什么：用登录链接进控制台 → 首页 → 应用中心（要看到目录里的应用）→ 打开 New API 的安装弹窗
-//         （只看弹窗，不点安装）→ 深色再截一遍 → 手机宽度截一张 → 打开 /legacy/ 确认跳回新控制台（旧版已去掉）。
+// 做什么：用登录链接进控制台 → 首页 → 应用中心（要看到目录里 E2E_APPS 这几个应用）→ 打开第一个应用的安装弹窗
+//         （只看弹窗，不点安装）→ 深色再截一遍 → 手机宽度截一张 → ⌘K 搜最后一个应用 → 打开 /legacy/ 确认跳回新控制台（旧版已去掉）。
+//         看哪几个应用从环境变量 E2E_APPS 读（目录 id，逗号分隔，默认见 walk-targets.mjs），目录里要有它们。
 //         页面有 CSP 报错或脚本错误就算失败。
 // 前提：开发机上已装 playwright 的 Chromium（npx playwright install chromium）；有一个在跑的 acornfox 控制台。
 // 怎么运行：
@@ -13,6 +14,7 @@
 import { chromium } from 'playwright'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { catalogNames, walkTargets } from './walk-targets.mjs'
 
 const LOGIN_URL = process.env.LOGIN_URL
 const OUT = process.env.OUT_DIR || 'smoke-out'
@@ -20,6 +22,7 @@ if (!LOGIN_URL) {
   console.error('要设置 LOGIN_URL（控制台登录链接）')
   process.exit(2)
 }
+const { apps: APPS } = walkTargets()
 mkdirSync(OUT, { recursive: true })
 const origin = new URL(LOGIN_URL).origin
 const checks = []
@@ -56,13 +59,15 @@ try {
   const cards = page.getByTestId('catalog-app')
   await cards.first().waitFor()
   const names = await cards.allInnerTexts()
-  check('应用中心列出目录里的应用', names.length >= 2 && names.some((t) => t.includes('New API')) && names.some((t) => t.includes('Hermes')), names.map((t) => t.split('\n')[0]).join('、'))
+  const named = await catalogNames(page)
+  const want = APPS.map((id) => named.app(id))
+  check('应用中心列出目录里的应用', want.every((n) => names.some((t) => t.includes(n))), names.map((t) => t.split('\n')[0]).join('、'))
   await page.screenshot({ path: join(OUT, 'store-light.png'), fullPage: true })
 
-  const card = cards.filter({ hasText: 'New API' }).first()
+  const card = cards.filter({ has: page.getByText(want[0], { exact: true }) }).first()
   await card.getByRole('button', { name: '安装' }).click()
   const dialog = page.getByRole('dialog')
-  await dialog.getByText('acornfox install new-api').waitFor()
+  await dialog.getByText('acornfox install ' + APPS[0]).first().waitFor()
   check('安装弹窗给出命令行写法', true)
   const mem = await dialog.getByTestId('mem-check').innerText()
   check('安装弹窗有内存检查', /要 .+/.test(mem), mem)
@@ -92,8 +97,8 @@ try {
 
   await page.keyboard.press('Control+k')
   await page.getByRole('dialog', { name: '搜索' }).waitFor()
-  await page.keyboard.type('hermes')
-  const hit = await page.getByRole('dialog', { name: '搜索' }).getByText('Hermes 智能体').count()
+  await page.keyboard.type(APPS[APPS.length - 1])
+  const hit = await page.getByRole('dialog', { name: '搜索' }).getByText(want[want.length - 1]).count()
   check('⌘K 能搜到目录里的应用', hit > 0, String(hit))
   await page.keyboard.press('Escape')
 

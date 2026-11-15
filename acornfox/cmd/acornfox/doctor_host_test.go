@@ -89,7 +89,7 @@ func writeFakeProc(t *testing.T, rows string, procs map[string][2]string) string
 func TestDoctorPorts(t *testing.T) {
 	root := writeFakeProc(t,
 		tcpRow("00000000:0050", "1")+ // 80 nginx
-			tcpRow("0100007F:4978", "2")+ // 18808 redis
+			tcpRow("0100007F:4977", "2")+ // 18807 redis
 			tcpRow("00000000:4990", "3")+ // 18832 node
 			tcpRow("00000000:4972", "4")+ // 18802 python
 			tcpRow("00000000:4991", "5")+ // 18833 acornfox itself
@@ -113,7 +113,7 @@ func TestDoctorPorts(t *testing.T) {
 		t.Fatal("ports held by others must fail doctor")
 	}
 	if !strings.Contains(codes["SETUP-PORT-01"].Text, "80 被 nginx（PID 10）占用") ||
-		!strings.Contains(codes["SETUP-PORT-02"].Text, "18808（127.0.0.1）被 redis-server（PID 11）占用") ||
+		!strings.Contains(codes["SETUP-PORT-02"].Text, "18807（127.0.0.1）被 redis-server（PID 11）占用") ||
 		!strings.Contains(codes["SETUP-PORT-03"].Text, "18832 被 node（PID 12）占用") ||
 		strings.Contains(codes["SETUP-PORT-03"].Text, "18833") ||
 		!strings.Contains(codes["SETUP-PORT-05"].Text, "18834") ||
@@ -233,7 +233,7 @@ func TestDockerViaService(t *testing.T) {
 // port, app ports, the LAN console when open) are accepted while the service
 // is healthy; other unknown ports warn with the sudo hint. Root is unchanged.
 func TestDoctorPortsNotRoot(t *testing.T) {
-	rows := tcpRow("0100007F:4978", "1") + // 18808 admin (edge)
+	rows := tcpRow("0100007F:4977", "1") + // 18807 admin (edge)
 		tcpRow("00000000:4974", "2") + // 18804 not checked
 		tcpRow("00000000:4972", "3") + // 18802 LAN console
 		tcpRow("00000000:4984", "4") // 18820 an app's port
@@ -244,7 +244,7 @@ func TestDoctorPortsNotRoot(t *testing.T) {
 	r := doctorReport{OK: true}
 	doctorPorts(&r, writeFakeProc(t, rows, nil), nil, false, serverPortUse{Known: true, Own: own})
 	if len(r.Items) != 1 || r.Items[0].Level != "ok" || !r.OK ||
-		!strings.Contains(r.Items[0].Text, "18802、18808、18820 是 AcornFox 自己在用") {
+		!strings.Contains(r.Items[0].Text, "18802、18807、18820 是 AcornFox 自己在用") {
 		t.Fatalf("%+v", r.Items)
 	}
 
@@ -259,7 +259,7 @@ func TestDoctorPortsNotRoot(t *testing.T) {
 	// Service not healthy (no Own): every unknown port warns.
 	r = doctorReport{OK: true}
 	doctorPorts(&r, writeFakeProc(t, rows, nil), nil, false, serverPortUse{})
-	if len(r.Items) != 1 || r.Items[0].Level != "warn" || !strings.Contains(r.Items[0].Text, "18802、18808、18820 有程序在监听，不是 root") {
+	if len(r.Items) != 1 || r.Items[0].Level != "warn" || !strings.Contains(r.Items[0].Text, "18802、18807、18820 有程序在监听，不是 root") {
 		t.Fatalf("%+v", r.Items)
 	}
 
@@ -274,7 +274,7 @@ func TestDoctorPortsNotRoot(t *testing.T) {
 	r = doctorReport{OK: true}
 	doctorPorts(&r, writeFakeProc(t, rows, nil), nil, true, serverPortUse{Known: true, Own: own})
 	if len(r.Items) != 1 || r.Items[0].Level != "warn" ||
-		r.Items[0].Text != "端口：18802、18808、18820 有程序在监听，分不清是不是 AcornFox 自己的（可能是容器里的进程，Docker 没有应答所以分不清）" {
+		r.Items[0].Text != "端口：18802、18807、18820 有程序在监听，分不清是不是 AcornFox 自己的（可能是容器里的进程，Docker 没有应答所以分不清）" {
 		t.Fatalf("%+v", r.Items)
 	}
 	r = doctorReport{OK: true}
@@ -302,7 +302,7 @@ func TestOwnServerPortsOnlyServedApps(t *testing.T) {
 
 	// The stopped app's port held by someone else is not counted as ours:
 	// not root, it warns instead of passing.
-	rows := tcpRow("0100007F:4978", "1") + // 18808 admin (edge)
+	rows := tcpRow("0100007F:4977", "1") + // 18807 admin (edge)
 		tcpRow("00000000:4984", "2") + // 18820 web
 		tcpRow("00000000:4992", "3") // 18834 the stopped app's port, held by another program
 	r := doctorReport{OK: true}

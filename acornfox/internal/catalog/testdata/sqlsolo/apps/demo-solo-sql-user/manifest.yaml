@@ -1,0 +1,56 @@
+# Test material: an app that needs the database-shaped service for itself
+# alone (dedicated: true): it is connected only to a service no other
+# consumer uses, and once connected no other consumer may be. Not a real app.
+id: demo-solo-sql-user
+schema: 3
+source: official
+maintainer: acornfox
+
+app:
+  name: 样例独占数据库使用方
+  summary: 要独占一条样例数据库服务，只为测试清单格式
+  category: dev
+  icon: icon.svg
+  homepage: https://example.com/demo-solo-sql-user
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64]
+
+release:
+  version: v1.0.0
+  images:
+    - name: app
+      repository: example/demo-solo-sql-user
+      tag: v1.0.0
+      digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+
+endpoints:
+  - name: web
+    port: 8090
+    protocol: http
+    primary: true
+    health:
+      path: /healthz
+
+uses:
+  - { name: db, kind: demo_sql, dedicated: true }
+
+env:
+  - { key: DB_HOST, from: uses.db.host }
+  - { key: DB_PORT, from: uses.db.port }
+  - { key: DB_NAME, from: uses.db.database }
+  - { key: DB_USER, from: uses.db.username }
+  - { key: DB_PASSWORD, from: uses.db.password, secret: true }
+
+delivery:
+  tier: auto
+  minutes: 1
+
+uninstall:
+  data: []

@@ -43,24 +43,32 @@ const (
 // for either, see CheckCatalog.
 //
 // Recipes holds the recipes every platform version can install. RecipesV2
-// holds the ones that need more than BasePlatform, each with its MinPlatform
-// filled in. The first platform release reads Recipes only and ignores keys
-// it does not know, so it never shows a recipe it could not install (it has
-// no version check for recipes). Later releases read both: use AllRecipes.
-// RecipesV2 is left out of the file when it is empty, so a catalog without
-// such recipes builds to the same bytes as before the key existed.
+// holds the ones that need more than FirstCatalogPlatform, each with its
+// MinPlatform filled in. That first platform release reads Recipes only and
+// ignores keys it does not know, so it never shows a recipe it could not
+// install (it has no version check for recipes). Later releases read both:
+// use AllRecipes. Every recipe of a catalog in the current manifest format
+// needs at least BasePlatform, so all of them go to RecipesV2 and Recipes
+// stays empty. RecipesV2 is left out of the file when it is empty.
+//
+// ServiceTypes holds the catalog's service type definitions
+// (service-types/<kind>.yaml), sorted by kind. It is left out when the
+// catalog has none, for the same reason. Read out of an index.json it holds
+// only the definitions this program can use (ServiceTypeList); ask for them
+// through ServiceType and KnownServiceTypes (servicetypes.go).
 type Index struct {
-	Schema    int        `json:"schema"`
-	Serial    int64      `json:"serial"`
-	Catalog   string     `json:"catalog,omitempty"`
-	Apps      []IndexApp `json:"apps"`
-	Recipes   []Recipe   `json:"recipes"`
-	RecipesV2 []Recipe   `json:"recipes_v2,omitempty"`
+	Schema       int             `json:"schema"`
+	Serial       int64           `json:"serial"`
+	Catalog      string          `json:"catalog,omitempty"`
+	Apps         []IndexApp      `json:"apps"`
+	Recipes      []Recipe        `json:"recipes"`
+	RecipesV2    []Recipe        `json:"recipes_v2,omitempty"`
+	ServiceTypes ServiceTypeList `json:"service_types,omitempty"`
 }
 
 // AllRecipes returns Recipes and RecipesV2 together, sorted by id. Check a
-// recipe's MinPlatform (empty means BasePlatform) before installing it. When
-// an id is in both lists the one in Recipes is kept.
+// recipe's MinPlatform (empty: nothing beyond FirstCatalogPlatform) before
+// installing it. When an id is in both lists the one in Recipes is kept.
 func (i *Index) AllRecipes() []Recipe {
 	out := make([]Recipe, 0, len(i.Recipes)+len(i.RecipesV2))
 	seen := map[string]bool{}
@@ -75,6 +83,10 @@ func (i *Index) AllRecipes() []Recipe {
 	sort.SliceStable(out, func(a, b int) bool { return out[a].ID < out[b].ID })
 	return out
 }
+
+// FirstCatalogPlatform is the first platform release that reads a catalog.
+// It reads Recipes only and installs a recipe without checking a version.
+const FirstCatalogPlatform = "0.5.0"
 
 // PublicCatalog is the Catalog value of the public catalog's index.
 const PublicCatalog = "public"
@@ -177,14 +189,18 @@ func BuildFor(dir string, serial int64, catalogID string) (*Bundle, error) {
 			return nil, newErr(CodeBuildInput, err, "读配方失败："+id)
 		}
 		// A recipe that needs more than the first platform release goes
-		// where that release does not look. The others stay as written, so
-		// their index entries do not change.
-		if need := rep.MinPlatform.Recipes[id].Required(); CompareVersions(need, BasePlatform) > 0 {
+		// where that release does not look.
+		if need := rep.MinPlatform.Recipes[id].Required(); CompareVersions(need, FirstCatalogPlatform) > 0 {
 			r.MinPlatform = need
 			idx.RecipesV2 = append(idx.RecipesV2, r)
 		} else {
 			idx.Recipes = append(idx.Recipes, r)
 		}
+	}
+	// Lint has already refused a definition with a problem, so these are
+	// all of them. An empty or missing directory leaves the key out.
+	if types, _, _ := ReadServiceTypes(dir); len(types) > 0 {
+		idx.ServiceTypes = types
 	}
 	b.Index, err = encodeIndex(idx)
 	if err != nil {

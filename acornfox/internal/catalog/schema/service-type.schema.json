@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acornfox.com/catalog/schema/service-type-1.json",
+  "title": "AcornFox 服务类型定义 schema 1",
+  "description": "service-types/<kind>.yaml 的格式：一种服务（大模型接口、发信邮箱……）有哪几项、哪项保密、怎么试连。应用清单里 uses、provides 的 kind 写的就是这里的名字。打包时全部定义并进 index.json 的 service_types。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "label", "summary", "fields"],
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 40, "description": "服务类型的名字，和文件名（去掉 .yaml）相同" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 40, "description": "给用户看的名字" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 80, "description": "一句话说明这种服务是什么" },
+    "fields": {
+      "type": "array",
+      "minItems": 1,
+      "description": "这种服务有哪几项。清单里写 uses.<名>.<key> 引用，provides 的 values 按 key 给值",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "label", "type"],
+        "properties": {
+          "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 40 },
+          "label": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "type": { "enum": ["string", "int", "bool", "url", "enum"] },
+          "required": { "type": "boolean", "description": "必须有值，这条服务才算可用" },
+          "secret": { "type": "boolean", "description": "保密：加密保存，输出里只显示后 4 位" },
+          "default": { "type": ["string", "integer", "boolean"], "description": "不填时用的值，类型要和 type 对得上" },
+          "options": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "description": "type 是 enum 时必填：能选的值，不能重复" },
+          "hint": { "type": "string", "minLength": 1, "maxLength": 120, "description": "可选：给填这一项的人多看的一句话（值去哪里找、长什么样）" }
+        }
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "怎么试连，tcp 或 http 二选一。里面用 {{key}} 引用上面的项",
+      "properties": {
+        "tcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "port"],
+          "description": "连得上这个地址和端口就算通",
+          "properties": {
+            "host": { "type": "string", "minLength": 1 },
+            "port": { "type": ["string", "integer"] }
+          }
+        },
+        "http": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url"],
+          "description": "向这个网址发一个 GET，状态码对上就算通",
+          "properties": {
+            "url": { "type": "string", "minLength": 1 },
+            "bearer": { "type": "string", "description": "写了就带上 Authorization: Bearer <值>" },
+            "expect_status": { "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 100, "maximum": 599 }, "description": "不写时 2xx 都算通" }
+          }
+        }
+      },
+      "oneOf": [{ "required": ["tcp"] }, { "required": ["http"] }]
+    }
+  }
+}

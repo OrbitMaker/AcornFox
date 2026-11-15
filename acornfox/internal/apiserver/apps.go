@@ -64,9 +64,9 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 		CurrentDeployment: a.CurrentDeployment,
 		MemoryMB:          a.MemoryMB,
 		CPUMilli:          a.CPUMilli,
-		URL:               appURL(s.publicHost, a.PublicPort),
+		URL:               s.appAddress(ctx, a),
 		Exposure:          s.effectiveExposure(a),
-		ExposureIsDefault: a.Exposure == "",
+		ExposureIsDefault: a.Exposure == "" && !a.Internal,
 		DefaultExposure:   s.effectiveExposure(state.App{}),
 		CatalogID:         a.CatalogID,
 		CatalogVersion:    a.CatalogVersion,
@@ -80,16 +80,24 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 			v.CatalogOriginName, v.CatalogDisconnected = s.appCenter.Catalog().OriginState(a.CatalogOrigin)
 		}
 	}
+	if a.Internal {
+		// Nothing to open (its address is empty): other apps reach it by
+		// its name on the app network (appinstall/internalnet.go).
+		// Its port number is reserved but nothing listens on it: shown as
+		// 0, so an older command line (which does not know internal_only)
+		// says "no port yet" instead of opening an empty port.
+		v.PublicPort = 0
+		v.InternalOnly = true
+		v.InternalNote = internalNote
+	}
 	if v.Exposure == state.ExposureLocal {
+		// Its address is the loopback one (localhost on a desktop): the
+		// server's own address would not open it.
 		v.LocalOnly = true
-		if s.lanHost != nil {
-			// Desktop: localhost is the address that works.
-			v.URL = appURL("localhost", a.PublicPort)
-		} else if a.PublicPort > 0 {
-			// Linux server: the app listens on 127.0.0.1 only; the public
-			// host would not open it.
-			v.URL = appURL("127.0.0.1", a.PublicPort)
-			v.OpenHint = s.openHintFor(ctx, a)
+		if s.lanHost == nil && a.PublicPort > 0 {
+			// Linux server: how to open it from the user's own computer
+			// (none once a domain is bound: see localOpenHint).
+			v.OpenHint = s.localOpenHint(ctx, a)
 		}
 	}
 	if s.lanHost != nil && (v.Exposure == state.ExposureLAN || v.Exposure == state.ExposurePublic) {
@@ -158,9 +166,10 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 		v.Domains = doms
 	}
 	if a.CatalogID != "" && s.appCenter != nil {
-		if toks, err := s.appCenter.GatewayTokens(ctx, a.Name); err == nil && len(toks) > 0 {
-			v.GatewayTokenFrom = toks[0].Provider
+		if uses, err := s.appCenter.AppServices(ctx, a.Name); err == nil && len(uses) > 0 {
+			v.Services = uses
 		}
+		v.LegacyNote = s.appCenter.LegacyNote(ctx, a.Name)
 	}
 	if addons, err := s.addonViews(ctx, a.Name); err == nil {
 		v.Addons = addons
@@ -442,22 +451,59 @@ func (s *server) setDesired(w http.ResponseWriter, r *http.Request, desired stri
 	})
 }
 
+// internalNote is what the views say of an app reached over the app network
+// only.
+const internalNote = "只在内部网络，给别的应用用"
+
+// localOpenHint is the open hint the app views give app a: only an app that
+// only opens on this server, on a Linux server (no desktop LAN host), with a
+// published port has one; nil otherwise. An app with a domain bound has
+// none either: its address is then https://<domain>, which the entry proxy
+// answers on every address, not only on this server.
+func (s *server) localOpenHint(ctx context.Context, a state.App) *openHint {
+	if s.effectiveExposure(a) != state.ExposureLocal || s.lanHost != nil || a.PublicPort <= 0 {
+		return nil
+	}
+	if len(s.where(ctx, a).Domains) > 0 {
+		return nil
+	}
+	return s.openHintFor(ctx, a)
+}
+
 // openHintFor builds the open hint of a local-only app on a Linux server.
 func (s *server) openHintFor(ctx context.Context, a state.App) *openHint {
-	h := &openHint{Command: "acornfox open " + a.Name, Recommend: "tunnel"}
+	h := &openHint{Command: "acornfox open " + a.Name, CommandWhere: openCommandWhere, Recommend: "tunnel"}
 	if s.serverLAN != nil {
 		h.LANAddress = s.serverLAN()
 	}
 	if a.CatalogID != "" && s.appCenter != nil {
 		h.HasLogin = s.appCenter.HasLogin(ctx, a.Name)
 	}
-	if h.LANAddress != "" {
-		h.LANURL = appURL(h.LANAddress, a.PublicPort)
-		if h.HasLogin {
-			h.CanLAN, h.Recommend = true, "lan"
-		}
+	if a.PublicPort > 0 {
+		port := strconv.Itoa(a.PublicPort)
+		h.TunnelCommand = "ssh -N -L " + port + ":127.0.0.1:" + port + " " + tunnelLogin
+		h.TunnelWhere = tunnelWhere
+		h.TunnelURL = appURL("127.0.0.1", a.PublicPort)
+	}
+	if h.LANAddress != "" && h.HasLogin {
+		h.CanLAN, h.Recommend = true, "lan"
+		h.LANURLAfterExpose = appURL(h.LANAddress, a.PublicPort)
+		h.Ask = lanAsk(a.Name, a.PublicPort, h.LANURLAfterExpose)
+		h.AskYesCommand = "acornfox --json app set --app " + a.Name + " --expose lan"
 	}
 	return h
+}
+
+// tunnelLogin stands for the user's login and the server's
+// address in an open hint's tunnel command: the user puts their own there.
+const tunnelLogin = "用户@服务器地址"
+
+// lanAsk is the question an open hint asks the user before an app is
+// switched to lan exposure: what it opens, to whom, the risk, and that
+// saying no still leaves a way to open it.
+func lanAsk(name string, port int, after string) string {
+	return fmt.Sprintf("要不要让同一局域网里的电脑都能打开 %s？这会在服务器的所有网卡上开放端口 %d：服务器如果还有公网地址、防火墙或安全组又放行了这个端口，公网也能访问到；打开时要用 %s 自己的账号密码登录。"+
+		"同意的话改完马上生效，之后在局域网里的电脑上用 %s 打开，以后可以改回只本机；不同意也没关系，可以从你的电脑经 SSH 隧道打开。", name, port, name, after)
 }
 
 // patchAppRequest is the PATCH /v1/apps/{app} body; nil fields are unchanged.
@@ -507,6 +553,14 @@ func (s *server) patchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 			writeError(w, http.StatusBadRequest, "invalid_exposure", "exposure 只能是 local（只本机）、lan（本机和局域网）或 public（所有网卡 + 域名）")
+			return
+		}
+	}
+	if body.Exposure != nil {
+		// An internal app (a database) is for other apps only: it has no
+		// page, and the entry proxy does not carry what it speaks.
+		if cur, err := s.store.GetApp(ctx, app); err == nil && cur.Internal {
+			writeError(w, http.StatusConflict, "internal_app", app+" "+internalNote+"，访问方式不能改：它没有网页可以打开，别的应用按它的名字在内部网络里连它")
 			return
 		}
 	}
@@ -760,16 +814,24 @@ func (s *server) removeApp(ctx context.Context, app string, deleteVolumes bool) 
 	return err
 }
 
-// removeAppWarn is removeApp that also returns warnings for the caller: the
-// model-gateway tokens issued for an app installed from the catalog are
-// revoked once the app is gone with its data, and a token that could not be
-// revoked is reported (it keeps working until removed in the gateway). An
-// app deleted with its data kept keeps its tokens: they are kept with its
-// saved parameters (and its config files in the data hold them), and an
-// install on that data takes them over (appinstall's reuse.go); one that does
-// not take them over revokes them then.
+// removeAppWarn is removeApp that also returns warnings for the caller:
+// deleted with its data, what the app was handed by services other apps
+// provide is taken back once it is gone, and a credential that could not be
+// taken back is reported (CAT-INST-35: it may keep working in the app that
+// made it). Deleted with its data kept, those stay for an install on that
+// data (appinstall's connect.go). An app installed with a manifest of the
+// former format is not in the service registry: what was made for it in
+// another app is not taken back any more, and the warnings tell the user
+// where to remove it by hand.
 func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bool) ([]string, error) {
-	// An app another app is linked to (its model gateway) keeps that app's
+	// An app whose services other apps are plugged into stays: they would
+	// lose the service. Every one of them is named.
+	if s.appCenter != nil {
+		if users, err := s.appCenter.ServiceUsers(ctx, app); err == nil && len(users) > 0 {
+			return nil, &lifecycleError{http.StatusConflict, "app_in_use", appinstall.ServiceUsersText(app, users)}
+		}
+	}
+	// An app another app is linked to (one whose service it uses) keeps that app's
 	// container on its network: removing it would fail half-way at the
 	// network. Refuse up front, before anything is removed.
 	if apps, err := s.store.ListApps(ctx); err == nil {
@@ -781,13 +843,10 @@ func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bo
 			}
 		}
 	}
-	var tokens []appinstall.TokenRef
-	if s.appCenter != nil && deleteVolumes {
-		toks, err := s.appCenter.GatewayTokens(ctx, app)
-		if err != nil {
-			s.log.Warn("read gateway tokens", "app", app, "err", err)
-		}
-		tokens = toks
+	// Read before the app goes: its saved parameters go with it.
+	var legacy []string
+	if s.appCenter != nil {
+		legacy = s.appCenter.LegacyCredentialNotes(ctx, app)
 	}
 	err := s.withApp(ctx, app, func() error {
 		if _, err := s.store.GetApp(ctx, app); err != nil {
@@ -845,11 +904,12 @@ func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bo
 	if err != nil {
 		return nil, err
 	}
-	var warnings []string
-	if len(tokens) > 0 {
-		if err := s.appCenter.RevokeGatewayTokens(ctx, app, tokens); err != nil {
-			warnings = append(warnings, err.Error())
-		}
+	warnings := append([]string(nil), legacy...)
+	// Services: deleted with its data, what the app was handed is taken back
+	// and what it provided goes; with its data kept, both stay for an
+	// install on that data.
+	if s.appCenter != nil {
+		warnings = append(warnings, s.appCenter.ReleaseServices(ctx, app, deleteVolumes)...)
 	}
 
 	// The deployment logs go with the app. A failure (e.g. a file still open

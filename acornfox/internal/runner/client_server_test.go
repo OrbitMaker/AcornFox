@@ -28,6 +28,7 @@ type fakeAPI struct {
 	pullResp PullResponse
 	pullErr  error
 	pullReq  PullRequest
+	pullDL   time.Time // the deadline of the context the server passed on
 
 	inspectResp ImageInfo
 	inspectErr  error
@@ -94,9 +95,10 @@ func (f *fakeAPI) Build(_ context.Context, req BuildRequest) (BuildResponse, err
 	return f.buildResp, f.buildErr
 }
 
-func (f *fakeAPI) PullImage(_ context.Context, app, deploymentID, ref string) (PullResponse, error) {
+func (f *fakeAPI) PullImage(ctx context.Context, app, deploymentID, ref string) (PullResponse, error) {
 	f.mu.Lock()
 	f.pullReq = PullRequest{App: app, DeploymentID: deploymentID, Ref: ref}
+	f.pullDL, _ = ctx.Deadline()
 	f.mu.Unlock()
 	return f.pullResp, f.pullErr
 }
@@ -294,6 +296,28 @@ func TestClientPullImageRoundTrip(t *testing.T) {
 	}
 	if api.pullReq.App != "demo" || api.pullReq.DeploymentID != "0123456789ab" || api.pullReq.Ref != "nginx:1.27-alpine" {
 		t.Fatalf("server did not receive pull request faithfully: %+v", api.pullReq)
+	}
+}
+
+// A caller's deadline reaches the runner (which stops the pull a little
+// before it and says so); without one the runner has none.
+func TestClientPullImageSendsDeadline(t *testing.T) {
+	api := &fakeAPI{pullResp: PullResponse{OK: true}}
+	_, cli := newTestServer(t, api)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	if _, err := cli.PullImage(ctx, "demo", "0123456789ab", "nginx:1.27-alpine"); err != nil {
+		t.Fatal(err)
+	}
+	if d := api.pullDL.Sub(want); d < -time.Second || d > time.Second {
+		t.Fatalf("server context deadline %v, want %v", api.pullDL, want)
+	}
+	if _, err := cli.PullImage(context.Background(), "demo", "0123456789ab", "nginx:1.27-alpine"); err != nil {
+		t.Fatal(err)
+	}
+	if !api.pullDL.IsZero() {
+		t.Fatalf("no caller deadline, server context has %v", api.pullDL)
 	}
 }
 

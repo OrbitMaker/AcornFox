@@ -3,43 +3,12 @@ package appinstall
 import (
 	"context"
 	"encoding/json"
-	"io/fs"
 	"strings"
 	"testing"
 
 	"github.com/acornfox/acornfox/internal/catalog"
 	"github.com/acornfox/acornfox/internal/state"
 )
-
-// snapshotManifest reads an app's manifest.yaml out of the built-in snapshot.
-func snapshotManifest(t *testing.T, id string) string {
-	t.Helper()
-	snap := catalog.Snapshot()
-	raw, err := fs.ReadFile(snap, catalog.IndexFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx, err := catalog.ParseIndex(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, a := range idx.Apps {
-		if a.ID != id {
-			continue
-		}
-		pkg, err := fs.ReadFile(snap, a.Package.Path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files, err := catalog.ReadPackage(id, pkg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(files[manifestFile])
-	}
-	t.Fatalf("no %s in the snapshot", id)
-	return ""
-}
 
 func varsByName(v AppVars) map[string]AppVar {
 	out := map[string]AppVar{}
@@ -68,7 +37,7 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 	if tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
-	want := snapshotManifest(t, "new-api")
+	want := goodManifest(t, "new-api")
 	cm, err := v.w.st.GetCatalogManifest(ctx, "new-api")
 	if err != nil || cm.Manifest != want || cm.SHA256 != state.ManifestSHA256(want) || cm.Source != state.ManifestFromInstall ||
 		cm.CatalogID != "new-api" || cm.CatalogVersion != "v1.0.0-rc.48" || cm.CatalogOrigin != "" {
@@ -119,7 +88,7 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 		t.Fatalf("admin_username %+v", r)
 	}
 	pw := check("params.admin_password", "custom", catalog.ClassGenerated, OriginGenerated, "never", true)
-	if !pw.Masked || pw.Value != Masked+v.newapi.password[len(v.newapi.password)-4:] {
+	if !pw.Masked || pw.Value != Masked+v.tokens.password[len(v.tokens.password)-4:] {
 		t.Fatalf("password not masked to its last 4: %+v", pw)
 	}
 	if r := check("params.session_secret", "custom", catalog.ClassGenerated, OriginGenerated, "never", true); !r.Masked || len(r.Value) != len(Masked)+4 {
@@ -152,7 +121,7 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 	}
 	// Nothing secret in the masked answer.
 	b, _ := json.Marshal(av)
-	if strings.Contains(string(b), v.newapi.password) {
+	if strings.Contains(string(b), v.tokens.password) {
 		t.Fatal("the masked answer holds the password")
 	}
 
@@ -160,7 +129,7 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 	if err != nil || !full.Revealed {
 		t.Fatal(err)
 	}
-	if r := varsByName(full)["params.admin_password"]; r.Value != v.newapi.password || r.Masked || !r.Secret {
+	if r := varsByName(full)["params.admin_password"]; r.Value != v.tokens.password || r.Masked || !r.Secret {
 		t.Fatalf("revealed %+v", r)
 	}
 	if hasNote(full, "--reveal") {
@@ -168,12 +137,14 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 	}
 }
 
-// A model parameter is one row per field; the key is a secret. With the
-// local gateway the address and key are the platform's doing.
-func TestAppVarsModelParameter(t *testing.T) {
+// What a service hands an app is not a variable of the app: a consumer's
+// rows are its own parameters and the platform variables, never the items
+// of the service its need is plugged into (they are in the binding, the
+// credential encrypted), and no model name is made up for it.
+func TestAppVarsOfConsumer(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
-	if tv := v.install(t, Request{Recipe: "hermes-with-new-api", Params: map[string]any{"hermes-agent.llm": map[string]any{"model": "qwen-max"}}}); tv.Status != state.TaskSucceeded {
+	if tv := v.install(t, Request{Recipe: "hermes-with-new-api", Params: hermesModel()}); tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
 	av, err := v.e.AppVars(ctx, "hermes-agent", false)
@@ -181,58 +152,96 @@ func TestAppVarsModelParameter(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := varsByName(av)
-	want := map[string][2]string{ // value, origin
-		"params.llm.source":   {LLMLocalGateway, OriginRecipe},
-		"params.llm.app":      {"new-api", OriginRecipe},
-		"params.llm.base_url": {"http://new-api:3000/v1", OriginPlatform},
-		"params.llm.model":    {"qwen-max", OriginUser},
-	}
-	for name, w := range want {
-		r := rows[name]
-		if r.Value != w[0] || r.Origin != w[1] || r.Class != catalog.ClassLLMSource || r.Layer != "custom" || r.Secret {
-			t.Fatalf("%s: %+v", name, r)
+	for name := range rows {
+		if strings.HasPrefix(name, "params.llm") || strings.HasPrefix(name, "uses.") || name == "platform.llm.model.chat" {
+			t.Fatalf("a row for what the service hands out: %s", name)
 		}
-	}
-	key := rows["params.llm.api_key"]
-	if !key.Secret || !key.Masked || key.Origin != OriginPlatform || !strings.HasPrefix(key.Value, Masked) || strings.Contains(key.Value, "sk-K1") {
-		t.Fatalf("api_key %+v", key)
-	}
-	if _, ok := rows["params.llm"]; ok {
-		t.Fatal("the model parameter is listed whole as well")
 	}
 	if r := rows["params.dashboard_password"]; r.Origin != OriginGenerated || !r.Masked {
 		t.Fatalf("dashboard_password %+v", r)
 	}
-	// The default chat model counts as used by an app that can fall back to
-	// it; the mirrors Hermes refers to are used, the region is not.
-	for name, want := range map[string]bool{"platform.llm.model.chat": true, "platform.mirror.pypi": true, "platform.tz": true, "platform.region": false} {
+	for name, want := range map[string]bool{"platform.mirror.pypi": true, "platform.tz": true, "platform.region": false} {
 		if r := rows[name]; r.Used == nil || *r.Used != want {
 			t.Fatalf("%s used: %+v", name, r)
 		}
 	}
-	// Left to the platform, the model is the platform's default.
-	v2 := setup(t)
-	if tv := v2.install(t, Request{Recipe: "hermes-with-new-api"}); tv.Status != state.TaskSucceeded {
-		t.Fatal(tv.Fault)
+	if hasNote(av, "旧格式") {
+		t.Fatalf("an app installed the current way called former: %v", av.Notes)
 	}
-	av2, _ := v2.e.AppVars(ctx, "hermes-agent", false)
-	if r := varsByName(av2)["params.llm.model"]; r.Value != DefaultGatewayModel || r.Origin != OriginPlatform {
-		t.Fatalf("default model %+v", r)
+	full, _ := v.e.AppVars(ctx, "hermes-agent", true)
+	if b, _ := json.Marshal(full); strings.Contains(string(b), "sk-K1") {
+		t.Fatal("the credential shows among the variables")
 	}
-	// The user's own key: every field is the user's.
-	v3 := setup(t)
-	own := map[string]any{"llm": map[string]any{"source": "own", "base_url": "https://api.example.com/v1", "api_key": "sk-user-own-key-0001", "model": "m1"}}
-	if tv := v3.install(t, Request{App: "hermes-agent", Params: own}); tv.Status != state.TaskSucceeded {
-		t.Fatal(tv.Fault)
+}
+
+// An app installed with a manifest of the former format: its variables are
+// listed (exit 0), a value that is an object is one row per field, all
+// masked, and a note says it was installed the former way and needs
+// reinstalling for the new features.
+func TestAppVarsFormerApp(t *testing.T) {
+	v := setup(t)
+	ctx := context.Background()
+	oldInstall(t, v, "old-agent", "hermes-agent", "v0.23.0", map[string]any{
+		"dashboard_password": "old-password-0001",
+		"llm":                map[string]any{"source": "local_gateway", "app": "gw", "base_url": "http://gw:3000/v1", "api_key": "sk-old-key-000099", "model": "m1"},
+		originsKey:           map[string]any{"llm": OriginPlatform},
+		platformKey:          map[string]any{"tz": "Asia/Shanghai", "llm.api_key": "sk-platform-000777"},
+		platformUserKey:      map[string]any{},
+		legacyCredentialsKey: []map[string]any{{"provider": "gw", "id": 4}},
+	})
+	former := formerManifest(t, "hermes-agent")
+	if err := v.w.st.SetCatalogManifest(ctx, state.CatalogManifest{App: "old-agent", CatalogID: "hermes-agent", CatalogVersion: "v0.23.0",
+		Manifest: former, SHA256: state.ManifestSHA256(former), Source: state.ManifestFromInstall}); err != nil {
+		t.Fatal(err)
 	}
-	av3, _ := v3.e.AppVars(ctx, "hermes-agent", false)
-	r3 := varsByName(av3)
-	if r3["params.llm.source"].Origin != OriginUser || r3["params.llm.base_url"].Origin != OriginUser || r3["params.llm.model"].Origin != OriginUser ||
-		r3["params.llm.api_key"].Value != Masked+"0001" {
-		t.Fatalf("own key rows %+v %+v", r3["params.llm.api_key"], r3["params.llm.base_url"])
+	av, err := v.e.AppVars(ctx, "old-agent", false)
+	if err != nil || !av.FromCatalog || !hasNote(av, LegacyAppNote) {
+		t.Fatalf("%+v %v", av, err)
 	}
-	if _, ok := r3["params.llm.app"]; ok {
-		t.Fatal("an app row for a source that names none")
+	// The app's detail says the same sentence (legacy_note); an app of the
+	// current format, or none at all, says nothing.
+	if n := v.e.LegacyNote(ctx, "old-agent"); n != LegacyAppNote {
+		t.Fatalf("legacy note %q", n)
+	}
+	if n := v.e.LegacyNote(ctx, "no-such-app"); n != "" {
+		t.Fatalf("legacy note of an app that is not there: %q", n)
+	}
+	rows := varsByName(av)
+	for _, f := range []string{"source", "app", "base_url", "api_key", "model"} {
+		r, ok := rows["params.llm."+f]
+		if !ok || !r.Secret || r.Layer != "custom" {
+			t.Fatalf("params.llm.%s: %+v (%v)", f, r, ok)
+		}
+	}
+	if r := rows["params.llm.api_key"]; !r.Masked || r.Value != Masked+"0099" {
+		t.Fatalf("api_key %+v", r)
+	}
+	if _, ok := rows["params.llm"]; ok {
+		t.Fatal("the object is listed whole as well")
+	}
+	// A platform variable this version no longer has: shown masked, it
+	// may have been a secret one.
+	if r := rows["platform.llm.api_key"]; !r.Secret || !r.Masked || r.Value != Masked+"0777" {
+		t.Fatalf("platform variable not on the table %+v", r)
+	}
+	if r := rows["platform.tz"]; r.Secret || r.Value != "Asia/Shanghai" {
+		t.Fatalf("platform.tz %+v", r)
+	}
+	if b, _ := json.Marshal(av); strings.Contains(string(b), "sk-old-key") || strings.Contains(string(b), "sk-platform") || strings.Contains(string(b), "_acornfox_") {
+		t.Fatalf("a secret or a record key in the masked answer: %s", b)
+	}
+	// It takes no part in services, and deleting it reminds the user of the
+	// credential another app made for it.
+	if uses, err := v.e.AppServices(ctx, "old-agent"); err != nil || uses != nil {
+		t.Fatalf("services of a former app: %+v %v", uses, err)
+	}
+	notes := v.e.LegacyCredentialNotes(ctx, "old-agent")
+	if len(notes) != 1 || !strings.HasPrefix(notes[0], CodeRevoke+" ") || !strings.Contains(notes[0], "gw 里") || !strings.Contains(notes[0], "编号 4") ||
+		!strings.Contains(notes[0], "acornfox-old-agent") {
+		t.Fatalf("notes %q", notes)
+	}
+	if notes := v.e.LegacyCredentialNotes(ctx, "nobody"); notes != nil {
+		t.Fatalf("notes for no app: %q", notes)
 	}
 }
 
@@ -245,9 +254,6 @@ func TestParamOrigins(t *testing.T) {
 		if got[k] != w {
 			t.Errorf("%s: %q, want %q", k, got[k], w)
 		}
-	}
-	if _, ok := got["llm"]; ok {
-		t.Error("the model parameter is resolved elsewhere")
 	}
 	if o := paramOrigins(m, nil, nil); o["port"] != OriginUnset || o["pass"] != OriginGenerated || o["user"] != OriginDefault {
 		t.Errorf("nothing given: %v", o)
@@ -280,13 +286,16 @@ func oldInstall(t *testing.T, v *env, name, catalogID, version string, params ma
 // Apps installed before manifests were saved get theirs from the packages on
 // this machine, once; an app whose version no local index lists stays
 // without one, and its variables are listed without classes, all masked.
+// The packages here are those of the catalog published in the former format
+// (what such apps were installed with); the backfilled manifest is of that
+// format and says so.
 func TestBackfillManifests(t *testing.T) {
-	v, hits := setupSnapshot(t, catalog.Snapshot(), nil)
+	v, hits := setupSnapshot(t, bundleFS(fixtureBundle(t, 3, "", []fixApp{{manifest: formerManifest(t, "new-api")}, {manifest: formerManifest(t, "hermes-agent")}}, nil, nil)), nil)
 	ctx := context.Background()
 	old := map[string]any{
 		"admin_username": "admin", "admin_password": "old-password-1234567", "session_secret": strings.Repeat("ab", 32),
-		platformKey:    map[string]any{"tz": "Asia/Tokyo", "region": "cn", "app.url": "http://127.0.0.1:18810"},
-		savedTokensKey: []TokenRef{{Provider: "x", ID: 1}},
+		platformKey:          map[string]any{"tz": "Asia/Tokyo", "region": "cn", "app.url": "http://127.0.0.1:18810"},
+		legacyCredentialsKey: []legacyCredential{{Provider: "x", ID: 1}},
 	}
 	oldInstall(t, v, "new-api", "new-api", "v1.0.0-rc.48", old)
 	oldInstall(t, v, "gone", "new-api", "v0.0.1", old)         // a version no index here lists
@@ -302,7 +311,7 @@ func TestBackfillManifests(t *testing.T) {
 		t.Fatalf("the backfill went to the network %d times", hits.Load())
 	}
 	cm, err := v.w.st.GetCatalogManifest(ctx, "new-api")
-	if err != nil || cm.Source != state.ManifestFromBackfill || cm.Manifest != snapshotManifest(t, "new-api") || cm.CatalogVersion != "v1.0.0-rc.48" {
+	if err != nil || cm.Source != state.ManifestFromBackfill || cm.Manifest != formerManifest(t, "new-api") || cm.CatalogVersion != "v1.0.0-rc.48" {
 		t.Fatalf("backfilled manifest: %+v %v", cm, err)
 	}
 	if _, err := v.w.st.GetCatalogManifest(ctx, "gone"); err == nil {
@@ -322,7 +331,8 @@ func TestBackfillManifests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !av.Manifest.Saved || av.Manifest.Source != state.ManifestFromBackfill || !strings.Contains(av.Manifest.SourceLabel, "补存") || !hasNote(av, "装时的值") {
+	if !av.Manifest.Saved || av.Manifest.Source != state.ManifestFromBackfill || !strings.Contains(av.Manifest.SourceLabel, "补存") || !hasNote(av, "装时的值") ||
+		!hasNote(av, LegacyAppNote) {
 		t.Fatalf("head %+v", av)
 	}
 	rows := varsByName(av)
@@ -346,7 +356,7 @@ func TestBackfillManifests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gone.Manifest.Saved || gone.Manifest.Source != "" || !hasNote(gone, "清单没存，分不出类别") {
+	if gone.Manifest.Saved || gone.Manifest.Source != "" || !hasNote(gone, "清单没存，分不出类别") || !hasNote(gone, LegacyAppNote) {
 		t.Fatalf("head %+v", gone)
 	}
 	grows := varsByName(gone)
@@ -392,7 +402,7 @@ func TestReuseDataKeepsManifest(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
 	installAndKeepData(t, v, Request{App: "new-api"})
-	want := snapshotManifest(t, "new-api")
+	want := goodManifest(t, "new-api")
 	k, err := v.w.st.GetKeptCatalogSecrets(ctx, "new-api")
 	if err != nil || k.Manifest != want || k.ManifestSHA256 != state.ManifestSHA256(want) {
 		t.Fatalf("kept manifest: %d bytes, %v", len(k.Manifest), err)
@@ -436,6 +446,19 @@ func TestMaskSecret(t *testing.T) {
 	for in, want := range map[string]string{"": "", "short": Masked, "elevenchars": Masked, "twelve-chars": Masked + "hars", "密码密码密码密码密码密码一二三四": Masked + "一二三四"} {
 		if got := maskSecret(in); got != want {
 			t.Errorf("maskSecret(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// An app installed with a manifest of the current format has no legacy
+// note (GET /v1/apps/{app} leaves legacy_note out).
+func TestLegacyNoteOnlyForFormerApps(t *testing.T) {
+	v := setup(t)
+	ctx := context.Background()
+	installHermes(t, v)
+	for _, app := range []string{"new-api", "hermes-agent"} {
+		if n := v.e.LegacyNote(ctx, app); n != "" {
+			t.Fatalf("%s: legacy note %q", app, n)
 		}
 	}
 }

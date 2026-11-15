@@ -1,7 +1,7 @@
 //go:build !windows
 
 // This file implements the "acornfox server" and "acornfox runner" subcommands
-// (N1): it wires state, runner, caddyroute, reconcile and apiserver together.
+// (N1): it wires state, runner, the entry proxy (edge), reconcile and apiserver together.
 package main
 
 import (
@@ -18,7 +18,7 @@ import (
 
 	"github.com/moby/moby/client"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/peer"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/runner"
@@ -29,11 +29,9 @@ import (
 // served only on unix sockets (N3); the browser console separately on
 // -console-listen behind cookie sessions and CSRF.
 //
-// Caddy (three-platform architecture, 2026-11-01): by default the server runs
-// Caddy as a container on the host network (-edge host) and reaches its admin
-// API through a token-checked gateway on 127.0.0.1:-edge-admin-port.
-// -edge off -caddy-admin /run/acornfox/caddy-admin.sock keeps the v0.3 host
-// Caddy (used by upgrade rollback and tests).
+// The entry proxy runs as a container on the host network (-edge host); the
+// server reaches the adapter in it on its token-checked management endpoint
+// 127.0.0.1:-edge-admin-port.
 func runServer(args []string, stdout, stderr io.Writer) int {
 	fs_ := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs_.SetOutput(stderr)
@@ -45,18 +43,17 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		consoleListen = fs_.String("console-listen", "127.0.0.1:18800", "browser console listener (loopback TCP only; empty disables it)")
 		runnerSocket  = fs_.String("runner-socket", "/run/acornfox/runner.sock", "runner peer socket path")
 		runnerUID     = fs_.Int("runner-uid", os.Getuid(), "uid the runner process runs as")
-		edgeMode      = fs_.String("edge", "host", "Caddy 运行方式：host（容器，宿主网络，默认）、off（用 -caddy-admin 指定的宿主机 Caddy）")
-		edgeAdminPort = fs_.Int("edge-admin-port", defaultEdgeAdminPort, "Caddy 容器管理网关的本机回环端口")
-		caddyAdmin    = fs_.String("caddy-admin", "/run/acornfox/caddy-admin.sock", "宿主机 Caddy 的 admin unix socket（仅 -edge off）")
+		edgeMode      = fs_.String("edge", "host", "入口代理运行方式：host（容器，宿主网络，也是唯一的选项）")
+		edgeAdminPort = fs_.Int("edge-admin-port", defaultEdgeAdminPort, "入口代理容器管理口的本机回环端口")
 		publicHost    = fs_.String("public-host", "", "host used in app URLs (e.g. the LAN IP)")
 		publicPortMin = fs_.Int("public-port-min", 18810, "应用公开端口范围下限")
 		publicPortMax = fs_.Int("public-port-max", 18899, "应用公开端口范围上限")
 		httpPort      = fs_.Int("http-port", 80, "HTTP port of the shared af-domains server (ACME HTTP-01 and redirect)")
 		httpsPort     = fs_.Int("https-port", 443, "HTTPS port of the shared af-domains server")
-		httpsIssuer   = fs_.String("https-issuer", "", "certificate issuer: \"\"/acme = public ACME, internal = Caddy local CA (dev)")
+		httpsIssuer   = fs_.String("https-issuer", "", "certificate issuer: \"\"/acme = public ACME, internal = the entry proxy's local CA (dev)")
 		httpsCAFile   = fs_.String("https-ca-file", "", "path to the CA root used to verify domain certificates (internal issuer)")
 		acmeEmail     = fs_.String("acme-email", "", "optional ACME account email")
-		publicListen  = fs_.String("public-console-listen", "127.0.0.1:18801", "public console gateway behind Caddy (loopback TCP only; empty disables it)")
+		publicListen  = fs_.String("public-console-listen", "127.0.0.1:18801", "public console gateway behind the entry proxy (loopback TCP only; empty disables it)")
 		lanPort       = fs_.Int("lan-console-port", 0, "局域网控制台端口（开启后监听 0.0.0.0；默认 18802）")
 		exposure      = fs_.String("default-exposure", "public", "应用默认暴露方式：public、lan、local")
 	)
@@ -84,10 +81,8 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "invalid -public-console-listen:", err)
 		return 2
 	}
-	switch *edgeMode {
-	case runner.EdgeModeHost, edgeModeOff:
-	default:
-		fmt.Fprintln(stderr, "invalid -edge: 只能是 host 或 off")
+	if *edgeMode != runner.EdgeModeHost {
+		fmt.Fprintln(stderr, "invalid -edge: 只能是 host")
 		return 2
 	}
 	switch *exposure {
@@ -119,7 +114,7 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		PublicHost:    *publicHost,
 		PublicPortMin: *publicPortMin,
 		PublicPortMax: *publicPortMax,
-		HTTPS: caddyroute.HTTPSConfig{
+		HTTPS: edge.HTTPS{
 			HTTPPort:  *httpPort,
 			HTTPSPort: *httpsPort,
 			Issuer:    *httpsIssuer,
@@ -128,7 +123,6 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		HTTPSCAFile:     *httpsCAFile,
 		EdgeMode:        *edgeMode,
 		EdgeAdminPort:   *edgeAdminPort,
-		CaddyAdmin:      *caddyAdmin,
 		DefaultExposure: *exposure,
 		LANConsolePort:  *lanPort,
 		CheckPorts:      true,
@@ -174,7 +168,10 @@ func runRunner(args ...string) int {
 		if china {
 			// A cloud vendor's internal accelerator (Tencent Cloud today) only
 			// answers inside its network and is by far the fastest there.
-			reg.Mirrors = runner.CloudRegistryMirrors(platform.LinuxInstallCloud("/etc/acornfox/install.env"))
+			// Mirrors the user gave install.sh (--registry-mirror, in
+			// daemon.json but not in the table) go in front.
+			reg.Mirrors = runner.WithUserMirrors(runner.CloudRegistryMirrors(platform.LinuxInstallCloud("/etc/acornfox/install.env")),
+				runner.DaemonMirrorHosts(runner.DaemonConfigPath))
 		}
 		api.SetRegistry(reg)
 	}

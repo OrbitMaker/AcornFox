@@ -44,7 +44,7 @@ func (d *Docker) RemoveNetwork(ctx context.Context, app string) error {
 	if err := checkNetworkOwner(app, res.Network); err != nil {
 		return err
 	}
-	// The edge container (Caddy, bridge mode) joins every app network; detach
+	// The edge container (bridge mode) joins every app network; detach
 	// it so an app's network can be removed with the app.
 	if onlyEdgeAttached(res.Network) {
 		d.disconnectEdge(ctx, res.Network.ID)

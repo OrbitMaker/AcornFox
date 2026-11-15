@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -384,4 +386,51 @@ func TestOpenAppLocalAndErrors(t *testing.T) {
 	}
 }
 
+// Run on the Linux server itself (the app has an open hint) with no
+// browser: the loopback address is said to be the server's own, with how
+// to open it from the user's computer; --json carries the same.
+func TestOpenAppOnServerSaysWhere(t *testing.T) {
+	h := newHarness(t)
+	h.addTarget("me", "unix:/run/acornfox/acornfox.sock")
+	hint := &client.OpenHint{Command: "acornfox open web", TunnelCommand: "ssh -N -L 18815:127.0.0.1:18815 用户@服务器地址", TunnelURL: "http://127.0.0.1:18815"}
+	h.api.appFn = func(ctx context.Context, app string) (client.App, error) {
+		return client.App{Name: app, PublicPort: 18815, Exposure: "local", LocalOnly: true, OpenHint: hint}, nil
+	}
+	code, out, _ := h.runOpen(context.Background(), func(a *app) {
+		a.openURL = func(u string) error { return errors.New("no display") }
+	}, "open", "web")
+	if code != exitOK || !strings.Contains(out, "http://127.0.0.1:18815") || !strings.Contains(out, "服务器本机的地址") ||
+		!strings.Contains(out, "在你自己电脑的终端运行 acornfox open web") || !strings.Contains(out, "--ssh") ||
+		!strings.Contains(out, "\n  ssh -N -L 18815:127.0.0.1:18815 用户@服务器地址") {
+		t.Fatalf("exit %d out %s", code, out)
+	}
+	code, out, _ = h.runOpen(context.Background(), nil, "--json", "open", "web", "--no-browser")
+	m := decodeJSON(t, out)
+	oh, _ := m["open_hint"].(map[string]any)
+	if code != exitOK || m["server_only"] != true || !strings.Contains(m["note"].(string), "你自己电脑") || oh["tunnel_command"] != hint.TunnelCommand {
+		t.Fatalf("json %v", m)
+	}
+	// A browser opened here: the user sits at this machine, nothing more.
+	code, out, _ = h.runOpen(context.Background(), func(a *app) {
+		a.openURL = func(u string) error { return nil }
+	}, "open", "web")
+	if code != exitOK || strings.Contains(out, "服务器本机的地址") {
+		t.Fatalf("exit %d out %s", code, out)
+	}
+}
+
 func itoaTest(n int) string { return strconv.Itoa(n) }
+
+// On a Linux server with no graphical session the default opener does not
+// start xdg-open (it may be installed and start fine without a display),
+// so the run on the server is not reported as opened.
+func TestOpenBrowserNoDisplayOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only")
+	}
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	if err := openBrowser("http://127.0.0.1:1"); !errors.Is(err, errNoDisplay) {
+		t.Fatalf("err %v", err)
+	}
+}

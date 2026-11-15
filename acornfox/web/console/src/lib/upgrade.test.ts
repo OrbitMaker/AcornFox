@@ -16,8 +16,8 @@ describe('要先升级 AcornFox 才能装', () => {
     expect(needsPlatformText('0.6.0')).toBe('要先把 AcornFox 升级到 0.6.0 才能装')
   })
   it('升级命令是公开的那两条，不带 -y', () => {
-    expect(UPGRADE_CN).toBe('curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash')
-    expect(UPGRADE_GLOBAL).toBe('curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash')
+    expect(UPGRADE_CN).toBe('curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade')
+    expect(UPGRADE_GLOBAL).toBe('curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- upgrade')
   })
   it('两个版本取高的', () => {
     expect(higherVersion('0.6.0', '0.10.0')).toBe('0.10.0')
@@ -34,11 +34,11 @@ describe('要先升级 AcornFox 才能装', () => {
   it('弹窗：配方以服务端给配方算的为准；没给时看要新装的应用，会被复用的不算', () => {
     const r = catalog.recipes[1]
     const na = { ...newApiDetail, needs_platform: '0.6.0' }
-    const he = { ...hermesDetail(true), needs_platform: '0.7.0' }
-    expect(installNeedsPlatform('recipe', [newApiDetail, hermesDetail(true)], { ...r, needs_platform: '0.8.0' })).toBe('0.8.0')
+    const he = { ...hermesDetail, needs_platform: '0.7.0' }
+    expect(installNeedsPlatform('recipe', [newApiDetail, hermesDetail], { ...r, needs_platform: '0.8.0' })).toBe('0.8.0')
     expect(installNeedsPlatform('recipe', [na, he], r)).toBe('0.7.0')
     expect(installNeedsPlatform('recipe', [na, { ...he, installed: ['hermes-agent'] }], r)).toBe('0.6.0')
-    expect(installNeedsPlatform('recipe', [newApiDetail, hermesDetail(true)], r)).toBe('')
+    expect(installNeedsPlatform('recipe', [newApiDetail, hermesDetail], r)).toBe('')
   })
   it('哪些失败要给升级命令：只看错误里带没带 needs_platform，不看编号和说明里的字', () => {
     // 任务视图里的 fault

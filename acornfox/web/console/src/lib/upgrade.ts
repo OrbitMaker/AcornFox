@@ -2,8 +2,8 @@
 import type { AppDetail, Recipe } from './types'
 
 // 升级命令和 README、Skill 里公开的一致（管道运行就视为同意，不用 -y）。设置的“升级”分区和应用中心的提示共用。
-export const UPGRADE_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash'
-export const UPGRADE_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash'
+export const UPGRADE_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade'
+export const UPGRADE_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- upgrade'
 
 // needsPlatform：这个应用或配方要先把 AcornFox 升到哪个版本；不用升级（空串）或旧服务端没给这一项时是 ''。
 export function needsPlatform(x: { needs_platform?: string } | null | undefined): string {

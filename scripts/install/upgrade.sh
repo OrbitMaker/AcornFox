@@ -3,8 +3,8 @@
 # AcornFox 升级脚本
 # 用途: 升级已安装的 AcornFox 服务器端
 #
-# 用法（国内）: curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash
-# 用法（海外）: curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash
+# 用法（国内）: curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade
+# 用法（海外）: curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- upgrade
 # 确认规则: 在终端里直接运行（sudo bash upgrade.sh）会问一次“确认升级”；通过管道运行
 # （curl … | sudo bash，包括 AI 工作台代为执行）时没法问，运行这条命令就视为同意，
 # 开头先打印将要做的事。-y 在两种方式下都跳过询问。已是最新版本时，管道运行直接退出
@@ -16,13 +16,16 @@
 # 新版本的服务起不来、或者升级中途意外出错时，脚本用这份备份自动恢复到升级前：程序和数据库
 # 都换回原来的，等于没升上。
 #
-# 应用会不会断：升级不停应用容器。从 v0.3.x 升级时，网关 Caddy 从宿主机换到容器，应用网址
-# 会断几秒（实测 2.5～3 秒；升级没成功、恢复到升级前时换回宿主机，也会断几秒）；v0.4.0 起的
-# 版本之间升级一般不断，新版本换了网关镜像或设置、要重建网关容器时也会断几秒。
+# 应用会不会断：升级不停应用容器。新版本换了入口镜像（入口代理容器 acornfox-edge）时，新入口
+# 先在原来的入口旁边起来，健康了才平稳停掉原来的（先停不删），新建的连接不断；已经连着的长连接
+# 会被关一次，超过 8 秒的请求和 WebSocket 会断一次。新入口没起来时原来的入口一直在服务，按升级
+# 失败自动恢复。升级没成功、恢复到升级前时，先删新入口再起原来的，应用会打不开约 1 秒。
+# 现在装的是 v0.3.x 时不能直接升到这个版本（UPGRADE-OLD-01），要先升到 v0.5.1。
 #
 # 故障编号（与 install.sh 共用，脚本停下时打印“故障编号: XXX”）:
-#   INSTALL-PORT-01  AcornFox 自己要用的本机端口（18800、18801、18808）被别的程序占用
+#   INSTALL-PORT-01  AcornFox 自己要用的本机端口（18800、18801、18807）被别的程序占用
 #   INSTALL-CLOUD-01 ACORNFOX_CLOUD_OVERRIDE 的值不认识
+#   UPGRADE-OLD-01   现在装的是 v0.3.x，要先升到 v0.5.1；没停服务、没改动任何东西
 #   UPGRADE-DOWN-01  要装的版本比当前旧（降级），不支持；没停服务、没改动任何东西
 #   UPGRADE-ROLLBACK-01 用了 --rollback：不支持回到旧版本；没停服务、没改动任何东西
 #   UPGRADE-BACKUP-01 停服务后备份程序或数据库失败，没有升级；已重新启动原来的服务
@@ -30,6 +33,9 @@
 #   UPGRADE-FAIL-02  新版本的服务起不来，已自动恢复到升级前
 #   UPGRADE-FAIL-03  升级中途意外出错（或被中断），已自动恢复到升级前
 #   UPGRADE-RESTORE-01 恢复到升级前时文件没能换回去，或换回去之后服务还是起不来，要人看日志处理
+#   EDGE-02          新版本要的入口镜像下载、校验或导入没成功；在停服务之前停下，什么都没改
+#   EDGE-05          新入口容器没起来（原来的入口一直在服务），已自动恢复到升级前
+#   EDGE-06          恢复到升级前时没能换回原来的入口容器，要按故障条目里的手工步骤处理
 #
 # 兜底和恢复的过程另记一份到 /var/log/acornfox-upgrade.log（SSH 断开时只写在这里）。
 
@@ -192,8 +198,8 @@ show_help() {
 AcornFox 升级脚本（Linux 服务器）
 
 用法:
-    curl -fsSL ${SCRIPT_URL_GITEE}/upgrade.sh | sudo bash     （国内）
-    curl -fsSL ${SCRIPT_URL_GITHUB}/upgrade.sh | sudo bash   （海外）
+    curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- upgrade     （国内）
+    curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- upgrade   （海外）
     curl -fsSL <上面任一地址> | sudo bash -s -- [选项]
     sudo bash upgrade.sh [选项]
 
@@ -216,11 +222,11 @@ AcornFox 升级脚本（Linux 服务器）
     （保留最近 5 份）→ 数据库迁移 → 换上新程序 /usr/local/bin/acornfox → 启动服务。
     数据库迁移失败、新版本的服务起不来、或者中途出错时，用这份备份自动恢复到升级前：
     程序和数据库都换回原来的，等于没升上。运行中的应用容器不停。升级期间命令行和控制台
-    暂时连不上。从 v0.3.x 升级时，网关 Caddy 从宿主机换到容器，应用网址会断几秒；
-    v0.4.0 起的版本之间升级一般不断，要重建网关容器时也会断几秒。
+    暂时连不上。新版本换了入口镜像时，新入口先在原来的入口旁边起来，健康了才停掉原来的，
+    新建的连接不断（已连着的长连接会被关一次）。现在装的是 v0.3.x 时要先升到 v0.5.1。
 
 例子:
-    curl -fsSL ${SCRIPT_URL_GITEE}/upgrade.sh | sudo bash -s -- --version v0.5.0
+    curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- upgrade --version v0.5.0
         升级到指定版本（必须比现在的版本新）
     sudo bash upgrade.sh --binary ./acornfox -y
         用本地的程序升级，不下载（测试候选版本用）
@@ -229,6 +235,8 @@ AcornFox 升级脚本（Linux 服务器）
     -y, --yes          不询问，直接升级（同一版本也重装）
     --version V        升级到指定版本（默认 latest）；比当前旧的版本会被拒绝
     --binary PATH      使用本地 acornfox 二进制文件，不下载（用于测试候选版本）
+    --edge-package PATH  使用本地的入口包 acornfox-edge_<入口版本>_linux_<架构>.tar.gz，不下载
+                       （用于测试；配 --binary 时也可以把它放在程序文件旁边）
     -h, --help         显示此帮助信息
 
 环境变量:
@@ -254,8 +262,11 @@ parse_args() {
             --binary)
                 [[ $# -ge 2 ]] || error_exit "--binary 需要一个本地文件路径"
                 LOCAL_BINARY="$2"; shift 2 ;;
+            --edge-package)
+                [[ $# -ge 2 ]] || error_exit "--edge-package 需要一个本地文件路径"
+                EDGE_PACKAGE="$2"; shift 2 ;;
             -h|--help) show_help; exit 0 ;;
-            *) error_exit "未知参数: $1（可用：-y、--version V、--binary PATH、--help）" ;;
+            *) error_exit "未知参数: $1（可用：-y、--version V、--binary PATH、--edge-package PATH、--help）" ;;
         esac
     done
 }
@@ -441,12 +452,17 @@ github_download() {
 ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 
 # 给人照抄的脚本地址（提示和帮助里打印真实地址，不写占位符）
-SCRIPT_URL_GITEE="https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/scripts/install"
-SCRIPT_URL_GITHUB="https://github.com/${ACORNFOX_REPO}/releases/latest/download"
+GET_URL_GITEE="https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/get.sh"
+GET_URL_GITHUB="https://github.com/${ACORNFOX_REPO}/releases/latest/download/get.sh"
 
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
     local version="$1" asset="$2" out="$3"
+    # 测试或自建镜像：设了 ACORNFOX_RELEASE_BASE 就只从那里取（目录结构 <地址>/releases/download/<版本>/<文件>）
+    if [ -n "${ACORNFOX_RELEASE_BASE:-}" ]; then
+        curl -fsSL --connect-timeout 10 --max-time 600 -o "$out" "${ACORNFOX_RELEASE_BASE%/}/releases/download/${version}/${asset}"
+        return
+    fi
     if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
         log_info "从 Gitee 镜像下载 ${asset}"
         if curl_get "$out" "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}" \
@@ -458,29 +474,52 @@ release_download() {
     github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
 }
 
-# 公开仓库 main 上的脚本可能比最新发行版新（例如 main 已是 0.4.0 的脚本，最新发行版还是 v0.3.1）。
-# 要装的版本早于 SCRIPT_MIN_VERSION 时，改用那个版本发行版里附带的同名脚本，参数原样传过去，
-# 避免新脚本配旧程序（新脚本会把宿主机 Caddy 换成容器，旧程序不认识）。--binary 时不切换。
-SCRIPT_MIN_VERSION="v0.4.0"
+# 版本戳：发行版里的这份脚本在构建时被写成它所属的版本号（scripts/build-release.sh 改下面这一行），
+# 只处理这个版本的程序。仓库里的源码是 dev：没有绑定版本，不能直接拿来用，只在开发、测试时配 --binary。
+# 为什么：脚本和程序各走各的路到用户手里时，新脚本会配上旧程序（2026-11 出过一次）。现在用户入口是 get.sh，
+# 它取的是“要装的那个版本自带的”脚本；这里再把一道关：脚本自己不处理别的版本。
+SCRIPT_VERSION="dev"
+ver_norm() { echo "${1#v}"; }
+
+# enforce_script_version：带版本戳的脚本只升到自己这个版本；源码脚本（dev）没有 --binary 不能用。在改动系统之前检查。
+# 没写 --version（或者是引导脚本替用户选的最新正式版）时记 TARGET_IS_LATEST=true：当前版本不比它旧就说“不用升级”，不算降级。
+TARGET_IS_LATEST=false
+enforce_script_version() {
+    local bv
+    if [ "$SCRIPT_VERSION" = dev ]; then
+        if [ -z "$LOCAL_BINARY" ]; then
+            fault_exit INSTALL-SRC-01 "这是源码仓库里的升级脚本，没有绑定版本，不能直接用来升级。什么都没改。" \
+                "用一行命令升级（它会取和程序同一个版本的升级脚本）:" \
+                "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- upgrade" \
+                "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- upgrade" \
+                "开发、测试时用 --binary 给出本地的程序文件。"
+        fi
+        log_warn "开发模式：用的是源码里的升级脚本和 --binary 给的程序，不检查两者是不是同一个版本"
+        return 0
+    fi
+    if [ "$TARGET_VERSION" = latest ]; then
+        TARGET_VERSION="$SCRIPT_VERSION"; TARGET_IS_LATEST=true
+    elif [ "$(ver_norm "$TARGET_VERSION")" != "$(ver_norm "$SCRIPT_VERSION")" ]; then
+        fault_exit INSTALL-VER-01 "这份升级脚本是 ${SCRIPT_VERSION} 的，只升到 ${SCRIPT_VERSION}；要升到的是 ${TARGET_VERSION}。什么都没改。" \
+            "要升到别的版本，用一行命令并写明版本（它会取那个版本自带的升级脚本）:" \
+            "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- upgrade --version ${TARGET_VERSION}" \
+            "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- upgrade --version ${TARGET_VERSION}"
+    elif [ "${ACORNFOX_GET_DEFAULTED:-}" = 1 ]; then
+        TARGET_IS_LATEST=true
+    fi
+    if [ -n "$LOCAL_BINARY" ] && [ -f "$LOCAL_BINARY" ]; then
+        bv=$({ "$LOCAL_BINARY" version 2>/dev/null || true; } | awk '{print $2}')
+        if [ "$(ver_norm "${bv:-}")" != "$(ver_norm "$SCRIPT_VERSION")" ]; then
+            fault_exit INSTALL-VER-01 "这份升级脚本是 ${SCRIPT_VERSION} 的，--binary 给的程序是 ${bv:-读不出版本}，不是同一个版本。什么都没改。" \
+                "用和脚本同一个发行版里的程序文件；或者用一行命令升级，它取的脚本和程序一定是同一个版本。"
+        fi
+    fi
+}
 
 # version_lt A B：A 早于 B 时返回 0（vX.Y.Z，按 sort -V 比较；0.4.0-dev.N 视为不早于 0.4.0）
 version_lt() {
     [ "$1" = "$2" ] && return 1
     [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | head -1)" = "${1#v}" ]
-}
-
-# follow_release_script 脚本名 版本 参数...：版本早于 SCRIPT_MIN_VERSION 时下载该版本的同名脚本并交给它执行
-follow_release_script() {
-    local name="$1" v="$2" s
-    shift 2
-    [ -n "${ACORNFOX_SCRIPT_FOLLOWED:-}" ] && return 0
-    version_lt "$v" "$SCRIPT_MIN_VERSION" || return 0
-    log_warn "要装的 ${v} 早于本脚本支持的 ${SCRIPT_MIN_VERSION}，改用 ${v} 发行版自带的 ${name}"
-    s=$(mktemp)
-    release_download "$v" "$name" "$s" || error_exit "下载 ${v} 的 ${name} 失败；可以直接运行该版本发行版里的 ${name}"
-    # 老版本脚本里写死的是改名前的旧仓库名；把现在的仓库名传给它
-    export ACORNFOX_REPO ACORNFOX_GITEE_REPO
-    ACORNFOX_SCRIPT_FOLLOWED=1 exec bash "$s" "$@" --version "$v"
 }
 
 # latest_tag：最新版本号。中国大陆先查 Gitee 发行版 API（Gitee 的 releases/latest
@@ -596,6 +635,19 @@ refuse_downgrade() {
         "应用自己的版本可以回退，不受影响：acornfox rollback 应用名。"
 }
 
+# refuse_v03：v0.3.x（网关装在宿主机上的那一代）不能直接升到这个版本，要先升到 v0.5.1。在停服务、改动任何东西之前停下
+refuse_v03() {
+    case "${CURRENT_VERSION#v}" in
+        0.3.*|0.2.*|0.1.*)
+            fault_exit UPGRADE-OLD-01 "现在装的是 ${CURRENT_VERSION}，不能直接升到这个版本。服务没有停，什么都没改。" \
+                "先升到 v0.5.1，再运行一次升级命令升到最新版:" \
+                "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- upgrade --version v0.5.1" \
+                "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- upgrade --version v0.5.1"
+            ;;
+    esac
+    return 0
+}
+
 # check_downgrade 新版本：在下载（或 --binary）之后、停服务之前，按程序自己报的版本号再查一次：
 # 比当前旧就拒绝（--binary 只能在这里查）
 check_downgrade() {
@@ -622,8 +674,8 @@ show_plan() {
     cat << EOF
 将要做的事:
   1. 下载并校验新版本（失败不影响正在运行的服务）
-  2. 停止 acornfox-server、acornfox-runner（应用容器不停。从 v0.3.x 升级时网关 Caddy 从宿主机
-     换到容器，应用网址会断几秒；v0.4.0 起的版本之间一般不断，要重建网关容器时也会断几秒）
+  2. 准备新版本要的入口镜像（失败也不影响正在运行的服务），停止 acornfox-server、acornfox-runner
+     （应用容器不停；新版本换了入口镜像时，新入口在原来的旁边起来、健康了才停掉原来的）
   3. 备份程序和数据库到 /var/lib/acornfox/backups，执行数据库迁移，换上新程序
   4. 启动服务；数据库迁移失败或新版本的服务起不来时，自动恢复到升级前（等于没升上）
 EOF
@@ -651,11 +703,11 @@ refresh_install_env_cloud() {
 
 # ---- 端口预检（与 install.sh 中的同名函数保持一致）----
 # AcornFox 用到的端口：
-#   18800 控制台、18801 公网控制台网关、18808 Caddy 管理网关（都只听本机，被占服务就起不来）
-#   18810-18899 应用端口（Caddy 容器用宿主网络直接监听；被占的端口一旦分给应用，Caddy 整份配置都加载不了）
+#   18800 控制台、18801 公网控制台网关、18807 入口代理的管理口（都只听本机，被占服务就起不来）
+#   18810-18899 应用端口（入口容器用宿主网络直接监听；被占的端口一旦分给应用，入口整份设置都加载不了）
 #   80、443 绑定域名、HTTPS 和公网控制台时才用
 #   18802 局域网控制台：局域网服务器全新安装时默认开，其余情况默认不开（升级不会自动打开）
-# 自己的进程（acornfox、Caddy 容器 acornfox-caddy、v0.3.x 装在宿主机上的 Caddy）占着不算冲突。
+# 自己的进程（acornfox、任何带 acornfox.edge=1 标签的入口容器里的进程）占着不算冲突。
 
 # port_listeners：每行 "端口 进程名 PID"（只看 TCP 监听）
 port_listeners() {
@@ -670,22 +722,21 @@ port_listeners() {
     }'
 }
 
-# port_is_ours 进程名 PID
+# port_is_ours 进程名 PID：acornfox 自己，或带 acornfox.edge=1 标签的入口容器里的进程（按进程的 cgroup 认，
+# 不看进程名；升级时旧版本的入口容器也带这个标签）
+EDGE_IDS_READ=false
+EDGE_CONTAINER_IDS=""
 port_is_ours() {
-    local proc="$1" pid="$2" edge
-    case "$proc" in
-        acornfox) return 0 ;;
-        caddy)
-            edge=$(docker inspect -f '{{.Id}}' acornfox-caddy 2>/dev/null || true)
-            if [ -n "$edge" ] && grep -q "$edge" "/proc/${pid}/cgroup" 2>/dev/null; then
-                return 0
-            fi
-            # v0.3.x 装在宿主机上的 Caddy：安装和升级时会迁移进容器
-            if [ -x /usr/local/bin/acornfox ] && [ "$(systemctl show -p MainPID --value caddy 2>/dev/null)" = "$pid" ]; then
-                return 0
-            fi
-            ;;
-    esac
+    local proc="$1" pid="$2" id
+    [ "$proc" = acornfox ] && return 0
+    [ "$pid" != "-" ] || return 1
+    if ! $EDGE_IDS_READ; then
+        EDGE_IDS_READ=true
+        EDGE_CONTAINER_IDS=$(docker ps -q --no-trunc --filter label=acornfox.edge=1 2>/dev/null || true)
+    fi
+    for id in $EDGE_CONTAINER_IDS; do
+        grep -q "$id" "/proc/${pid}/cgroup" 2>/dev/null && return 0
+    done
     return 1
 }
 
@@ -731,7 +782,7 @@ check_ports() {
         case "$seen" in *" $port "*) continue ;; esac
         port_is_ours "$proc" "$pid" && continue
         case "$port" in
-            18800|18801|18808) core+=("$(port_owner_desc "$port" "$proc" "$pid")") ;;
+            18800|18801|18807) core+=("$(port_owner_desc "$port" "$proc" "$pid")") ;;
             80|443) web+=("$(port_owner_desc "$port" "$proc" "$pid")") ;;
             18802) lan="$(port_owner_desc "$port" "$proc" "$pid")" ;;
             *) if [ "$port" -ge 18810 ] && [ "$port" -le 18899 ]; then
@@ -746,7 +797,7 @@ check_ports() {
     if [ ${#core[@]} -gt 0 ]; then
         fault_exit INSTALL-PORT-01 "AcornFox 自己要用的本机端口被别的程序占用：" \
             "${core[@]}" \
-            "18800（控制台）、18801（公网控制台网关）、18808（网关管理口）被占时 AcornFox 服务起不来，不能跳过。" \
+            "18800（控制台）、18801（公网控制台网关）、18807（入口代理的管理口）被占时 AcornFox 服务起不来，不能跳过。" \
             "处理办法：停掉或改掉占用这些端口的程序（看 PID 对应的服务：ps -fp PID），然后重新运行。"
     fi
     if [ ${#apps[@]} -gt 0 ]; then
@@ -779,8 +830,8 @@ check_ports() {
                 "AcornFox 绑定域名、申请 HTTPS 证书和开公网控制台时要用 80/443。" \
                 "可以共存：应用通过 http://服务器IP:18810 起的端口访问，不需要 80/443。要共存就加 --allow-busy-80-443 重新运行，" \
                 "  做法：把刚才那条安装命令末尾的 | sudo bash 改成 | sudo bash -s -- --allow-busy-80-443（原来已带 -s -- 参数的，把它加在最后），例如:" \
-                "  国内: curl -fsSL ${SCRIPT_URL_GITEE}/install.sh | sudo bash -s -- --allow-busy-80-443" \
-                "  海外: curl -fsSL ${SCRIPT_URL_GITHUB}/install.sh | sudo bash -s -- --allow-busy-80-443" \
+                "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- --allow-busy-80-443" \
+                "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- --allow-busy-80-443" \
                 "  共存时域名请继续在原来的面板（宝塔、1Panel、nginx）里反向代理到 127.0.0.1:应用端口。" \
                 "不需要原来的程序时，停掉它（例如 systemctl disable --now nginx）后重新运行。"
         fi
@@ -926,9 +977,6 @@ fix_layout() {
     getent group acornfox-ipc >/dev/null || groupadd -r acornfox-ipc
     usermod -aG acornfox-ipc acornfox
     usermod -aG acornfox-ipc acornfox-exec
-    if id caddy >/dev/null 2>&1; then
-        usermod -aG acornfox-ipc caddy
-    fi
 
     mkdir -p /var/lib/acornfox/uploads
     chown acornfox:acornfox-ipc /var/lib/acornfox /var/lib/acornfox/uploads
@@ -1011,100 +1059,205 @@ verify_upgrade() {
     fi
 }
 
-# ---- Caddy 改容器（三端架构，2026-11-01；与 install.sh 中同名函数一致）----
-CADDY_VERSION="2.8.4"
+# ---- 入口镜像和入口容器（与 install.sh 中的同名函数保持一致）----
+# 入口代理容器 acornfox-edge 在所有应用前面（听应用端口和 80、443），由 acornfox 建和管。它只用本机镜像
+# acornfox/edge:<入口版本>，从不从镜像仓库拉：镜像随发行版的入口包 acornfox-edge_<入口版本>_linux_<架构>.tar.gz
+# 发布（一份根文件系统），和程序从同一个地方下载、按同一份 SHA256SUMS 校验后 docker import 导入。
+# 入口版本问要装的程序：acornfox version --edge。
+# 入口包从哪来（按顺序）：--edge-package 给的文件；用了 --binary 时它旁边的同名文件；否则发行版。
+# 本机已有这个版本的镜像就不下载。出错报 EDGE-02；导入后核对不过的镜像会删掉，不留半成品。
+EDGE_PACKAGE="${EDGE_PACKAGE:-}"
+EDGE_VERSION=""
+EDGE_IMPORTED=false   # 这次导入了入口镜像（本机原来没有）
 
-# build_caddy_image BIN：用 Caddy 二进制和本机 CA 证书做最小镜像 acornfox/caddy:2.8.4
-# （没有 shell；acornfox 创建容器时写入 Caddyfile 并指定启动命令）
-build_caddy_image() {
-    local bin="$1" root
-    root=$(mktemp -d)
-    mkdir -p "$root/usr/bin" "$root/etc/ssl/certs" "$root/tmp" "$root/data" "$root/config"
-    chmod 1777 "$root/tmp"
-    install -m 0755 "$bin" "$root/usr/bin/caddy"
-    cp /etc/ssl/certs/ca-certificates.crt "$root/etc/ssl/certs/ca-certificates.crt"
-    if tar -C "$root" -c . | docker import \
-        --change 'ENV XDG_CONFIG_HOME=/config' --change 'ENV XDG_DATA_HOME=/data' \
-        --change 'CMD ["/usr/bin/caddy","run","--config","/etc/acornfox/Caddyfile","--adapter","caddyfile"]' \
-        - "acornfox/caddy:${CADDY_VERSION}" >/dev/null; then
-        log_success "Caddy 镜像已就绪: acornfox/caddy:${CADDY_VERSION}"
-    else
-        log_warn "制作 Caddy 镜像失败；acornfox 启动时会改从镜像仓库拉取 caddy:${CADDY_VERSION}-alpine"
-    fi
-    rm -rf "$root"
+# edge_arch：把 ARCH 定成 amd64 或 arm64（下载程序时多半已经定了）
+edge_arch() {
+    case "${ARCH:-$(uname -m)}" in
+        amd64|x86_64) ARCH=amd64 ;;
+        arm64|aarch64) ARCH=arm64 ;;
+        *) fault_exit EDGE-02 "不支持的架构 ${ARCH:-$(uname -m)}，没有对应的入口包" ;;
+    esac
 }
 
-# migrate_host_caddy：把 v0.3.x 装在宿主机上的 Caddy 换成容器。证书和 ACME 账号复制到
-# 数据卷 acornfox-caddy-data（宿主机上的原文件保留），停用并禁止 caddy.service 开机启动，
-# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated；升级没成功、恢复到升级前时据此换回宿主机 Caddy。
-migrate_host_caddy() {
-    [ -f /etc/systemd/system/caddy.service ] || [ -f /lib/systemd/system/caddy.service ] || return 0
-    systemctl is-enabled --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy 2>/dev/null || return 0
-    log_info "把宿主机上的 Caddy 迁移到容器..."
-    local src=/var/lib/caddy/.local/share/caddy vol
-    docker volume create acornfox-caddy-data >/dev/null
-    vol=$(docker volume inspect -f '{{.Mountpoint}}' acornfox-caddy-data)
-    if [ -d "$src" ]; then
-        mkdir -p "$vol/caddy"
-        cp -a "$src/." "$vol/caddy/"
-        log_info "已复制证书和 ACME 账号到数据卷 acornfox-caddy-data（原文件保留在 $src）"
-    fi
-    systemctl disable --now caddy >/dev/null 2>&1 || true
-    mkdir -p /var/lib/acornfox
-    date -u +%FT%TZ > /var/lib/acornfox/.caddy-host-migrated
-    log_success "宿主机 Caddy 已停用（升级没成功时会换回来），之后由容器 acornfox-caddy 接管 80、443 和应用端口"
-}
-
-# wait_caddy_container：等 acornfox 建好 Caddy 容器、管理网关应答（没有令牌时返回 403）
-wait_caddy_container() {
-    local _ code=""
-    for _ in $(seq 1 90); do
-        code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:18808/ 2>/dev/null || true)
-        [ "$code" = "403" ] && break
-        sleep 2
-    done
-    if [ "$code" = "403" ]; then
-        log_success "Caddy 容器 acornfox-caddy 已运行"
-    else
-        log_warn "Caddy 容器还没就绪；查看: docker logs acornfox-caddy；journalctl -u acornfox-server -n 50"
-    fi
-}
-
-# prepare_caddy_container：升级前准备 Caddy 容器要用的镜像，并迁移宿主机 Caddy。
-# 迁移标记同时写进本次备份目录，升级没成功、恢复到升级前时据此换回宿主机 Caddy。
-prepare_caddy_container() {
-    if ! docker image inspect "acornfox/caddy:${CADDY_VERSION}" >/dev/null 2>&1; then
-        if [ -x /usr/bin/caddy ] && /usr/bin/caddy version 2>/dev/null | grep -q "^v${CADDY_VERSION}"; then
-            build_caddy_image /usr/bin/caddy
-        else
-            log_info "宿主机没有 Caddy ${CADDY_VERSION}，acornfox 启动时会从镜像仓库拉取 caddy:${CADDY_VERSION}-alpine"
-        fi
-    fi
-    if [ -f /var/lib/acornfox/.caddy-host-migrated ]; then
+# import_edge_image 程序 发行版本：准备好这个程序要的入口镜像
+import_edge_image() {
+    local bin="$1" version="$2" name pkg image got sums want
+    EDGE_VERSION=$({ "$bin" version --edge 2>/dev/null || true; } | head -n 1)
+    [ -n "$EDGE_VERSION" ] || fault_exit EDGE-02 "读不出程序要用的入口镜像版本（${bin} version --edge 没有输出）" \
+        "程序文件可能不完整：重新下载，或者换用同一个发行版里的程序文件。"
+    edge_arch
+    image="acornfox/edge:${EDGE_VERSION}"
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        log_info "入口镜像已在本机: ${image}"
         return 0
     fi
-    migrate_host_caddy
-    if [ -f /var/lib/acornfox/.caddy-host-migrated ]; then
-        local backup
-        backup="${BACKUP_PATH:-$(last_backup)}"
-        [ -n "$backup" ] && [ -d "$backup" ] && cp /var/lib/acornfox/.caddy-host-migrated "$backup/caddy-host-migrated"
+    name="acornfox-edge_${EDGE_VERSION}_linux_${ARCH}.tar.gz"
+    if [ -n "$EDGE_PACKAGE" ]; then
+        pkg="$EDGE_PACKAGE"
+        [ -f "$pkg" ] || fault_exit EDGE-02 "--edge-package 给的文件不存在: ${pkg}"
+        log_info "使用本地入口包: ${pkg}"
+    elif [ -n "$LOCAL_BINARY" ]; then
+        pkg="$(dirname "$LOCAL_BINARY")/${name}"
+        [ -f "$pkg" ] || fault_exit EDGE-02 "用了 --binary，但程序文件旁边没有入口包 ${name}，本机也没有入口镜像 ${image}" \
+            "把同一个发行版里的 ${name} 放在程序文件旁边，或者用 --edge-package 文件 指定。"
+        log_info "使用本地入口包: ${pkg}"
+    else
+        pkg="${AFX_WORK:?}/${name}"
+        log_info "下载入口包 ${name}"
+        release_download "$version" "$name" "$pkg" \
+            || fault_exit EDGE-02 "下载入口包 ${name} 失败" "可设置 ACORNFOX_GITHUB_PROXY 指定可用的 GitHub 加速地址后重试。"
+        sums="${AFX_WORK:?}/SHA256SUMS.edge"
+        release_download "$version" SHA256SUMS "$sums" || fault_exit EDGE-02 "下载 SHA256SUMS 失败，无法校验 ${name}"
+        want=$(awk -v a="$name" '$2 == a || $2 == "*" a {print $1; exit}' "$sums")
+        rm -f "${AFX_WORK:?}/SHA256SUMS.edge"
+        [ -n "$want" ] || fault_exit EDGE-02 "SHA256SUMS 里没有 ${name}"
+        if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$pkg" | awk '{print $1}'); else got=$(shasum -a 256 "$pkg" | awk '{print $1}'); fi
+        if [ "$got" != "$want" ]; then
+            rm -f "${AFX_WORK:?}/${name:?}"
+            fault_exit EDGE-02 "入口包 ${name} SHA256 校验失败：期望 ${want}，实际 ${got}"
+        fi
+        log_success "SHA256 校验通过: ${name}"
+    fi
+    log_info "导入入口镜像 ${image}..."
+    if ! docker import "$pkg" "$image" >/dev/null; then
+        docker image rm -f "$image" >/dev/null 2>&1 || true
+        fault_exit EDGE-02 "导入入口镜像 ${image} 失败（上面一行是 Docker 的原因；常见的是磁盘满了：df -h /var/lib/docker）"
+    fi
+    # 核对：镜像里的适配程序能运行，报的入口版本对（不对就删掉，不留半成品）
+    got=$({ docker run --rm --network none --entrypoint /usr/bin/afx-edge "$image" version 2>/dev/null || true; } | head -n 1)
+    if [ "$got" != "$EDGE_VERSION" ]; then
+        docker image rm -f "$image" >/dev/null 2>&1 || true
+        fault_exit EDGE-02 "导入的入口镜像不对：里面的适配程序报 ${got:-没有输出}，应为 ${EDGE_VERSION}。已删掉这个镜像" \
+            "入口包和程序不是同一个发行版的，或者文件损坏：换用同一个发行版里的入口包。"
+    fi
+    EDGE_IMPORTED=true
+    log_success "入口镜像已就绪: ${image}"
+}
+
+# edge_health：在入口容器里运行它自己的健康检查（设置已装上、版本号对、端口都在听）；通过返回 0，输出它的话
+edge_health() {
+    docker exec acornfox-edge /usr/bin/afx-edge health 2>&1
+}
+
+# remove_replaced_edge：按切换记录删掉被换下来、已经停着的旧入口容器（按容器编号，不按名字）。
+# 切换记录有两份：数据目录里的 edge-switch.json（old_id），和新入口容器自己的标签 acornfox.edge.replaced。
+# 只在现在的入口容器 acornfox-edge 正在运行时才删（新入口没起来时旧的是唯一能换回去的）；正在运行的、
+# 就是现在入口的那个，都不删。旧容器挂的卷里，新入口还在用的（证书卷）不删；新入口不用的（旧的设置卷）
+# 跟着删掉，不留一个没有容器用的卷。
+remove_replaced_edge() {
+    local cur ids id state keep vols v
+    cur=$(docker inspect -f '{{if .State.Running}}{{.Id}}{{end}}' acornfox-edge 2>/dev/null || true)
+    [ -n "$cur" ] || return 0
+    keep=" $(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cur" 2>/dev/null || true) "
+    ids=$( { sed -n 's/.*"old_id": *"\([0-9a-f]*\)".*/\1/p' /var/lib/acornfox/edge-switch.json 2>/dev/null
+             docker inspect -f '{{index .Config.Labels "acornfox.edge.replaced"}}' "$cur" 2>/dev/null; } | grep -E '^[0-9a-f]{12,64}$' | sort -u || true)
+    for id in $ids; do
+        [ "$id" != "$cur" ] || continue
+        state=$(docker inspect -f '{{.State.Running}} {{index .Config.Labels "acornfox.edge"}}' "$id" 2>/dev/null || true)
+        case "$state" in
+            "false 1")
+                vols=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$id" 2>/dev/null || true)
+                if docker rm "$id" >/dev/null 2>&1; then
+                    log_info "已删掉被换下来的旧入口容器 ${id:0:12}"
+                    for v in $vols; do
+                        case "$keep" in *" ${v} "*) continue ;; esac
+                        # 还有别的容器挂着时 docker volume rm 会拒绝，不强删
+                        docker volume rm "$v" >/dev/null 2>&1 && log_info "已删掉旧入口容器留下、新入口不用的卷 ${v}"
+                    done
+                else
+                    log_warn "没能删掉被换下来的旧入口容器 ${id:0:12}（不影响使用，可以手动 sudo docker rm ${id:0:12}）"
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
+# record_edge_before 备份目录：记下升级前在运行的入口容器编号（edge-before.txt），恢复到升级前时据此换回原来的入口；
+# 这次导入了入口镜像时也记下（edge-imported.txt），恢复时删掉它，下次升级重新从入口包导入，不沿用这次的
+record_edge_before() {
+    local backup="$1"
+    [ -n "$backup" ] && [ -d "$backup" ] || return 0
+    { docker ps -q --no-trunc --filter label=acornfox.edge=1 --filter status=running 2>/dev/null || true; } > "${backup}/edge-before.txt"
+    if $EDGE_IMPORTED; then
+        echo "acornfox/edge:${EDGE_VERSION}" > "${backup}/edge-imported.txt"
     fi
 }
 
-# restore_host_caddy BACKUP：从 v0.3.x 升级没成功、恢复到升级前时，删掉 Caddy 容器、换回宿主机 Caddy
-restore_host_caddy() {
-    local backup="$1"
-    [ -f "$backup/caddy-host-migrated" ] || return 0
-    log_info "恢复宿主机 Caddy（网关从容器换回宿主机，应用网址会断几秒）..."
-    docker rm -f acornfox-caddy >/dev/null 2>&1 || true
-    systemctl enable --now caddy >/dev/null 2>&1 || log_warn "宿主机 Caddy 没能启动：journalctl -u caddy -n 50"
-    rm -f /var/lib/acornfox/.caddy-host-migrated
-    local _
-    for _ in $(seq 1 10); do
-        [ -S /run/acornfox/caddy-admin.sock ] && break
+# EDGE_SWITCH_WAIT：新版本起来以后最多等几秒确认入口已经换好（默认 120；新入口自己的健康检查最多等 30 秒，
+# 不健康时新程序每 5 秒重试一次）
+EDGE_SWITCH_WAIT="${EDGE_SWITCH_WAIT:-120}"
+
+# verify_edge_switched：确认入口是新版本要的那个：容器 acornfox-edge 在运行、标签里的入口版本是 EDGE_VERSION、
+# 在容器里跑它自己的健康检查通过。通过就往下走，返回 0；等满 EDGE_SWITCH_WAIT 秒还不行返回 1（按升级失败处理）。
+verify_edge_switched() {
+    local start v out=""
+    [ -n "$EDGE_VERSION" ] || return 0
+    log_info "确认入口已经换成新版本的入口容器（acornfox/edge:${EDGE_VERSION}）..."
+    start=$(date +%s)
+    while :; do
+        v=$(docker inspect -f '{{index .Config.Labels "acornfox.edge.version"}} {{.State.Running}}' acornfox-edge 2>/dev/null || true)
+        if [ "$v" = "${EDGE_VERSION} true" ] && out=$(edge_health); then
+            log_success "入口已切换：${out}"
+            return 0
+        fi
+        if [ $(( $(date +%s) - start )) -ge "$EDGE_SWITCH_WAIT" ]; then
+            log_error "入口没有换成新的（${EDGE_SWITCH_WAIT} 秒内没等到）：${out:-入口容器 ${v:-不存在}}"
+            command -v journalctl >/dev/null 2>&1 && journalctl -u acornfox-server -n 20 --no-pager 2>/dev/null | grep -i edge | tail -n 5 | sed 's/^/    /' || true
+            return 1
+        fi
         sleep 1
     done
-    log_success "宿主机 Caddy 已恢复（数据卷 acornfox-caddy-data 保留，可手动删除）"
+}
+
+# restore_edge 备份目录：恢复到升级前时把入口换回升级前那个。新旧不能同时在跑（旧程序推设置会落到新容器上），
+# 所以先停掉并删掉升级后新建的入口容器（不在 edge-before.txt 里的），再 docker start 原来那个停着的入口容器。
+# 原来的入口起来是空的，旧程序启动后会马上推一次设置。成功返回 0；换不回去返回 1（报 EDGE-06）。
+restore_edge() {
+    local backup="$1" before id name failed=""
+    [ -f "${backup}/edge-before.txt" ] || return 0
+    command -v docker >/dev/null 2>&1 || return 0
+    before=" $(tr '\n' ' ' < "${backup}/edge-before.txt") "
+    [ -n "${before// /}" ] || return 0
+    for id in $(docker ps -aq --no-trunc --filter label=acornfox.edge=1 2>/dev/null || true); do
+        case "$before" in *" ${id} "*) continue ;; esac
+        if docker rm -f "$id" >/dev/null 2>&1; then
+            log_info "已删掉升级时新建的入口容器 ${id:0:12}"
+        else
+            failed="${failed} 删不掉新入口容器 ${id:0:12}"
+        fi
+    done
+    for id in $before; do
+        name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null || true)
+        if [ -z "$name" ]; then
+            failed="${failed} 原来的入口容器 ${id:0:12} 不见了"
+            continue
+        fi
+        case "$name" in
+            /acornfox-edge-old-*) docker rename "$id" acornfox-edge >/dev/null 2>&1 || failed="${failed} 原来的入口容器 ${id:0:12} 改不回名字" ;;
+        esac
+        if [ "$(docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null || true)" != true ]; then
+            if docker start "$id" >/dev/null 2>&1; then
+                log_success "原来的入口容器 ${name#/} 已重新启动"
+            else
+                failed="${failed} 原来的入口容器 ${id:0:12} 起不来"
+            fi
+        fi
+    done
+    if [ -n "$failed" ]; then
+        log_error "没能换回原来的入口容器:${failed}"
+        return 1
+    fi
+    # 这次升级写的切换记录已经作废（新入口删了、原来的又在服务）：删掉，免得以后按它删错容器
+    rm -f /var/lib/acornfox/edge-switch.json
+    # 这次升级导入的入口镜像也删掉（没有容器在用时）：它可能就是新入口起不来的原因，下次升级重新从入口包导入
+    if [ -f "${backup}/edge-imported.txt" ]; then
+        id=$(head -n 1 "${backup}/edge-imported.txt")
+        if [ -n "$id" ] && docker image rm "$id" >/dev/null 2>&1; then
+            log_info "已删掉这次升级导入的入口镜像 ${id}"
+        fi
+    fi
+    return 0
 }
 
 # 数据目录里记下这份数据库最后是哪个版本的程序迁移过的（与 install.sh 中的同名变量和函数一致）。
@@ -1142,7 +1295,7 @@ restore_file() {
 }
 
 # restore_backup 备份目录：升级没成功时，用本次升级前刚做的备份恢复到升级前（程序、数据库，以及
-# 从 v0.3.x 升级时换掉的宿主机 Caddy），再启动服务。只在本脚本自己的升级失败时调用，不对外提供
+# 升级时换下来的入口容器），再启动服务。只在本脚本自己的升级失败时调用，不对外提供
 # （没有 --rollback）。恢复后服务起不来、或者文件没能换回去时报 UPGRADE-RESTORE-01。
 # 恢复过程不能被打断（restore_log_start 屏蔽 Ctrl+C、kill、SSH 断开），每个文件原子替换；
 # 结束时一定以 upgrade_failed 或 fault_exit 退出，所以不用再恢复原来的信号处理。
@@ -1188,13 +1341,21 @@ restore_backup() {
             "升级前的备份在 ${backup}，不要删。处理好磁盘后把这段输出反馈给维护者；不要自己往回拷贝备份里的文件，也不要重装。"
     fi
 
-    restore_host_caddy "$backup"
-
     systemctl start acornfox-runner
     sleep 2
+    # 换回原来的入口放在启动后台服务的紧前一步：原来的入口起来是空的，要等旧程序推一次设置，
+    # 中间不插别的耗时步骤，应用打不开的时间就只是旧程序起来要的那一点
+    local edge_failed=false
+    restore_edge "$backup" || edge_failed=true
     systemctl start acornfox-server
     sleep 3
 
+    if $edge_failed; then
+        fault_exit EDGE-06 "已把程序和数据库换回升级前的，但没能换回原来的入口容器，应用网址可能打不开" \
+            "按故障条目里的手工步骤处理（acornfox faults EDGE-06）：cat /var/lib/acornfox/edge-switch.json 看 old_id 和 new_id，" \
+            "  sudo docker rm -f <new_id>，再 sudo docker start <old_id>，最后 sudo systemctl restart acornfox-server。" \
+            "升级前的备份在 ${backup}，不要删。做完仍打不开时，把这段输出反馈给维护者。"
+    fi
     if systemctl is-active --quiet acornfox-server && systemctl is-active --quiet acornfox-runner; then
         log_success "已恢复到升级前，服务照常运行，现在的版本: $(current_version_now)"
         return 0
@@ -1273,7 +1434,7 @@ ${BLUE}版本:${NC}
 ${BLUE}服务状态:${NC}
   • acornfox-server: $(systemctl is-active acornfox-server)
   • acornfox-runner: $(systemctl is-active acornfox-runner)
-  • Caddy 容器 acornfox-caddy: $(docker inspect -f '{{.State.Status}}' acornfox-caddy 2>/dev/null || echo 未创建)
+  • 入口容器 acornfox-edge: $(docker inspect -f '{{.State.Status}}' acornfox-edge 2>/dev/null || echo 未创建)
 
 ${BLUE}升级前的备份（升级没成功时自动恢复用，保留最近 5 份）:${NC}
   $(last_backup)
@@ -1298,22 +1459,19 @@ main() {
     if $WANT_ROLLBACK; then
         refuse_rollback
     fi
+    enforce_script_version
 
     check_root
     $ASSUME_YES || [ -t 0 ] || PIPE_CONSENT=true
     show_plan
     check_installed
+    refuse_v03
 
     if [ -z "$LOCAL_BINARY" ]; then
         setup_github_proxies
-        TARGET_IS_LATEST=false
-        if [ "$TARGET_VERSION" = "latest" ]; then
-            TARGET_IS_LATEST=true
-            TARGET_VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 使用本地文件"
-            log_info "最新版本: $TARGET_VERSION"
-        fi
-        # 只能升级：要装的版本比当前旧时，不论有没有 -y，都在交给旧版本脚本、下载之前停下。
-        # 最新发行版比当前旧（例如装的是还没发布的预发布版）时不算降级请求，直接说不用升级
+        # 到这里脚本一定带版本戳，要升到的就是它自己的版本（enforce_script_version 保证）。
+        # 只能升级：要升到的版本比当前旧时，不论有没有 -y，都在下载之前停下。
+        # 没指定版本、当前又不比它旧（例如装的是更新的预发布版）时不算降级请求，直接说不用升级
         if version_older "$TARGET_VERSION" "$CURRENT_VERSION"; then
             if $TARGET_IS_LATEST; then
                 log_success "当前版本 ${CURRENT_VERSION} 不比最新发行版 ${TARGET_VERSION} 旧，不用升级"
@@ -1324,12 +1482,6 @@ main() {
         if $PIPE_CONSENT; then
             pipe_version_gate "$TARGET_VERSION"
         fi
-        # 老版本的 upgrade.sh 在管道里不带 -y 会直接退出；已视为同意（且上面确认了是升级）时替它补上 -y
-        if $PIPE_CONSENT; then
-            follow_release_script upgrade.sh "$TARGET_VERSION" "$@" -y
-        else
-            follow_release_script upgrade.sh "$TARGET_VERSION" "$@"
-        fi
     fi
 
     if ! confirm "确认升级 AcornFox?"; then
@@ -1339,12 +1491,15 @@ main() {
 
     # 升级流程：先下载（失败不影响运行中的服务），再停服务、备份、迁移
     download_new_version
+    # 新版本要的入口镜像在停服务之前就导入：失败就停下（EDGE-02），什么都没改
+    import_edge_image "$NEW_BIN" "${VERSION:-$TARGET_VERSION}"
     # 停服务前检查端口：本机端口被别的程序占着时新版本起不来，现在停下不影响运行中的服务
     check_ports upgrade
     refresh_install_env_cloud
     UPGRADE_PHASE=stopped
     stop_services
     backup_current
+    record_edge_before "$BACKUP_PATH"
     # 从这里起程序、数据库、目录权限、网关都可能被改：意外退出时 on_exit 用备份恢复到升级前
     UPGRADE_PHASE=changing
     fix_layout
@@ -1357,7 +1512,6 @@ main() {
     fi
 
     replace_binary
-    prepare_caddy_container
 
     # 尝试启动服务
     if ! start_services; then
@@ -1366,11 +1520,15 @@ main() {
         restore_backup "$BACKUP_PATH"
         upgrade_failed UPGRADE-FAIL-02 "新版本 ${NEW_VERSION} 的服务起不来"
     fi
-    # 新版本已经起来：之后的问题（网关容器没就绪等）只提示，不再恢复到升级前
+    # 新版本换了入口镜像时，确认入口已经换成新的（新入口没起来时原来的一直在服务）；不行就恢复到升级前
+    if ! verify_edge_switched; then
+        restore_backup "$BACKUP_PATH"
+        upgrade_failed EDGE-05 "新版本 ${NEW_VERSION} 的入口容器没起来（原来的入口一直在服务）"
+    fi
+    # 新版本已经起来、入口也换好了：之后的问题只提示，不再恢复到升级前
     UPGRADE_PHASE=""
     record_installed_version
-
-    wait_caddy_container
+    remove_replaced_edge
 
     # 验证升级
     if ! verify_upgrade; then

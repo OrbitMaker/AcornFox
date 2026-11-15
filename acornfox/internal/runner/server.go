@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -44,6 +45,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+PathPing, s.handlePing)
 	s.mux.HandleFunc("POST "+PathBuild, s.handleBuild)
 	s.mux.HandleFunc("POST "+PathImagePull, s.handleImagePull)
+	s.mux.HandleFunc("POST "+PathImagePullStatus, s.handlePullStatus)
 	s.mux.HandleFunc("POST "+PathImageInspect, s.handleImageInspect)
 	s.mux.HandleFunc("POST "+PathImageList, s.handleImageList)
 	s.mux.HandleFunc("POST "+PathImageRemove, s.handleImageRemove)
@@ -67,6 +69,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathImageAdopt, s.handleImageAdopt)
 	s.mux.HandleFunc("POST "+PathImageLoad, s.handleImageLoad)
 	s.mux.HandleFunc("POST "+PathVolumeWrite, s.handleVolumeWrite)
+	s.mux.HandleFunc("POST "+PathContainerExec, s.handleContainerExec)
 }
 
 // ---- response helpers ----
@@ -272,7 +275,14 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "ref is required")
 		return
 	}
-	resp, err := s.api.PullImage(r.Context(), req.App, req.DeploymentID, req.Ref)
+	ctx := r.Context()
+	if !req.Deadline.IsZero() {
+		// The caller stops waiting then; PullImage stops a little earlier.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, req.Deadline)
+		defer cancel()
+	}
+	resp, err := s.api.PullImage(ctx, req.App, req.DeploymentID, req.Ref)
 	if err != nil {
 		writeAPIError(w, err)
 		return

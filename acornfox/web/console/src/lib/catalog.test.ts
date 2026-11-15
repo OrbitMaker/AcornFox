@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
-  abbr, buildRequest, categoryTabs, changedPlatform, checkForm, cliCommand, defaultModel, faultForAI, filterApps, freeMB, groupSteps, installingApps, memoryCheck,
+  abbr, buildRequest, categoryTabs, changedPlatform, checkForm, cliCommand, faultForAI, filterApps, freeMB, groupSteps, installingApps, memoryCheck,
   newInstallForm, recipeMemory, taskProgress, appKey, catalogAppOf, disconnectedSources, filterSource, findApp, sourceId, sourceTabs,
+  FORMER_CODE, formerNote, isFormerFault, storeEmpty,
 } from './catalog'
-import { catalog, hermesDetail, newApiDetail, resources, task } from '@/test/fixtures'
+import { ApiError } from './api'
+import { FORMER_NOTE, catalog, catalogFormer, hermesDetail, hermesWithModel, newApiDetail, recipeDetailsWithModel, resources, task } from '@/test/fixtures'
 import type { AppDetail, PlatformVarView } from './types'
 
 describe('分类和搜索', () => {
@@ -46,7 +48,6 @@ describe('内存检查', () => {
 describe('安装表单', () => {
   it('New API：什么都不填，请求只有应用名，命令是 acornfox install new-api', () => {
     const f = newInstallForm('app', 'new-api', [newApiDetail], null)
-    expect(f.llm).toEqual([])
     expect(f.plain.map((p) => p.key)).toEqual(['admin_username', 'admin_password'])
     expect(checkForm(f)).toEqual([])
     expect(buildRequest(f)).toEqual({ app: 'new-api' })
@@ -65,46 +66,27 @@ describe('安装表单', () => {
     f.plain[1].value = 'short'
     expect(checkForm(f).map((p) => p.key)).toEqual(['admin_username', 'admin_password'])
   })
-  it('Hermes：本机有 New API 时默认用它', () => {
-    const f = newInstallForm('app', 'hermes-agent', [hermesDetail(true)], null)
-    expect(f.llm[0].source).toBe('local_gateway')
-    expect(buildRequest(f)).toEqual({ app: 'hermes-agent', params: { llm: { source: 'local_gateway', app: 'new-api' } } })
-    expect(cliCommand(f)).toBe('acornfox install hermes-agent --llm local')
-  })
-  it('Hermes：没有 New API 时默认自己的 Key，三项都要填，Key 不进命令行', () => {
-    const f = newInstallForm('app', 'hermes-agent', [hermesDetail(false)], null)
-    expect(f.llm[0].source).toBe('own')
-    expect(checkForm(f).length).toBe(3)
-    f.llm[0] = { ...f.llm[0], baseURL: 'https://api.deepseek.com/v1', apiKey: 'sk-abc', model: 'deepseek-chat' }
+  it('需要服务的应用：服务不是表单里的设置项，什么都不填时请求只有应用名，命令里也没有别的写法', () => {
+    const f = newInstallForm('app', 'hermes-agent', [hermesDetail], null)
+    expect(f.plain).toEqual([])
     expect(checkForm(f)).toEqual([])
-    expect(buildRequest(f).params).toEqual({ llm: { source: 'own', base_url: 'https://api.deepseek.com/v1', api_key: 'sk-abc', model: 'deepseek-chat' } })
-    const cmd = cliCommand(f)
-    expect(cmd).toContain('--llm own')
-    expect(cmd).toContain('--set llm.api_key=<你的 Key>')
-    expect(cmd).not.toContain('sk-abc')
+    expect(buildRequest(f)).toEqual({ app: 'hermes-agent' })
+    expect(cliCommand(f)).toBe('acornfox install hermes-agent')
   })
-  it('平台 Key 和本机没网关时不能提交', () => {
-    const f = newInstallForm('app', 'hermes-agent', [hermesDetail(false)], null)
-    f.llm[0].source = 'platform'
-    expect(checkForm(f)[0].message).toContain('即将开放')
-    f.llm[0].source = 'local_gateway'
-    expect(checkForm(f)[0].message).toBe('先装 New API')
-  })
-  it('配方 Hermes + New API：Hermes 的模型固定连本机 New API，参数带应用前缀', () => {
+  it('配方：参数带应用前缀，请求和命令行都只写配方名和填了的设置', () => {
     const r = catalog.recipes[1]
-    const f = newInstallForm('recipe', r.id, [newApiDetail, hermesDetail(false)], r)
-    expect(f.llm[0]).toMatchObject({ key: 'hermes-agent.llm', fixed: 'new-api' })
+    const f = newInstallForm('recipe', r.id, [newApiDetail, hermesDetail], r)
     expect(f.plain.map((p) => p.key)).toEqual(['new-api.admin_username', 'new-api.admin_password'])
     expect(checkForm(f)).toEqual([])
     expect(buildRequest(f)).toEqual({ recipe: 'hermes-with-new-api' })
     expect(cliCommand(f)).toBe('acornfox install --recipe hermes-with-new-api')
-    f.llm[0].model = 'qwen-max'
-    expect(buildRequest(f).params).toEqual({ 'hermes-agent.llm': { source: 'local_gateway', model: 'qwen-max' } })
-    expect(cliCommand(f)).toBe('acornfox install --recipe hermes-with-new-api --llm local --set hermes-agent.llm.model=qwen-max')
+    f.plain[0].value = 'root'
+    expect(buildRequest(f).params).toEqual({ 'new-api.admin_username': 'root' })
+    expect(cliCommand(f)).toBe('acornfox install --recipe hermes-with-new-api --set new-api.admin_username=root')
   })
   it('配方里已经装过的应用不再填参数', () => {
     const r = catalog.recipes[1]
-    const f = newInstallForm('recipe', r.id, [{ ...newApiDetail, installed: ['new-api'] }, hermesDetail(true)], r)
+    const f = newInstallForm('recipe', r.id, [{ ...newApiDetail, installed: ['new-api'] }, hermesDetail], r)
     expect(f.plain).toEqual([])
   })
 })
@@ -178,31 +160,28 @@ describe('平台变量', () => {
     name, label: name, standalone: '本机', cloud: '集群', user_can_set: canSet, value, available: true,
   })
   const withPlatform = (d: AppDetail, vars: PlatformVarView[]): AppDetail => ({ ...d, platform: vars })
-  const hermes = () => withPlatform(hermesDetail(true), [
-    pv('llm.model.chat', 'qwen-plus', true), pv('mirror.pypi', 'https://mirrors.aliyun.com/pypi/simple/', true), pv('tz', 'Asia/Shanghai', true),
+  const hermes = () => withPlatform(hermesDetail, [
+    pv('mirror.npm', 'https://registry.npmmirror.com/', true), pv('mirror.pypi', 'https://mirrors.aliyun.com/pypi/simple/', true), pv('tz', 'Asia/Shanghai', true),
   ])
-  it('不改就不发，命令也不多写；默认模型取平台的', () => {
+  it('不改就不发，命令也不多写', () => {
     const f = newInstallForm('app', 'hermes-agent', [hermes()], null)
-    expect(f.platform.map((p) => p.view.name)).toEqual(['llm.model.chat', 'mirror.pypi', 'tz'])
+    expect(f.platform.map((p) => p.view.name)).toEqual(['mirror.npm', 'mirror.pypi', 'tz'])
     expect(changedPlatform(f)).toEqual({})
     expect(buildRequest(f).platform).toBeUndefined()
-    expect(cliCommand(f)).toBe('acornfox install hermes-agent --llm local')
-    expect(defaultModel(f)).toBe('qwen-plus')
+    expect(cliCommand(f)).toBe('acornfox install hermes-agent')
   })
-  it('改了的进请求和命令；改回原值就不发', () => {
+  it('改了的进请求和命令；改回原值就不发；只多了空格不算改', () => {
     const f = newInstallForm('app', 'hermes-agent', [hermes()], null)
     f.platform[2].value = 'Asia/Tokyo'
     expect(buildRequest(f).platform).toEqual({ tz: 'Asia/Tokyo' })
-    expect(cliCommand(f)).toBe('acornfox install hermes-agent --llm local --set platform.tz=Asia/Tokyo')
+    expect(cliCommand(f)).toBe('acornfox install hermes-agent --set platform.tz=Asia/Tokyo')
     f.platform[2].value = 'Asia/Shanghai'
     expect(buildRequest(f).platform).toBeUndefined()
-    f.platform[0].value = 'glm-4'
-    expect(defaultModel(f)).toBe('glm-4') // “留空用 …”跟着改
-    f.platform[0].value = ' '
-    expect(defaultModel(f)).toBe('qwen-plus')
+    f.platform[0].value = ' https://registry.npmmirror.com/ '
+    expect(buildRequest(f).platform).toBeUndefined()
   })
   it('格式不对在页面上拦下；不能改的不查、不发', () => {
-    const f = newInstallForm('app', 'hermes-agent', [withPlatform(hermesDetail(true), [pv('mirror.pypi', 'https://a/', true), pv('tz', 'UTC', true), pv('region', 'cn', false)])], null)
+    const f = newInstallForm('app', 'hermes-agent', [withPlatform(hermesDetail, [pv('mirror.pypi', 'https://a/', true), pv('tz', 'UTC', true), pv('region', 'cn', false)])], null)
     f.platform[0].value = 'ftp://x'
     f.platform[1].value = '../etc'
     f.platform[2].value = 'global'
@@ -217,13 +196,63 @@ describe('平台变量', () => {
     const r = catalog.recipes[1]
     const na = withPlatform(newApiDetail, [pv('tz', 'Asia/Shanghai', true)])
     const f = newInstallForm('recipe', r.id, [na, hermes()], r)
-    expect(f.platform.map((p) => p.view.name)).toEqual(['tz', 'llm.model.chat', 'mirror.pypi'])
-    const reused = newInstallForm('recipe', r.id, [{ ...na, installed: ['new-api'] }, withPlatform(hermesDetail(true), [])], r)
+    expect(f.platform.map((p) => p.view.name)).toEqual(['tz', 'mirror.npm', 'mirror.pypi'])
+    const reused = newInstallForm('recipe', r.id, [{ ...na, installed: ['new-api'] }, withPlatform(hermesDetail, [])], r)
     expect(reused.platform).toEqual([])
   })
-  it('旧服务端没有平台变量：表单照旧，默认模型 deepseek-chat', () => {
-    const f = newInstallForm('app', 'hermes-agent', [hermesDetail(true)], null)
+  it('旧服务端没有平台变量：表单照旧，没有平台变量这一块', () => {
+    const f = newInstallForm('app', 'hermes-agent', [hermesDetail], null)
     expect(f.platform).toEqual([])
-    expect(defaultModel(f)).toBe('deepseek-chat')
+    expect(buildRequest(f)).toEqual({ app: 'hermes-agent' })
+  })
+})
+
+describe('旧格式的清单和空目录', () => {
+  it('former 为 true 时给服务端的那句话；没给时用一句通用的；不是 former 时为空', () => {
+    expect(formerNote(catalogFormer.apps[0])).toBe(FORMER_NOTE)
+    expect(formerNote(catalogFormer.recipes[0])).toBe(FORMER_NOTE)
+    expect(formerNote({ former: true })).toBe('这是旧格式的清单，这一版装不了')
+    expect(formerNote({ former: true, note: '  ' })).toBe('这是旧格式的清单，这一版装不了')
+    expect(formerNote(catalogFormer.apps[1])).toBe('')
+    expect(formerNote({ note: '有话但不是 former' })).toBe('')
+    expect(formerNote(null)).toBe('')
+  })
+  it('读详情或安装被拒绝的原因是不是旧格式的清单：只认编号', () => {
+    expect(FORMER_CODE).toBe('CAT-INST-36')
+    expect(isFormerFault(new ApiError(409, 'CAT-INST-36', 'x 是旧格式的清单'))).toBe(true)
+    expect(isFormerFault({ code: 'CAT-INST-36', message: '' })).toBe(true)
+    expect(isFormerFault(new ApiError(409, 'CAT-INST-08', '要先升级'))).toBe(false)
+    expect(isFormerFault(null)).toBe(false)
+  })
+  it('列表空时怎么说：没在搜索、目录里一个应用都没有 → 还没有可以安装的应用；搜索没结果 → 没找到', () => {
+    expect(storeEmpty(0, 0, '')).toEqual({ title: '还没有可以安装的应用', sub: '应用按新格式上架后会出现在这里', searching: false })
+    expect(storeEmpty(0, 0, '   ')).toEqual({ title: '还没有可以安装的应用', sub: '应用按新格式上架后会出现在这里', searching: false })
+    expect(storeEmpty(0, 0, 'abc')).toEqual({ title: '没找到“abc”', searching: true })
+    expect(storeEmpty(2, 0, 'abc')).toEqual({ title: '没找到“abc”', searching: true })
+    expect(storeEmpty(2, 2, '')).toBeNull()
+  })
+})
+
+describe('应用自己的必填设置项（例如模型名）', () => {
+  it('和别的设置项一样：不填在页面上拦下，提示用中文名；填了进请求的 params，命令行写成 --set 设置项=值', () => {
+    const f = newInstallForm('app', 'hermes-agent', [hermesWithModel], null)
+    expect(f.plain.map((p) => p.key)).toEqual(['model'])
+    expect(checkForm(f)).toEqual([{ key: 'model', message: '请填写模型名' }])
+    f.plain[0].value = '  qwen-plus '
+    expect(checkForm(f)).toEqual([])
+    expect(buildRequest(f)).toEqual({ app: 'hermes-agent', params: { model: 'qwen-plus' } })
+    expect(cliCommand(f)).toBe('acornfox install hermes-agent --set model=qwen-plus')
+    // 值里有空格等特殊字符时命令行加引号
+    f.plain[0].value = 'my model'
+    expect(cliCommand(f)).toBe("acornfox install hermes-agent --set model='my model'")
+  })
+  it('配方里：键带应用名前缀，命令行写成 --set 应用.设置项=值', () => {
+    const r = catalog.recipes[1]
+    const f = newInstallForm('recipe', r.id, recipeDetailsWithModel, r)
+    expect(checkForm(f)).toEqual([{ key: 'hermes-agent.model', message: '请填写模型名' }])
+    f.plain.find((p) => p.key === 'hermes-agent.model')!.value = 'qwen-plus'
+    expect(checkForm(f)).toEqual([])
+    expect(buildRequest(f)).toEqual({ recipe: r.id, params: { 'hermes-agent.model': 'qwen-plus' } })
+    expect(cliCommand(f)).toBe('acornfox install --recipe ' + r.id + ' --set hermes-agent.model=qwen-plus')
   })
 })

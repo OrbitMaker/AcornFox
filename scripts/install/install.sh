@@ -7,15 +7,21 @@
 #       其他 Ubuntu/Debian 版本要加 --force-os）
 # 许可: AGPL-3.0
 #
-# 用法（国内）: curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash
-# 用法（海外）: curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash
+# 用户不直接运行这份脚本：入口是引导脚本 get.sh，它会取“要装的那个版本自带的”这份脚本再执行。
+# 用法（国内）: curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash
+# 用法（海外）: curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash
 # 参数用 | sudo bash -s -- --china 这样传。
 # 安装过程中不会询问；-y 可以加也可以不加（与 upgrade.sh 一致）。
 #
 # 可选环境变量 ACORNFOX_DOCKER_CE_MIRROR：自己指定 docker-ce 软件源地址（企业内网镜像，
-# 或用 apt 缓存代理时用 http 地址，例如 http://mirrors.huaweicloud.com/docker-ce）。设了就排在
-# 所有 docker-ce 候选源最前面，同样先探测能不能用，用不了再按默认顺序换源。传法:
+# 或用 apt 缓存代理时用 http 地址，例如 http://mirrors.aliyun.com/docker-ce）。设了就排在
+# 所有 docker-ce 候选源最前面，同样先探测能不能用，用不了再按实测顺序换源。传法:
 #   curl -fsSL …/install.sh | sudo ACORNFOX_DOCKER_CE_MIRROR=http://… bash
+#
+# 软件源怎么选：国内装 Docker、换系统软件源时不固定用一家，候选表在下面的 DOCKER_CE_SOURCES_CN、
+# APT_MIRRORS_CN（只这一处）；安装时对每一家同时取一小段测快慢（rank_sources，整个最多约 15 秒），
+# 够快的照表里的先后，不够快的按实测快慢排在后面，连不上的跳过。Docker 自己的镜像加速地址
+# （daemon.json 的 registry-mirrors）不写在脚本里，取自程序里的镜像源表：acornfox sources --daemon-mirrors。
 #
 # 故障编号（脚本停下时打印“故障编号: XXX”，AI 工作台据此处理）:
 #   INSTALL-ROOT-01  没有用 root 或 sudo 运行
@@ -23,12 +29,14 @@
 #   INSTALL-OS-02    Ubuntu/Debian 版本不在支持列表（加 --force-os 可继续，自行承担风险）
 #   INSTALL-ARCH-01  CPU 架构不是 x86_64 或 arm64
 #   INSTALL-DISK-01  数据盘剩余空间不足 2 GB
-#   INSTALL-PORT-01  AcornFox 自己要用的本机端口（18800、18801、18808）被别的程序占用，不能继续
+#   INSTALL-PORT-01  AcornFox 自己要用的本机端口（18800、18801、18807）被别的程序占用，不能继续
 #   INSTALL-PORT-02  80 或 443 被别的程序占用（加 --allow-busy-80-443 可继续，但绑定域名、HTTPS、公网控制台不能用）
 #   INSTALL-PORT-03  应用端口段 18810-18899 中有端口被别的程序占用，不能继续
 #   INSTALL-CLOUD-01 ACORNFOX_CLOUD_OVERRIDE / --cloud 的值不认识
 #   INSTALL-DOWN-01  这台服务器上已经装着更新的 AcornFox（或留着卸载时保留的更新版本的数据），要装的版本比它旧
 #                    （只能升级，不能降级），什么都没改
+#   INSTALL-DOCKER-01 装 Docker 的软件源都不能用，发行版自带的 docker.io 也没装上（报错里列出每个源的实测结果）
+#   EDGE-02          入口镜像缺失或导入失败（入口包下载、校验或 docker import 没成功）
 
 set -euo pipefail
 
@@ -173,12 +181,17 @@ github_download() {
 ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 
 # 给人照抄的脚本地址（提示和帮助里打印真实地址，不写占位符）
-SCRIPT_URL_GITEE="https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/scripts/install"
-SCRIPT_URL_GITHUB="https://github.com/${ACORNFOX_REPO}/releases/latest/download"
+GET_URL_GITEE="https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/get.sh"
+GET_URL_GITHUB="https://github.com/${ACORNFOX_REPO}/releases/latest/download/get.sh"
 
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
     local version="$1" asset="$2" out="$3"
+    # 测试或自建镜像：设了 ACORNFOX_RELEASE_BASE 就只从那里取（目录结构 <地址>/releases/download/<版本>/<文件>）
+    if [ -n "${ACORNFOX_RELEASE_BASE:-}" ]; then
+        curl -fsSL --connect-timeout 10 --max-time 600 -o "$out" "${ACORNFOX_RELEASE_BASE%/}/releases/download/${version}/${asset}"
+        return
+    fi
     if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
         log_info "从 Gitee 镜像下载 ${asset}"
         if curl_get "$out" "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}" \
@@ -190,10 +203,43 @@ release_download() {
     github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
 }
 
-# 公开仓库 main 上的脚本可能比最新发行版新（例如 main 已是 0.4.0 的脚本，最新发行版还是 v0.3.1）。
-# 要装的版本早于 SCRIPT_MIN_VERSION 时，改用那个版本发行版里附带的同名脚本，参数原样传过去，
-# 避免新脚本配旧程序（新脚本会把宿主机 Caddy 换成容器，旧程序不认识）。--binary 时不切换。
-SCRIPT_MIN_VERSION="v0.4.0"
+# 版本戳：发行版里的这份脚本在构建时被写成它所属的版本号（scripts/build-release.sh 改下面这一行），
+# 只处理这个版本的程序。仓库里的源码是 dev：没有绑定版本，不能直接拿来用，只在开发、测试时配 --binary。
+# 为什么：脚本和程序各走各的路到用户手里时，新脚本会配上旧程序（2026-11 出过一次）。现在用户入口是 get.sh，
+# 它取的是“要装的那个版本自带的”脚本；这里再把一道关：脚本自己不处理别的版本。
+SCRIPT_VERSION="dev"
+ver_norm() { echo "${1#v}"; }
+
+# enforce_script_version：带版本戳的脚本只装自己这个版本；源码脚本（dev）没有 --binary 不能装。在改动系统之前检查。
+enforce_script_version() {
+    local bv
+    if [ "$SCRIPT_VERSION" = dev ]; then
+        if [ -z "$LOCAL_BINARY" ]; then
+            fault_exit INSTALL-SRC-01 "这是源码仓库里的安装脚本，没有绑定版本，不能直接用来安装。什么都没改。" \
+                "用一行命令安装（它会取和程序同一个版本的安装脚本）:" \
+                "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash" \
+                "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash" \
+                "开发、测试时用 --binary 给出本地的程序文件。"
+        fi
+        log_warn "开发模式：用的是源码里的安装脚本和 --binary 给的程序，不检查两者是不是同一个版本"
+        return 0
+    fi
+    if [ "$ACORNFOX_VERSION" = latest ]; then
+        ACORNFOX_VERSION="$SCRIPT_VERSION"
+    elif [ "$(ver_norm "$ACORNFOX_VERSION")" != "$(ver_norm "$SCRIPT_VERSION")" ]; then
+        fault_exit INSTALL-VER-01 "这份安装脚本是 ${SCRIPT_VERSION} 的，只装 ${SCRIPT_VERSION}；要装的是 ${ACORNFOX_VERSION}。什么都没改。" \
+            "要装别的版本，用一行命令并写明版本（它会取那个版本自带的安装脚本）:" \
+            "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- --version ${ACORNFOX_VERSION}" \
+            "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- --version ${ACORNFOX_VERSION}"
+    fi
+    if [ -n "$LOCAL_BINARY" ] && [ -f "$LOCAL_BINARY" ]; then
+        bv=$({ "$LOCAL_BINARY" version 2>/dev/null || true; } | awk '{print $2}')
+        if [ "$(ver_norm "${bv:-}")" != "$(ver_norm "$SCRIPT_VERSION")" ]; then
+            fault_exit INSTALL-VER-01 "这份安装脚本是 ${SCRIPT_VERSION} 的，--binary 给的程序是 ${bv:-读不出版本}，不是同一个版本。什么都没改。" \
+                "用和脚本同一个发行版里的程序文件；或者用一行命令安装，它取的脚本和程序一定是同一个版本。"
+        fi
+    fi
+}
 
 # version_lt A B：A 早于 B 时返回 0（vX.Y.Z，按 sort -V 比较；0.4.0-dev.N 视为不早于 0.4.0）
 version_lt() {
@@ -264,29 +310,6 @@ check_install_downgrade() {
         "确实要装旧版本，只能先删掉这份数据（uninstall.sh --purge，应用和数据都会删掉、不可恢复）再装。"
 }
 
-# follow_release_script 脚本名 版本 参数...：版本早于 SCRIPT_MIN_VERSION 时下载该版本的同名脚本并交给它执行
-follow_release_script() {
-    local name="$1" v="$2" s
-    shift 2
-    [ -n "${ACORNFOX_SCRIPT_FOLLOWED:-}" ] && return 0
-    version_lt "$v" "$SCRIPT_MIN_VERSION" || return 0
-    log_warn "要装的 ${v} 早于本脚本支持的 ${SCRIPT_MIN_VERSION}，改用 ${v} 发行版自带的 ${name}"
-    # 老版本脚本不认识的新参数不往下传（它们只影响本脚本自己的检查）
-    local args=()
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            -y|--yes|--force-os|--allow-busy-80-443) shift ;;
-            --cloud) shift; [ $# -gt 0 ] && shift ;;
-            *) args+=("$1"); shift ;;
-        esac
-    done
-    s=$(mktemp)
-    release_download "$v" "$name" "$s" || error_exit "下载 ${v} 的 ${name} 失败；可以直接运行该版本发行版里的 ${name}"
-    # 老版本脚本里写死的是改名前的旧仓库名；把现在的仓库名传给它
-    export ACORNFOX_REPO ACORNFOX_GITEE_REPO
-    ACORNFOX_SCRIPT_FOLLOWED=1 exec bash "$s" ${args[@]+"${args[@]}"} --version "$v"
-}
-
 # latest_tag：最新版本号。中国大陆先查 Gitee 发行版 API（Gitee 的 releases/latest
 # 页面不跳转到版本页，不能沿用 GitHub 的做法），再走 GitHub 的 releases/latest 跳转
 latest_tag() {
@@ -352,8 +375,8 @@ check_root() {
     if [ "$EUID" -ne 0 ]; then
         fault_exit INSTALL-ROOT-01 "需要 root 权限" \
             "请用 sudo 运行：把刚才那条命令里的 | bash 改成 | sudo bash（参数照旧），例如:" \
-            "  国内: curl -fsSL ${SCRIPT_URL_GITEE}/install.sh | sudo bash" \
-            "  海外: curl -fsSL ${SCRIPT_URL_GITHUB}/install.sh | sudo bash"
+            "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash" \
+            "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash"
     fi
 }
 
@@ -568,6 +591,191 @@ detect_location() {
     fi
 }
 
+# ---- 软件源候选表（只写在这里；文档引用这里）----
+# 国内装 Docker 用的 docker-ce 源，每项 "名称|软件包地址|GPG 密钥地址"。排的是“速度差不多时的先后”：
+# 安装时会对每一项当场测快慢（rank_sources），够快的照这里的先后，不够快的按实测快慢排在后面，连不上的跳过。
+# 2026-11 实测：同一时刻家庭宽带上华为云 0.19 MB/s，阿里云、清华、中科大、南大、上海交大 10～29 MB/s；
+# 云主机上反过来华为云 22 MB/s、腾讯云一个字节都下不来。哪家快会变，所以不写死一家。
+# 所在云的内网源和 ACORNFOX_DOCKER_CE_MIRROR 排在这张表前面。Docker 官方国内也放最后（云上有时 7 MB/s）。
+DOCKER_CE_SOURCES_CN=(
+    "阿里云|https://mirrors.aliyun.com/docker-ce|https://mirrors.aliyun.com/docker-ce"
+    "清华大学|https://mirrors.tuna.tsinghua.edu.cn/docker-ce|https://mirrors.tuna.tsinghua.edu.cn/docker-ce"
+    "中国科大|https://mirrors.ustc.edu.cn/docker-ce|https://mirrors.ustc.edu.cn/docker-ce"
+    "南京大学|https://mirrors.nju.edu.cn/docker-ce|https://mirrors.nju.edu.cn/docker-ce"
+    "上海交大|https://mirror.sjtu.edu.cn/docker-ce|https://mirror.sjtu.edu.cn/docker-ce"
+    "华为云|https://mirrors.huaweicloud.com/docker-ce|https://mirrors.huaweicloud.com/docker-ce"
+    "腾讯云|https://mirrors.cloud.tencent.com/docker-ce|https://mirrors.cloud.tencent.com/docker-ce"
+    "Docker 官方|https://download.docker.com|https://download.docker.com"
+)
+DOCKER_CE_SOURCES_GLOBAL=("Docker 官方|https://download.docker.com|https://download.docker.com")
+# 签名密钥从选中的那个源取（内网源、镜像站都带一份），取到后核对是不是 Docker 官方的那一把
+# （Docker Release (CE deb) 的主密钥指纹），不是就不用这个源：选哪家只影响快慢，不影响装上的包是不是官方的。
+DOCKER_GPG_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+DOCKER_KEYRING=${AFX_DOCKER_KEYRING:-/usr/share/keyrings/docker-archive-keyring.gpg}  # AFX_DOCKER_KEYRING 只给脚本测试用
+# 国内的系统软件源，每项 "名称|地址"（只在系统软件源指向境外官方地址时才换）。都用 http：这一步在装
+# ca-certificates 之前，也照顾用 apt 缓存代理的机器；包的真实性由发行版签名保证。
+# 2026-11 家庭宽带实测（1.8 MB 的索引）：阿里云 4.1 MB/s、清华 4.2、南大 2.3、中科大 0.9、华为云 0.6。
+APT_MIRRORS_CN=(
+    "阿里云|http://mirrors.aliyun.com"
+    "清华大学|http://mirrors.tuna.tsinghua.edu.cn"
+    "中国科大|http://mirrors.ustc.edu.cn"
+    "南京大学|http://mirrors.nju.edu.cn"
+    "华为云|http://mirrors.huaweicloud.com"
+)
+# 测速的时限和门槛（rank_sources）。AFX_PROBE_* 三个环境变量只给脚本测试用来调小时限。
+PROBE_CONNECT=${AFX_PROBE_CONNECT:-3}       # 几秒连不上算不通
+PROBE_INDEX_MAX=${AFX_PROBE_INDEX_MAX:-8}   # 取索引最多几秒（docker-ce 的 Packages 几百 KB）
+PROBE_SAMPLE_MAX=${AFX_PROBE_SAMPLE_MAX:-6} # 取样最多几秒
+PROBE_SAMPLE_BYTES=4194304                  # 每个源取样多少字节（4 MB）
+DOCKER_CE_FAST_KBPS=3072                    # docker-ce 源 ≥ 3 MB/s 算够快
+APT_FAST_KBPS=2048                          # 系统源的样本小（约 2 MB），≥ 2 MB/s 算够快
+
+# probe_kbps 大小 首字节秒数 总秒数：首字节之后的速度（KB/s，取整）；总用时太短时按 0.05 秒算
+probe_kbps() {
+    LC_ALL=C awk -v s="$1" -v a="$2" -v b="$3" 'BEGIN { d = b - a; if (d < 0.05) d = 0.05; printf "%d", s / 1024 / d }'
+}
+
+# kbps_text KB/s：给人看的速度
+kbps_text() {
+    LC_ALL=C awk -v k="$1" 'BEGIN { if (k >= 1024) printf "%.1f MB/s", k / 1024; else printf "%d KB/s", k }'
+}
+
+# rank_sources 种类 第一个要不要固定(1/0) 候选...：同时测每个候选的快慢，排好后一行一个打印到标准输出；
+# 日志打到标准错误，每个源的结果另写进 $AFX_WORK/probe-种类.txt（全都不行时报错用）。
+#   种类 docker：候选 "名称|地址|密钥地址"；先取 linux/<系统>/dists/<代号>/stable/binary-<架构>/Packages
+#     （取到就算通），再从中找最新的 docker-ce 包，取它的前 4 MB 测速。
+#   种类 apt：候选 "名称|地址"；先取 dists/<代号>/Release，再取 main/binary-<架构>/Packages.gz 的前 4 MB。
+# 排序规则（写死）：取不到索引、取样返回的不是 200/206、取样 0 字节的不用（日志里写原因）；
+# 速度 ≥ 门槛的照候选的先后；不够快的按实测从快到慢排在后面；取样 404（镜像站还没同步到最新的包）的排最后；
+# 第一个要固定时（自己指定的 ACORNFOX_DOCKER_CE_MIRROR）只要能用就排第一。
+# 每个源只算首字节之后的速度；索引最多 PROBE_INDEX_MAX 秒、取样最多 PROBE_SAMPLE_MAX 秒，各个源同时进行。
+# 只有一个候选时不测，原样打印。
+rank_sources() {
+    local kind="$1" pin="$2"
+    shift 2
+    local entries=("$@") n=$# i e name base idx sample dir arch t0 fname="" thr label
+    if [ "$n" -le 1 ]; then
+        [ "$n" = 1 ] && printf '%s\n' "$1"
+        return 0
+    fi
+    dir=$(mktemp -d "$AFX_WORK/probe.XXXXXX")
+    arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+    t0=$(date +%s)
+    if [ "$kind" = docker ]; then thr=$DOCKER_CE_FAST_KBPS; label="Docker 安装包下载源"; else thr=$APT_FAST_KBPS; label="系统软件源"; fi
+    # 第一轮：同时取索引
+    for i in "${!entries[@]}"; do
+        e="${entries[$i]}"; base=$(echo "$e" | cut -d'|' -f2)
+        if [ "$kind" = docker ]; then
+            idx="${base}/linux/${OS}/dists/${OS_CODENAME}/stable/binary-${arch}/Packages"
+        else
+            idx="$(apt_index_base "$base")/dists/${OS_CODENAME}/Release"
+        fi
+        ( curl -sS -L --connect-timeout "$PROBE_CONNECT" -m "$PROBE_INDEX_MAX" -o "$dir/idx.$i" \
+            -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' "$idx" > "$dir/w1.$i" 2>/dev/null || true ) &
+    done
+    wait
+    # docker-ce：从第一个取到索引的源里找最新的 docker-ce 包，各源都取这同一个文件
+    if [ "$kind" = docker ]; then
+        for i in "${!entries[@]}"; do
+            [ "$(cut -d' ' -f1 "$dir/w1.$i" 2>/dev/null)" = 200 ] || continue
+            fname=$(awk '/^Package: /{p=$2} /^Filename: /{ if (p == "docker-ce") print $2 }' "$dir/idx.$i" 2>/dev/null | sort -V | tail -1)
+            [ -n "$fname" ] && break
+        done
+    fi
+    # 第二轮：同时取样
+    for i in "${!entries[@]}"; do
+        [ "$(cut -d' ' -f1 "$dir/w1.$i" 2>/dev/null)" = 200 ] || continue
+        e="${entries[$i]}"; base=$(echo "$e" | cut -d'|' -f2)
+        if [ "$kind" = docker ]; then
+            [ -n "$fname" ] || continue
+            sample="${base}/linux/${OS}/${fname}"
+        else
+            sample="$(apt_index_base "$base")/dists/${OS_CODENAME}/main/binary-${arch}/Packages.gz"
+        fi
+        ( curl -sS -L --connect-timeout "$PROBE_CONNECT" -m "$PROBE_SAMPLE_MAX" -o /dev/null -r "0-$((PROBE_SAMPLE_BYTES - 1))" \
+            -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' "$sample" > "$dir/w2.$i" 2>/dev/null || true ) &
+    done
+    wait
+    # 判定：每行 "类别 速度 序号 说明"，类别 0 固定第一、1 够快、2 慢、3 没同步、9 不用
+    local code size tfb ttot kbps cls why
+    : > "$dir/result"
+    for i in "${!entries[@]}"; do
+        name=$(echo "${entries[$i]}" | cut -d'|' -f1)
+        # curl 的 -w 输出末尾没有换行，用 <<< 读（直接 read < 文件 会因为读到文件末尾返回失败）
+        code="" size=0 tfb=0 ttot=0
+        read -r code size tfb ttot <<< "$(cat "$dir/w1.$i" 2>/dev/null)" || true
+        if [ "${code:-000}" != 200 ]; then
+            if [ "${code:-000}" = 000 ]; then why="连不上或取不到索引"; else why="索引返回 ${code}"; fi
+            echo "9 0 $i ${name}（${why}，不用）" >> "$dir/result"
+            continue
+        fi
+        if [ -s "$dir/w2.$i" ]; then
+            read -r code size tfb ttot <<< "$(cat "$dir/w2.$i")" || true
+        fi
+        # 没有第二轮（docker-ce 找不到包名）时用取索引的速度
+        case "${code:-000}" in
+            200|206) ;;
+            404)
+                echo "3 0 $i ${name}（没有最新的包，镜像站可能还在同步）" >> "$dir/result"
+                continue ;;
+            000)
+                echo "9 0 $i ${name}（取不到数据，不用）" >> "$dir/result"
+                continue ;;
+            *)
+                echo "9 0 $i ${name}（返回 ${code}，不用）" >> "$dir/result"
+                continue ;;
+        esac
+        if [ "${size:-0}" = 0 ]; then
+            echo "9 0 $i ${name}（取不到数据，不用）" >> "$dir/result"
+            continue
+        fi
+        kbps=$(probe_kbps "$size" "$tfb" "$ttot")
+        if [ "$pin" = 1 ] && [ "$i" = 0 ]; then cls=0; elif [ "$kbps" -ge "$thr" ]; then cls=1; else cls=2; fi
+        if [ "$cls" = 2 ]; then
+            echo "$cls $kbps $i ${name} $(kbps_text "$kbps")（慢）" >> "$dir/result"
+        else
+            echo "$cls $kbps $i ${name} $(kbps_text "$kbps")" >> "$dir/result"
+        fi
+    done
+    # 够快的照候选的先后（按序号），慢的按速度从快到慢
+    {
+        awk '$1 == 0 || $1 == 1' "$dir/result" | sort -k1,1n -k3,3n
+        awk '$1 == 2' "$dir/result" | sort -k2,2nr
+        awk '$1 == 3' "$dir/result" | sort -k3,3n
+    } > "$dir/order"
+    local summary="" first=""
+    summary=$(awk '{ $1 = $2 = $3 = ""; sub(/^ +/, ""); printf "%s%s", (NR > 1 ? "、" : ""), $0 }' "$dir/result")
+    if [ -s "$dir/order" ]; then
+        first=$(echo "${entries[$(head -1 "$dir/order" | awk '{print $3}')]}" | cut -d'|' -f1)
+        echo "${label}实测（$(( $(date +%s) - t0 )) 秒）：${summary}；先用 ${first}" >&2
+    else
+        echo "${label}实测（$(( $(date +%s) - t0 )) 秒）：${summary}；都不能用" >&2
+    fi
+    echo "$summary" > "$AFX_WORK/probe-${kind}.txt"
+    while read -r _ _ i _; do
+        printf '%s\n' "${entries[$i]}"
+    done < "$dir/order"
+    rm -rf "$dir"
+}
+
+# docker_key_ok 密钥文件：文件里只有一把主密钥，而且就是 Docker 官方的那一把（DOCKER_GPG_FPR）。
+# 多一把别的主密钥也不行（apt 会认文件里任何一把的签名）。
+docker_key_ok() {
+    gpg --batch --with-colons --show-keys "$1" 2>/dev/null | awk -F: -v f="$DOCKER_GPG_FPR" '
+        $1 == "pub" { pubs++; want = 1; next }
+        $1 == "sub" { want = 0; next }
+        $1 == "fpr" && want { seen++; if ($10 != f) bad = 1; want = 0 }
+        END { exit !(pubs == 1 && seen == 1 && !bad) }'
+}
+
+# apt_index_base 地址：发行版软件包目录（Ubuntu 的 ubuntu 或 ubuntu-ports、Debian 的 debian）
+apt_index_base() {
+    case "$OS" in
+        ubuntu) echo "$1/$(ubuntu_dir)" ;;
+        *) echo "$1/debian" ;;
+    esac
+}
+
 # cloud_apt_base：所在云的内网 APT 源（只有 http；包由发行版签名保证真实性）
 cloud_apt_base() {
     case "${CLOUD:-}" in
@@ -618,11 +826,11 @@ custom_docker_source() {
 
 # ---- 端口预检（与 upgrade.sh 中的同名函数保持一致）----
 # AcornFox 用到的端口：
-#   18800 控制台、18801 公网控制台网关、18808 Caddy 管理网关（都只听本机，被占服务就起不来）
-#   18810-18899 应用端口（Caddy 容器用宿主网络直接监听；被占的端口一旦分给应用，Caddy 整份配置都加载不了）
+#   18800 控制台、18801 公网控制台网关、18807 入口代理的管理口（都只听本机，被占服务就起不来）
+#   18810-18899 应用端口（入口容器用宿主网络直接监听；被占的端口一旦分给应用，入口整份设置都加载不了）
 #   80、443 绑定域名、HTTPS 和公网控制台时才用
 #   18802 局域网控制台：局域网服务器全新安装时默认开，其余情况默认不开
-# 自己的进程（acornfox、Caddy 容器 acornfox-caddy、v0.3.x 装在宿主机上的 Caddy）占着不算冲突。
+# 自己的进程（acornfox、任何带 acornfox.edge=1 标签的入口容器里的进程）占着不算冲突。
 
 # port_listeners：每行 "端口 进程名 PID"（只看 TCP 监听）
 port_listeners() {
@@ -637,22 +845,21 @@ port_listeners() {
     }'
 }
 
-# port_is_ours 进程名 PID
+# port_is_ours 进程名 PID：acornfox 自己，或带 acornfox.edge=1 标签的入口容器里的进程（按进程的 cgroup 认，
+# 不看进程名；升级时旧版本的入口容器也带这个标签）
+EDGE_IDS_READ=false
+EDGE_CONTAINER_IDS=""
 port_is_ours() {
-    local proc="$1" pid="$2" edge
-    case "$proc" in
-        acornfox) return 0 ;;
-        caddy)
-            edge=$(docker inspect -f '{{.Id}}' acornfox-caddy 2>/dev/null || true)
-            if [ -n "$edge" ] && grep -q "$edge" "/proc/${pid}/cgroup" 2>/dev/null; then
-                return 0
-            fi
-            # v0.3.x 装在宿主机上的 Caddy：安装和升级时会迁移进容器
-            if [ -x /usr/local/bin/acornfox ] && [ "$(systemctl show -p MainPID --value caddy 2>/dev/null)" = "$pid" ]; then
-                return 0
-            fi
-            ;;
-    esac
+    local proc="$1" pid="$2" id
+    [ "$proc" = acornfox ] && return 0
+    [ "$pid" != "-" ] || return 1
+    if ! $EDGE_IDS_READ; then
+        EDGE_IDS_READ=true
+        EDGE_CONTAINER_IDS=$(docker ps -q --no-trunc --filter label=acornfox.edge=1 2>/dev/null || true)
+    fi
+    for id in $EDGE_CONTAINER_IDS; do
+        grep -q "$id" "/proc/${pid}/cgroup" 2>/dev/null && return 0
+    done
     return 1
 }
 
@@ -698,7 +905,7 @@ check_ports() {
         case "$seen" in *" $port "*) continue ;; esac
         port_is_ours "$proc" "$pid" && continue
         case "$port" in
-            18800|18801|18808) core+=("$(port_owner_desc "$port" "$proc" "$pid")") ;;
+            18800|18801|18807) core+=("$(port_owner_desc "$port" "$proc" "$pid")") ;;
             80|443) web+=("$(port_owner_desc "$port" "$proc" "$pid")") ;;
             18802) lan="$(port_owner_desc "$port" "$proc" "$pid")" ;;
             *) if [ "$port" -ge 18810 ] && [ "$port" -le 18899 ]; then
@@ -713,7 +920,7 @@ check_ports() {
     if [ ${#core[@]} -gt 0 ]; then
         fault_exit INSTALL-PORT-01 "AcornFox 自己要用的本机端口被别的程序占用：" \
             "${core[@]}" \
-            "18800（控制台）、18801（公网控制台网关）、18808（网关管理口）被占时 AcornFox 服务起不来，不能跳过。" \
+            "18800（控制台）、18801（公网控制台网关）、18807（入口代理的管理口）被占时 AcornFox 服务起不来，不能跳过。" \
             "处理办法：停掉或改掉占用这些端口的程序（看 PID 对应的服务：ps -fp PID），然后重新运行。"
     fi
     if [ ${#apps[@]} -gt 0 ]; then
@@ -746,8 +953,8 @@ check_ports() {
                 "AcornFox 绑定域名、申请 HTTPS 证书和开公网控制台时要用 80/443。" \
                 "可以共存：应用通过 http://服务器IP:18810 起的端口访问，不需要 80/443。要共存就加 --allow-busy-80-443 重新运行，" \
                 "  做法：把刚才那条安装命令末尾的 | sudo bash 改成 | sudo bash -s -- --allow-busy-80-443（原来已带 -s -- 参数的，把它加在最后），例如:" \
-                "  国内: curl -fsSL ${SCRIPT_URL_GITEE}/install.sh | sudo bash -s -- --allow-busy-80-443" \
-                "  海外: curl -fsSL ${SCRIPT_URL_GITHUB}/install.sh | sudo bash -s -- --allow-busy-80-443" \
+                "  国内: curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- --allow-busy-80-443" \
+                "  海外: curl -fsSL ${GET_URL_GITHUB} | sudo bash -s -- --allow-busy-80-443" \
                 "  共存时域名请继续在原来的面板（宝塔、1Panel、nginx）里反向代理到 127.0.0.1:应用端口。" \
                 "不需要原来的程序时，停掉它（例如 systemctl disable --now nginx）后重新运行。"
         fi
@@ -763,7 +970,6 @@ parse_args() {
     FORCE_CHINA=false
     FORCE_GLOBAL=false
     SKIP_DOCKER=false
-    SKIP_CADDY=false
     ACORNFOX_VERSION="latest"
     LOCAL_BINARY=""
     REGISTRY_MIRRORS=()
@@ -814,9 +1020,10 @@ parse_args() {
                 SKIP_DOCKER=true
                 shift
                 ;;
-            --skip-caddy)
-                SKIP_CADDY=true
-                shift
+            --edge-package)
+                [[ $# -ge 2 ]] || error_exit "--edge-package 需要一个本地文件路径"
+                EDGE_PACKAGE="$2"
+                shift 2
                 ;;
             -y|--yes)
                 # 安装过程中不询问，-y 只是为了和 upgrade.sh 用法一致
@@ -857,8 +1064,8 @@ show_help() {
 AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
 
 用法:
-    curl -fsSL ${SCRIPT_URL_GITEE}/install.sh | sudo bash     （国内）
-    curl -fsSL ${SCRIPT_URL_GITHUB}/install.sh | sudo bash   （海外）
+    curl -fsSL ${GET_URL_GITEE} | sudo bash     （国内）
+    curl -fsSL ${GET_URL_GITHUB} | sudo bash   （海外）
     curl -fsSL <上面任一地址> | sudo bash -s -- [选项]
     sudo bash install.sh [选项]
 
@@ -874,7 +1081,8 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     --china                强制使用中国镜像源
     --global               强制使用国际源
     --skip-docker          跳过 Docker 安装（如已安装）
-    --skip-caddy           不制作本地 Caddy 镜像（acornfox 启动时从镜像仓库拉 caddy:2.8.4-alpine）
+    --edge-package PATH    使用本地的入口包 acornfox-edge_<入口版本>_linux_<架构>.tar.gz，不下载
+                           （用于测试；配 --binary 时也可以把它放在程序文件旁边）
     --public-console 域名   开通公网访问控制台（默认不开通）：先在域名后台把该域名
                            解析到本服务器，并在安全组放行 80、443；安装最后自动验证
                            域名、申请 HTTPS 证书并生成登录密码。也可以以后再用
@@ -897,7 +1105,9 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
 软件源:
     在阿里云、腾讯云、火山引擎的服务器上（大陆和境外地域都算），APT 和 Docker 优先用
     该云的内网源（不走公网流量、更快）；内网源连不上时自动退回公网源。中国大陆其他
-    环境用华为、腾讯等公网镜像站；腾讯云大陆地域的 Docker Hub 镜像加速也走内网。
+    环境对几家公网镜像站（阿里云、清华、中科大、南大、上海交大、华为云、腾讯云）当场测快慢，
+    选能用而且最快的（整个测速最多约 15 秒）；腾讯云大陆地域的 Docker Hub 镜像加速也走内网。
+    Docker 的镜像加速地址来自程序里的镜像源表（acornfox sources 能看到）。
     识别结果写在 /etc/acornfox/install.env（ACORNFOX_IN_CHINA、ACORNFOX_CLOUD）。
 
 环境变量:
@@ -907,8 +1117,8 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     ACORNFOX_CLOUD_OVERRIDE   同 --cloud，只用于测试
     ACORNFOX_LAN_CONSOLE      设为 0 同 --no-lan-console
     ACORNFOX_DOCKER_CE_MIRROR docker-ce 软件源地址（企业内网镜像，或用 apt 缓存代理时用 http
-                              地址，如 http://mirrors.huaweicloud.com/docker-ce），排在所有
-                              docker-ce 候选源最前面，先探测，用不了再换默认的源。
+                              地址，如 http://mirrors.aliyun.com/docker-ce），排在所有
+                              docker-ce 候选源最前面，先探测，用不了再按实测换别的源。
                               传法: curl … | sudo ACORNFOX_DOCKER_CE_MIRROR=地址 bash
 
 示例:
@@ -919,7 +1129,7 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     sudo bash install.sh --china --registry-mirror https://xxxx.mirror.aliyuncs.com
 
     # 服务器上已有宝塔或 1Panel（占着 80/443），与它们共存
-    curl -fsSL ${SCRIPT_URL_GITEE}/install.sh | sudo bash -s -- --allow-busy-80-443
+    curl -fsSL ${GET_URL_GITEE} | sudo bash -s -- --allow-busy-80-443
 
     # 跳过已安装的 Docker
     sudo bash install.sh --skip-docker
@@ -935,26 +1145,27 @@ APT_OFFICIAL_RE='//(archive|security|ports)\.ubuntu\.com|//(deb|security)\.debia
 update_apt() {
     log_info "更新软件包列表..."
 
-    # v0.2.1 及更早版本在境外会添加 Caddy 的 cloudsmith 源，该源现在返回 402，留着会让
-    # apt update 一直失败；重新安装时先移除
-    if [ -f /etc/apt/sources.list.d/caddy-stable.list ] && grep -q 'dl.cloudsmith.io' /etc/apt/sources.list.d/caddy-stable.list; then
-        rm -f /etc/apt/sources.list.d/caddy-stable.list
-        log_info "已移除失效的 Caddy cloudsmith 软件源"
-    fi
-
     # 只在软件源指向境外官方地址时才替换。云厂商镜像自带的内网源（如阿里云
     # mirrors.cloud.aliyuncs.com）走内网，冷启动 apt update 实测 17 秒，换成公网
     # mirrors.aliyun.com 要 251 秒，所以其他任何源都原样保留。
-    # 候选顺序：所在云的内网源（大陆、境外地域都用）→ 中国大陆用华为公网镜像站
-    # （2026-11 用全国家庭宽带节点实测，华为、腾讯最快，阿里公网镜像被限在约 0.3 MB/s）。
-    # 每个候选先探测能不能连上，apt update 失败就换下一个，都不行就恢复原来的源。
-    # 只看生效的源文件（*.list、*.sources），不看换源时留下的 *.bak
+    # 候选：所在云的内网源（大陆、境外地域都用）→ 中国大陆再加 APT_MIRRORS_CN 里的几家公网镜像站，
+    # 当场测快慢排好（rank_sources）。每个候选先探测能不能连上，apt update 失败就换下一个，
+    # 都不行就恢复原来的源。只看生效的源文件（*.list、*.sources），不看换源时留下的 *.bak
     if grep -qsE "$APT_OFFICIAL_RE" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; then
-        local candidates=() intranet base
+        local candidates=() ranked=() intranet base entry
         intranet=$(cloud_apt_base)
-        [ -n "$intranet" ] && candidates+=("$intranet")
-        $IN_CHINA && candidates+=("http://mirrors.huaweicloud.com")
-        for base in ${candidates[@]+"${candidates[@]}"}; do
+        [ -n "$intranet" ] && candidates+=("所在云的内网源|$intranet")
+        $IN_CHINA && candidates+=("${APT_MIRRORS_CN[@]}")
+        if [ ${#candidates[@]} -gt 0 ]; then
+            mapfile -t ranked < <(rank_sources apt 0 "${candidates[@]}")
+            if [ ${#ranked[@]} -eq 0 ]; then
+                # 测速可能看错：一个都没测出来时照候选的先后逐个试（下面每个还会先探一次能不能连上）
+                log_warn "测速没有一个系统软件源能用，照候选的先后逐个再试一次"
+                ranked=("${candidates[@]}")
+            fi
+        fi
+        for entry in ${ranked[@]+"${ranked[@]}"}; do
+            base="${entry#*|}"
             if ! apt_mirror_ok "$base"; then
                 log_warn "软件源 ${base} 连不上，换下一个"
                 continue
@@ -1023,11 +1234,17 @@ EOF
             # 安全更新单独探测：不是每个镜像站都有 debian-security
             sec="${base}/debian-security"
             if ! url_ok "${sec}/dists/${OS_CODENAME}-security/Release"; then
-                if $IN_CHINA && url_ok "http://mirrors.huaweicloud.com/debian-security/dists/${OS_CODENAME}-security/Release"; then
-                    sec="http://mirrors.huaweicloud.com/debian-security"
-                else
-                    sec="http://deb.debian.org/debian-security"
+                local m found=""
+                if $IN_CHINA; then
+                    for m in "${APT_MIRRORS_CN[@]}"; do
+                        m="${m#*|}"
+                        if url_ok "${m}/debian-security/dists/${OS_CODENAME}-security/Release"; then
+                            found="${m}/debian-security"
+                            break
+                        fi
+                    done
                 fi
+                sec="${found:-http://deb.debian.org/debian-security}"
                 log_info "安全更新改用 ${sec}"
             fi
             cat > /etc/apt/sources.list << EOF
@@ -1084,26 +1301,29 @@ install_docker() {
 
     # 国内镜像站在 Docker 新版本发布后会有一段时间不一致（索引大小不符、包 404、读超时），
     # 依次换源；全部失败时退回发行版仓库自带的 docker.io。
-    # 每项是 "软件包地址|GPG 密钥地址"。云厂商内网源只有 http，签名密钥仍从 https 获取，
+    # 每项是 "名称|软件包地址|GPG 密钥地址"。云厂商内网源只有 http，签名密钥仍从 https 获取，
     # 包的真实性由签名保证。
-    # 云主机（大陆、境外地域都算）先用所在云的内网源，连不上自动换下一个。
-    local sources=() entry src gpg attempt installed=false intranet custom
+    # 候选：ACORNFOX_DOCKER_CE_MIRROR → 所在云的内网源（大陆、境外地域都算）→ 国内 DOCKER_CE_SOURCES_CN、
+    # 境外 DOCKER_CE_SOURCES_GLOBAL；当场测快慢排好（rank_sources），连不上的不试。
+    local sources=() ranked=() entry src gpg attempt installed=false intranet custom pin=0
     custom=$(custom_docker_source)
-    [ -n "$custom" ] && sources+=("$custom")
+    if [ -n "$custom" ]; then sources+=("自己指定的源|$custom"); pin=1; fi
     intranet=$(cloud_docker_source)
-    [ -n "$intranet" ] && sources+=("$intranet")
+    [ -n "$intranet" ] && sources+=("所在云的内网源|$intranet")
     if $IN_CHINA; then
-        # 公网镜像按 2026-11 家庭宽带实测排序：华为、腾讯最快，阿里被限速，南大和清华（教育网）放最后
-        sources+=("https://mirrors.huaweicloud.com/docker-ce|https://mirrors.huaweicloud.com/docker-ce"
-                  "https://mirrors.cloud.tencent.com/docker-ce|https://mirrors.cloud.tencent.com/docker-ce"
-                  "https://mirrors.aliyun.com/docker-ce|https://mirrors.aliyun.com/docker-ce"
-                  "https://mirrors.nju.edu.cn/docker-ce|https://mirrors.nju.edu.cn/docker-ce"
-                  "https://mirrors.tuna.tsinghua.edu.cn/docker-ce|https://mirrors.tuna.tsinghua.edu.cn/docker-ce")
+        sources+=("${DOCKER_CE_SOURCES_CN[@]}")
     else
-        sources+=("https://download.docker.com|https://download.docker.com")
+        sources+=("${DOCKER_CE_SOURCES_GLOBAL[@]}")
+    fi
+    mapfile -t ranked < <(rank_sources docker "$pin" "${sources[@]}")
+    if [ ${#ranked[@]} -eq 0 ]; then
+        # 测速可能看错（例如这一刻 DNS 慢）：一个都没测出来时照候选的先后逐个试，下面每个源还会先探一次
+        log_warn "测速没有一个 Docker 安装包下载源能用，照候选的先后逐个再试一次"
+        ranked=("${sources[@]}")
     fi
 
-    for entry in "${sources[@]}"; do
+    for entry in ${ranked[@]+"${ranked[@]}"}; do
+        entry="${entry#*|}"
         src="${entry%%|*}"
         gpg="${entry##*|}"
         # 先探测索引能不能取到：内网源在别的网络里连不上，不必等 apt 超时
@@ -1113,11 +1333,16 @@ install_docker() {
         fi
         log_info "使用 Docker 源: ${src}"
         if ! curl -fsSL --connect-timeout 10 --max-time 60 "${gpg}/linux/${OS}/gpg" \
-            | gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg; then
+            | gpg --batch --yes --dearmor -o "$DOCKER_KEYRING"; then
             log_warn "无法从 ${gpg} 获取 GPG 密钥，换下一个源"
             continue
         fi
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] ${src}/linux/${OS} ${OS_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+        if ! docker_key_ok "$DOCKER_KEYRING"; then
+            rm -f "$DOCKER_KEYRING"
+            log_warn "从 ${gpg} 取到的签名密钥不是 Docker 官方的那一把（指纹不是 ${DOCKER_GPG_FPR}），不用这个源，换下一个"
+            continue
+        fi
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=${DOCKER_KEYRING}] ${src}/linux/${OS} ${OS_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
         # 索引不一致（镜像站同步中）时 update 就会失败，重试同一个源也没用，直接换源；
         # update 成功但下载包失败多半是偶发，再试一次
         if ! apt_get update -qq; then
@@ -1139,8 +1364,15 @@ install_docker() {
         rm -f /etc/apt/sources.list.d/docker.list
         log_warn "Docker 官方源均不可用，改用发行版仓库的 docker.io"
         apt_get update -qq || true
-        apt_get install -y -qq docker.io \
-            || error_exit "Docker 安装失败：所有 Docker 源都不可用，请稍后重试，或先手动安装 Docker 后用 --skip-docker"
+        if ! apt_get install -y -qq docker.io; then
+            local tried="（没有测速记录）"
+            [ -s "$AFX_WORK/probe-docker.txt" ] && tried=$(cat "$AFX_WORK/probe-docker.txt")
+            fault_exit INSTALL-DOCKER-01 "Docker 安装失败：装 Docker 的软件源都不能用，发行版自带的 docker.io 也没装上" \
+                "各个 docker-ce 源的实测结果：${tried}" \
+                "处理办法 1：过一会儿重新运行同一条安装命令（镜像站可能正在同步新版本）" \
+                "处理办法 2：用 ACORNFOX_DOCKER_CE_MIRROR=<能用的 docker-ce 源> 指定一个，例如 curl … | sudo ACORNFOX_DOCKER_CE_MIRROR=https://mirrors.aliyun.com/docker-ce bash" \
+                "处理办法 3：先自己装好 Docker，再加 --skip-docker 重新运行"
+        fi
         # runner 通过 Docker API 构建，不依赖 buildx；Debian 11/12 仓库没有这个包，装不上不算失败
         apt_get install -y -qq docker-buildx >/dev/null 2>&1 || true
     fi
@@ -1161,26 +1393,26 @@ install_docker() {
 configure_docker_mirror() {
     log_info "配置 Docker 镜像加速..."
 
+    # 用户用 --registry-mirror 给的地址排最前面（例如阿里云的专属加速地址），后面是程序里镜像源表的
+    # 所在云内网加速和公共副本：地址只在程序里有一份（acornfox sources 能看到），这里取它给出的、
+    # 已去掉连不上和拒绝访问的那些（只在国内的机器上有）。平台自己拉应用镜像不靠这里的配置
+    # （它会先实测各个源再拉），这里只影响 Docker 按原名拉镜像（构建项目、最后从 Docker Hub 拉）。
+    if $IN_CHINA; then
+        local m e have
+        while IFS= read -r m; do
+            [ -n "$m" ] || continue
+            have=false
+            for e in ${REGISTRY_MIRRORS[@]+"${REGISTRY_MIRRORS[@]}"}; do [ "${e%/}" = "$m" ] && have=true; done
+            $have || REGISTRY_MIRRORS+=("$m")
+        done < <(/usr/local/bin/acornfox sources --daemon-mirrors 2>/dev/null || true)
+    fi
     if [ ${#REGISTRY_MIRRORS[@]} -eq 0 ]; then
         if ! $IN_CHINA; then
             log_info "非中国环境，跳过镜像加速配置"
-            return
-        fi
-        # 公共加速器可用性经常变化；阿里云 ECS 用户应改用控制台里的专属地址。
-        # 腾讯云内网加速只在腾讯云服务器上能用（实测 34 MB/s），所以只在腾讯云上放第一位。
-        # 先探测：连不上（不在腾讯云内网）时不放进去，免得每次拉镜像先等它超时
-        local code=""
-        if [ "${CLOUD:-}" = tencent ]; then
-            code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 -m 8 https://mirror.ccs.tencentyun.com/v2/ 2>/dev/null || true)
-        fi
-        if [ -n "$code" ] && [ "$code" != 000 ]; then
-            REGISTRY_MIRRORS=("https://mirror.ccs.tencentyun.com" "https://docker.m.daocloud.io" "https://docker.1panel.live")
         else
-            if [ "${CLOUD:-}" = tencent ]; then
-                log_warn "腾讯云内网镜像加速 mirror.ccs.tencentyun.com 连不上，只用公网加速"
-            fi
-            REGISTRY_MIRRORS=("https://docker.m.daocloud.io" "https://docker.1panel.live")
+            log_warn "没取到镜像加速地址（acornfox sources --daemon-mirrors 没有输出），Docker 不配加速；平台拉应用镜像时会自己实测换源"
         fi
+        return
     fi
 
     # 已有 daemon.json 时不覆盖，避免破坏用户已有的 Docker 配置
@@ -1215,134 +1447,131 @@ EOF
     fi
 }
 
-# 安装 Caddy
-install_caddy() {
-    if $SKIP_CADDY; then
-        log_info "跳过 Caddy 镜像准备（acornfox 会在首次启动时从镜像仓库拉取 caddy:2.8.4-alpine）"
-        return
-    fi
-    CADDY_VERSION="2.8.4"
+# ---- 入口镜像和入口容器（与 upgrade.sh 中的同名函数保持一致）----
+# 入口代理容器 acornfox-edge 在所有应用前面（听应用端口和 80、443），由 acornfox 建和管。它只用本机镜像
+# acornfox/edge:<入口版本>，从不从镜像仓库拉：镜像随发行版的入口包 acornfox-edge_<入口版本>_linux_<架构>.tar.gz
+# 发布（一份根文件系统），和程序从同一个地方下载、按同一份 SHA256SUMS 校验后 docker import 导入。
+# 入口版本问要装的程序：acornfox version --edge。
+# 入口包从哪来（按顺序）：--edge-package 给的文件；用了 --binary 时它旁边的同名文件；否则发行版。
+# 本机已有这个版本的镜像就不下载。出错报 EDGE-02；导入后核对不过的镜像会删掉，不留半成品。
+EDGE_PACKAGE="${EDGE_PACKAGE:-}"
+EDGE_VERSION=""
+EDGE_IMPORTED=false   # 这次导入了入口镜像（本机原来没有）
 
-    # 三端架构（2026-11-01）：Caddy 改为容器，由 acornfox 管理（容器名 acornfox-caddy，宿主网络）。
-    # 这里只把 Caddy 官方二进制做成本地镜像 acornfox/caddy:2.8.4（docker import，不依赖镜像仓库）。
-    if docker image inspect "acornfox/caddy:${CADDY_VERSION}" >/dev/null 2>&1; then
-        log_info "Caddy 镜像已存在: acornfox/caddy:${CADDY_VERSION}"
-        return
-    fi
-    # v0.3.x 装在宿主机上的 Caddy 2.8.x 可以直接拿来做镜像，免去下载
-    if [ -x /usr/bin/caddy ] && /usr/bin/caddy version 2>/dev/null | grep -q "^v${CADDY_VERSION}"; then
-        build_caddy_image /usr/bin/caddy
-        return
-    fi
-
-    log_info "下载 Caddy ${CADDY_VERSION}..."
-    # 所有地区都下载 Caddy 官方二进制：官方 apt 仓库 dl.cloudsmith.io 2026-10 实测对匿名请求
-    # 返回 402 Payment Required，大陆也不稳定且国内镜像站没有同步；中国大陆先从 Gitee 发行版取同一份安装包（随 AcornFox
-    # 发行版附带），失败再走 GitHub 直连和代理。
-    ARCH=$(dpkg --print-architecture)
-    local caddy_tag="" name
-    if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
-        caddy_tag="$ACORNFOX_VERSION"
-        [ "$caddy_tag" = "latest" ] && caddy_tag=$(latest_tag 2>/dev/null || true)
-    fi
-    local official="https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}"
-    local mirror="https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${caddy_tag}"
-    name="caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz"
-    if [ -n "$caddy_tag" ] && curl_get "${AFX_WORK}/${name}" "${mirror}/${name}" \
-        --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15; then
-        log_info "已从 Gitee 镜像下载 ${name}"
-    else
-        log_info "从 GitHub 下载 ${name}..."
-        github_download "${official}/${name}" "${AFX_WORK}/${name}" \
-            || error_exit "下载 Caddy 失败；可设置 ACORNFOX_GITHUB_PROXY 指定可用的 GitHub 加速地址后重试"
-    fi
-    # 校验值：当前版本 Caddy 官方发布的 SHA-512 直接写在脚本里（来自官方 caddy_${CADDY_VERSION}_checksums.txt，
-    # 与安装包的下载来源无关），不用联网取校验文件，国内也就不用连 GitHub。换 Caddy 版本时要一起更新。
-    name="caddy_${CADDY_VERSION}_checksums.txt"
-    case "${CADDY_VERSION}_${ARCH}" in
-        2.8.4_amd64) printf '%s  caddy_2.8.4_linux_amd64.tar.gz\n' "b8bec15d14fb033562af9f207850027bcbaa1f891edc9efe00d38bf39e1bf9944f8b6b8eba041ddd4c171cd70c905174c704d705be2f23bc678fe1eaf37a2485" > "${AFX_WORK}/${name}" ;;
-        2.8.4_arm64) printf '%s  caddy_2.8.4_linux_arm64.tar.gz\n' "5466234be3e988071cef937aedbdd94c15b6f75cf7307397e67c2641219ac9bfe2c2bb3b31fc05bc68d3b6398bbe50abfa16ccf3b127318ccac31115ad26507c" > "${AFX_WORK}/${name}" ;;
+# edge_arch：把 ARCH 定成 amd64 或 arm64（下载程序时多半已经定了）
+edge_arch() {
+    case "${ARCH:-$(uname -m)}" in
+        amd64|x86_64) ARCH=amd64 ;;
+        arm64|aarch64) ARCH=arm64 ;;
+        *) fault_exit EDGE-02 "不支持的架构 ${ARCH:-$(uname -m)}，没有对应的入口包" ;;
     esac
-    # 没有写死的版本：校验文件只有几 KB，优先取 Caddy 官方的，与镜像上的安装包互相独立；取不到再用镜像副本
-    if [ -s "${AFX_WORK}/${name}" ]; then
-        :
-    elif ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${AFX_WORK}/${name}" "${official}/${name}"; then
-        if [ -n "$caddy_tag" ] && curl -fsSL --connect-timeout 10 --max-time 60 -o "${AFX_WORK}/${name}" "${mirror}/${name}"; then
-            log_warn "Caddy 官方校验文件取不到，改用 Gitee 镜像上的副本"
-        else
-            github_download "${official}/${name}" "${AFX_WORK}/${name}" || error_exit "下载 Caddy 校验文件失败"
+}
+
+# import_edge_image 程序 发行版本：准备好这个程序要的入口镜像
+import_edge_image() {
+    local bin="$1" version="$2" name pkg image got sums want
+    EDGE_VERSION=$({ "$bin" version --edge 2>/dev/null || true; } | head -n 1)
+    [ -n "$EDGE_VERSION" ] || fault_exit EDGE-02 "读不出程序要用的入口镜像版本（${bin} version --edge 没有输出）" \
+        "程序文件可能不完整：重新下载，或者换用同一个发行版里的程序文件。"
+    edge_arch
+    image="acornfox/edge:${EDGE_VERSION}"
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        log_info "入口镜像已在本机: ${image}"
+        return 0
+    fi
+    name="acornfox-edge_${EDGE_VERSION}_linux_${ARCH}.tar.gz"
+    if [ -n "$EDGE_PACKAGE" ]; then
+        pkg="$EDGE_PACKAGE"
+        [ -f "$pkg" ] || fault_exit EDGE-02 "--edge-package 给的文件不存在: ${pkg}"
+        log_info "使用本地入口包: ${pkg}"
+    elif [ -n "$LOCAL_BINARY" ]; then
+        pkg="$(dirname "$LOCAL_BINARY")/${name}"
+        [ -f "$pkg" ] || fault_exit EDGE-02 "用了 --binary，但程序文件旁边没有入口包 ${name}，本机也没有入口镜像 ${image}" \
+            "把同一个发行版里的 ${name} 放在程序文件旁边，或者用 --edge-package 文件 指定。"
+        log_info "使用本地入口包: ${pkg}"
+    else
+        pkg="${AFX_WORK:?}/${name}"
+        log_info "下载入口包 ${name}"
+        release_download "$version" "$name" "$pkg" \
+            || fault_exit EDGE-02 "下载入口包 ${name} 失败" "可设置 ACORNFOX_GITHUB_PROXY 指定可用的 GitHub 加速地址后重试。"
+        sums="${AFX_WORK:?}/SHA256SUMS.edge"
+        release_download "$version" SHA256SUMS "$sums" || fault_exit EDGE-02 "下载 SHA256SUMS 失败，无法校验 ${name}"
+        want=$(awk -v a="$name" '$2 == a || $2 == "*" a {print $1; exit}' "$sums")
+        rm -f "${AFX_WORK:?}/SHA256SUMS.edge"
+        [ -n "$want" ] || fault_exit EDGE-02 "SHA256SUMS 里没有 ${name}"
+        if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$pkg" | awk '{print $1}'); else got=$(shasum -a 256 "$pkg" | awk '{print $1}'); fi
+        if [ "$got" != "$want" ]; then
+            rm -f "${AFX_WORK:?}/${name:?}"
+            fault_exit EDGE-02 "入口包 ${name} SHA256 校验失败：期望 ${want}，实际 ${got}"
         fi
+        log_success "SHA256 校验通过: ${name}"
     fi
-    mv "${AFX_WORK}/caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz" "${AFX_WORK}/caddy.tar.gz"
-    mv "${AFX_WORK}/caddy_${CADDY_VERSION}_checksums.txt" "${AFX_WORK}/caddy_checksums.txt"
-
-    # 无论从哪里下载，都按 Caddy 官方发布的 SHA-512 校验
-    CADDY_WANT=$(awk -v a="caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz" '$2 == a {print $1; exit}' "${AFX_WORK}/caddy_checksums.txt")
-    rm -f "${AFX_WORK}/caddy_checksums.txt"
-    if [ -z "$CADDY_WANT" ] || [ "$(sha512sum "${AFX_WORK}/caddy.tar.gz" | awk '{print $1}')" != "$CADDY_WANT" ]; then
-        rm -f "${AFX_WORK}/caddy.tar.gz"
-        error_exit "Caddy 安装包 SHA-512 校验失败"
+    log_info "导入入口镜像 ${image}..."
+    if ! docker import "$pkg" "$image" >/dev/null; then
+        docker image rm -f "$image" >/dev/null 2>&1 || true
+        fault_exit EDGE-02 "导入入口镜像 ${image} 失败（上面一行是 Docker 的原因；常见的是磁盘满了：df -h /var/lib/docker）"
     fi
-
-    tar -xzf "${AFX_WORK}/caddy.tar.gz" -C "${AFX_WORK}" caddy
-    build_caddy_image "${AFX_WORK}/caddy"
-    rm -f "${AFX_WORK}/caddy.tar.gz" "${AFX_WORK}/caddy"
+    # 核对：镜像里的适配程序能运行，报的入口版本对（不对就删掉，不留半成品）
+    got=$({ docker run --rm --network none --entrypoint /usr/bin/afx-edge "$image" version 2>/dev/null || true; } | head -n 1)
+    if [ "$got" != "$EDGE_VERSION" ]; then
+        docker image rm -f "$image" >/dev/null 2>&1 || true
+        fault_exit EDGE-02 "导入的入口镜像不对：里面的适配程序报 ${got:-没有输出}，应为 ${EDGE_VERSION}。已删掉这个镜像" \
+            "入口包和程序不是同一个发行版的，或者文件损坏：换用同一个发行版里的入口包。"
+    fi
+    EDGE_IMPORTED=true
+    log_success "入口镜像已就绪: ${image}"
 }
 
-# build_caddy_image BIN：用 Caddy 二进制和本机 CA 证书做最小镜像 acornfox/caddy:2.8.4
-# （没有 shell；acornfox 创建容器时写入 Caddyfile 并指定启动命令）
-build_caddy_image() {
-    local bin="$1" root
-    root=$(mktemp -d)
-    mkdir -p "$root/usr/bin" "$root/etc/ssl/certs" "$root/tmp" "$root/data" "$root/config"
-    chmod 1777 "$root/tmp"
-    install -m 0755 "$bin" "$root/usr/bin/caddy"
-    cp /etc/ssl/certs/ca-certificates.crt "$root/etc/ssl/certs/ca-certificates.crt"
-    if tar -C "$root" -c . | docker import \
-        --change 'ENV XDG_CONFIG_HOME=/config' --change 'ENV XDG_DATA_HOME=/data' \
-        --change 'CMD ["/usr/bin/caddy","run","--config","/etc/acornfox/Caddyfile","--adapter","caddyfile"]' \
-        - "acornfox/caddy:${CADDY_VERSION}" >/dev/null; then
-        log_success "Caddy 镜像已就绪: acornfox/caddy:${CADDY_VERSION}"
-    else
-        log_warn "制作 Caddy 镜像失败；acornfox 启动时会改从镜像仓库拉取 caddy:${CADDY_VERSION}-alpine"
-    fi
-    rm -rf "$root"
+# edge_health：在入口容器里运行它自己的健康检查（设置已装上、版本号对、端口都在听）；通过返回 0，输出它的话
+edge_health() {
+    docker exec acornfox-edge /usr/bin/afx-edge health 2>&1
 }
 
-# migrate_host_caddy：把 v0.3.x 装在宿主机上的 Caddy 换成容器。证书和 ACME 账号复制到
-# 数据卷 acornfox-caddy-data（宿主机上的原文件保留），停用并禁止 caddy.service 开机启动，
-# 留下标记文件 /var/lib/acornfox/.caddy-host-migrated（升级脚本据此知道已经迁移过）。
-migrate_host_caddy() {
-    [ -f /etc/systemd/system/caddy.service ] || [ -f /lib/systemd/system/caddy.service ] || return 0
-    systemctl is-enabled --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy 2>/dev/null || return 0
-    log_info "把宿主机上的 Caddy 迁移到容器..."
-    local src=/var/lib/caddy/.local/share/caddy vol
-    docker volume create acornfox-caddy-data >/dev/null
-    vol=$(docker volume inspect -f '{{.Mountpoint}}' acornfox-caddy-data)
-    if [ -d "$src" ]; then
-        mkdir -p "$vol/caddy"
-        cp -a "$src/." "$vol/caddy/"
-        log_info "已复制证书和 ACME 账号到数据卷 acornfox-caddy-data（原文件保留在 $src）"
-    fi
-    systemctl disable --now caddy >/dev/null 2>&1 || true
-    mkdir -p /var/lib/acornfox
-    date -u +%FT%TZ > /var/lib/acornfox/.caddy-host-migrated
-    log_success "宿主机 Caddy 已停用，之后由容器 acornfox-caddy 接管 80、443 和应用端口"
-}
-
-# wait_caddy_container：等 acornfox 建好 Caddy 容器、管理网关应答（没有令牌时返回 403）
-wait_caddy_container() {
-    local i code=""
-    for i in $(seq 1 90); do
-        code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:18808/ 2>/dev/null || true)
-        [ "$code" = "403" ] && break
-        sleep 2
+# remove_replaced_edge：按切换记录删掉被换下来、已经停着的旧入口容器（按容器编号，不按名字）。
+# 切换记录有两份：数据目录里的 edge-switch.json（old_id），和新入口容器自己的标签 acornfox.edge.replaced。
+# 只在现在的入口容器 acornfox-edge 正在运行时才删（新入口没起来时旧的是唯一能换回去的）；正在运行的、
+# 就是现在入口的那个，都不删。旧容器挂的卷里，新入口还在用的（证书卷）不删；新入口不用的（旧的设置卷）
+# 跟着删掉，不留一个没有容器用的卷。
+remove_replaced_edge() {
+    local cur ids id state keep vols v
+    cur=$(docker inspect -f '{{if .State.Running}}{{.Id}}{{end}}' acornfox-edge 2>/dev/null || true)
+    [ -n "$cur" ] || return 0
+    keep=" $(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cur" 2>/dev/null || true) "
+    ids=$( { sed -n 's/.*"old_id": *"\([0-9a-f]*\)".*/\1/p' /var/lib/acornfox/edge-switch.json 2>/dev/null
+             docker inspect -f '{{index .Config.Labels "acornfox.edge.replaced"}}' "$cur" 2>/dev/null; } | grep -E '^[0-9a-f]{12,64}$' | sort -u || true)
+    for id in $ids; do
+        [ "$id" != "$cur" ] || continue
+        state=$(docker inspect -f '{{.State.Running}} {{index .Config.Labels "acornfox.edge"}}' "$id" 2>/dev/null || true)
+        case "$state" in
+            "false 1")
+                vols=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$id" 2>/dev/null || true)
+                if docker rm "$id" >/dev/null 2>&1; then
+                    log_info "已删掉被换下来的旧入口容器 ${id:0:12}"
+                    for v in $vols; do
+                        case "$keep" in *" ${v} "*) continue ;; esac
+                        # 还有别的容器挂着时 docker volume rm 会拒绝，不强删
+                        docker volume rm "$v" >/dev/null 2>&1 && log_info "已删掉旧入口容器留下、新入口不用的卷 ${v}"
+                    done
+                else
+                    log_warn "没能删掉被换下来的旧入口容器 ${id:0:12}（不影响使用，可以手动 sudo docker rm ${id:0:12}）"
+                fi
+                ;;
+        esac
     done
-    if [ "$code" = "403" ]; then
-        log_success "Caddy 容器 acornfox-caddy 已运行"
-    else
-        log_warn "Caddy 容器还没就绪；查看: docker logs acornfox-caddy；journalctl -u acornfox-server -n 50"
-    fi
+    return 0
+}
+
+# wait_edge_container：等后台服务建好入口容器，并在容器里跑它自己的健康检查通过（最多 60 秒，通过就往下走）
+wait_edge_container() {
+    local i out=""
+    for i in $(seq 1 60); do
+        if out=$(edge_health); then
+            log_success "入口容器 acornfox-edge 已运行：${out}"
+            return 0
+        fi
+        sleep 1
+    done
+    log_warn "入口容器还没就绪（${out:-没有应答}）；查看: sudo acornfox doctor；docker logs acornfox-edge；journalctl -u acornfox-server -n 50"
 }
 
 # 创建系统账号和组
@@ -1455,8 +1684,8 @@ create_directories() {
     # /run 是 tmpfs，重启后会清空；用 tmpfiles.d 让 systemd 每次开机重建。
     # setgid 让 server、runner 各自创建的 socket 都归属 acornfox-ipc 组。
     # 其他用户只有穿过权限（o+x），能否连接由各 socket 自身决定：
-    # api.sock 归 acornfox-users 组（CLI 用户）。Caddy 已改为容器，管理接口走
-    # 127.0.0.1:18808 上带令牌的网关（令牌在 /var/lib/acornfox/caddy-admin.token）。
+    # api.sock 归 acornfox-users 组（CLI 用户）。入口代理是容器，它的管理口在
+    # 127.0.0.1:18807，要令牌（令牌在 /var/lib/acornfox/edge-admin.token）。
     cat > /etc/tmpfiles.d/acornfox.conf << 'EOF'
 d /run/acornfox 2771 root acornfox-ipc -
 EOF
@@ -1717,7 +1946,7 @@ ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━
 ${BLUE}服务状态:${NC}
   • acornfox-server: $(systemctl is-active acornfox-server)
   • acornfox-runner: $(systemctl is-active acornfox-runner)
-  • Caddy 容器 acornfox-caddy: $(docker inspect -f '{{.State.Status}}' acornfox-caddy 2>/dev/null || echo 未创建)
+  • 入口容器 acornfox-edge: $(docker inspect -f '{{.State.Status}}' acornfox-edge 2>/dev/null || echo 未创建)
 
 ${BLUE}管理员令牌:${NC}
 $(cat /root/.acornfox-token)
@@ -1738,8 +1967,8 @@ ${step_a}     1. 登记本机（不用装 CLI，服务器上已经有 acornfox �
 
   乙. 在自己的电脑上操作（Mac 或另一台 Linux），通过 SSH 连这台服务器:
      1. 在电脑上安装 CLI（按电脑所在网络选一条，不需要 sudo）:
-        国内: ${YELLOW}curl -fsSL ${SCRIPT_URL_GITEE}/install-cli.sh | bash${NC}
-        海外: ${YELLOW}curl -fsSL ${SCRIPT_URL_GITHUB}/install-cli.sh | bash${NC}
+        国内: ${YELLOW}curl -fsSL ${GET_URL_GITEE} | bash -s -- cli${NC}
+        海外: ${YELLOW}curl -fsSL ${GET_URL_GITHUB} | bash -s -- cli${NC}
      2. SSH 用户不是 root 时，在服务器上执行一次: ${YELLOW}sudo usermod -aG acornfox-users <SSH 用户名>${NC}
      3. 在电脑上登记这台服务器（第一次先用 ssh 登录一次确认指纹）:
         ${YELLOW}acornfox target add my-server --ssh ${ssh_user}@${PUBLIC_HOST:-服务器公网IP}${NC}
@@ -1779,8 +2008,9 @@ show_plan() {
 将要做的事:
   1. 检查系统版本、CPU 架构、磁盘空间和端口占用（不满足就停下，不改动系统）
   2. 识别云厂商和网络，配置软件源（云主机优先用内网源）并安装 Docker
-  3. 准备网关组件（Caddy 容器镜像），创建系统账号 acornfox、acornfox-exec 和数据目录 /var/lib/acornfox
-  4. 安装 /usr/local/bin/acornfox，注册并启动 acornfox-server、acornfox-runner 两个服务
+  3. 创建系统账号 acornfox、acornfox-exec 和数据目录 /var/lib/acornfox
+  4. 安装 /usr/local/bin/acornfox，导入入口镜像（发行版的入口包，校验后导入），注册并启动
+     acornfox-server、acornfox-runner 两个服务
   5. 生成管理员令牌（保存在 /root/.acornfox-token）
   6. 服务器在局域网里（私网地址、不是云主机）并且是第一次安装时：打开局域网控制台（端口 18802，
      第一次打开时在浏览器里设密码）。不想开加 --no-lan-console；云主机不会开
@@ -1804,6 +2034,7 @@ main() {
 
     # 解析参数（只记下选项，不改系统）
     parse_args "$@"
+    enforce_script_version
     check_root
     # 以前没装过才算全新安装（重装、卸载后保留数据再装都不算）：只有全新安装才默认打开局域网控制台
     FRESH_INSTALL=true
@@ -1822,12 +2053,8 @@ main() {
     detect_location
     setup_github_proxies
     if [ -z "$LOCAL_BINARY" ]; then
-        if [ "$ACORNFOX_VERSION" = "latest" ]; then
-            ACORNFOX_VERSION=$(latest_tag) || error_exit "无法获取最新版本号；用 --version vX.Y.Z 指定版本，或用 --binary 安装本地文件"
-            log_info "最新版本: $ACORNFOX_VERSION"
-        fi
+        # 到这里脚本一定带版本戳，要装的就是它自己的版本（enforce_script_version 保证）
         check_install_downgrade "$ACORNFOX_VERSION"
-        follow_release_script install.sh "$ACORNFOX_VERSION" "$@"
     elif [ -f "$LOCAL_BINARY" ]; then
         check_install_downgrade "$({ "$LOCAL_BINARY" version 2>/dev/null || true; } | awk '{print $2}')"
     fi
@@ -1844,25 +2071,31 @@ main() {
     update_apt
     install_dependencies
     install_docker
-    configure_docker_mirror
-    install_caddy
-    migrate_host_caddy
     create_accounts
     create_directories
     download_acornfox
+    import_edge_image /usr/local/bin/acornfox "${VERSION:-$ACORNFOX_VERSION}"
+    # 镜像加速地址取自程序（acornfox sources --daemon-mirrors），所以放在装好程序之后
+    configure_docker_mirror
     initialize_database
     record_installed_version
     generate_admin_token
     detect_public_host
     create_systemd_services
     start_services
-    wait_caddy_container
+    wait_edge_container
+    remove_replaced_edge
     enable_public_console
     enable_lan_console
 
     # 显示摘要
     show_summary
 }
+
+# 只给脚本测试用（scripts/install/sources.test.sh）：AFX_INSTALL_LIB=1 并且是被 source 时，只定义函数、不执行
+if [ "${AFX_INSTALL_LIB:-}" = 1 ] && [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
 
 # 执行主函数
 main "$@"

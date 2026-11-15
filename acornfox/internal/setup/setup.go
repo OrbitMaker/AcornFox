@@ -1,5 +1,5 @@
 // Package setup prepares this computer's runtime after the acornfox program
-// itself is installed: find or install Docker, prepare the gateway (Caddy)
+// itself is installed: find or install Docker, prepare the entry proxy
 // and run the self checks. The web console and `acornfox setup` read the same
 // Manager: GET /v1/setup is the status, GET /v1/setup/events the event stream
 // (one JSON object per event, the same objects `acornfox setup --json`
@@ -11,7 +11,7 @@
 //	runtime  Docker: an existing one, Docker Desktop (only when the user picks
 //	         it), or the built-in runtime (Colima + Lima on macOS, WSL 2 +
 //	         Docker Engine on Windows; no Docker Desktop, no windows)
-//	edge     the gateway component (Caddy image and container)
+//	edge     the entry proxy (image and container)
 //	checks   self checks; every required one must pass
 //
 // The status is kept in the data directory (setup.json), so a restart (or a
@@ -206,8 +206,9 @@ type RuntimeProvider interface {
 	Builtin(ctx context.Context, opts StartOptions, r Reporter) (Detection, error)
 }
 
-// EdgePreparer prepares the gateway (pull the Caddy image with progress,
-// make sure the container runs) and returns a short detail ("Caddy 2.8.4").
+// EdgePreparer prepares the entry proxy (load its image from the release's
+// entry package with progress, make sure the container runs) and returns a
+// short detail ("入口 2.8.4-1 · 运行中").
 type EdgePreparer func(ctx context.Context, r Reporter) (string, error)
 
 // Reporter receives progress from a step.
@@ -627,7 +628,7 @@ func (m *Manager) run(ctx context.Context, opts StartOptions) {
 	m.setStep(StepRuntime, StateDone, d.Name+" "+d.Version+" · 运行中")
 
 	// 3. Gateway.
-	m.setStep(StepEdge, StateRunning, "准备 Caddy")
+	m.setStep(StepEdge, StateRunning, "准备网关")
 	if m.cfg.Edge != nil {
 		detail, err := m.cfg.Edge(ctx, reporter{m, StepEdge})
 		if err != nil {

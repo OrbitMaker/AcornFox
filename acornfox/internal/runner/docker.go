@@ -66,6 +66,22 @@ type Docker struct {
 
 	// root caches Docker's data root for Ping (see dockerRoot).
 	root atomic.Pointer[rootCache]
+
+	// probeCache holds recent probes of the image sources (sources.go).
+	probeMu    sync.Mutex
+	probeCache map[string]cachedProbe
+	// probeHook and pullHook replace the source probe and one source's pull
+	// in tests.
+	probeHook func(ctx context.Context, srcs []ImageSource, ref, arch string) map[string]ProbeResult
+	pullHook  func(ctx context.Context, ref string, pw pullWatch) (pullStats, error)
+	// edgeProbeHook replaces the entry container's health check (exec of
+	// afx-edge health) in tests.
+	edgeProbeHook func(ctx context.Context, id, want string) (bool, string)
+
+	// pulls are the running PullImage calls by the tag they create, for
+	// PullStatus (pull_status.go).
+	pullsMu sync.Mutex
+	pulls   map[string]*pullTracker
 }
 
 // rootCache is Docker's data root as last read from one client.
@@ -465,17 +481,21 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 		return PullResponse{}, err
 	}
 
-	// Bound the pull to pullImageTimeout regardless of the caller's context.
-	pctx, cancel := context.WithTimeout(ctx, pullImageTimeout)
+	// Bound the pull to pullMaxTotal, or to a little before the caller's
+	// deadline when that comes first (pullContext). While it runs,
+	// PullStatus reports how far it is (pull_status.go).
+	pctx, cancel := pullContext(ctx)
 	defer cancel()
+	pctx, untrack := d.trackPull(pctx, tag, ref)
+	defer untrack()
 
 	emulated := false
-	local, werr := d.pull(pctx, ref, nil)
+	local, used, werr := d.pull(pctx, ref, nil)
 	if werr != nil && noMatchingPlatform(werr) && d.hostIsARM(ctx) {
 		// Apple silicon: the image has no arm64 variant. Docker can run the
 		// amd64 one under emulation; allow it and mark it as possibly slow.
 		amd64 := []ocispec.Platform{{OS: "linux", Architecture: "amd64"}}
-		if local, werr = d.pull(pctx, ref, amd64); werr == nil {
+		if local, used, werr = d.pull(pctx, ref, amd64); werr == nil {
 			emulated = true
 		}
 	}
@@ -502,14 +522,14 @@ func (d *Docker) PullImage(ctx context.Context, app, deploymentID, ref string) (
 		}
 		return PullResponse{}, err
 	}
-	return PullResponse{OK: true, Image: &info, Emulated: emulated}, nil
+	return PullResponse{OK: true, Image: &info, Emulated: emulated, Source: used.Host, Seconds: int(used.Seconds + 0.5)}, nil
 }
 
 // pull pulls ref (optionally for the given platforms) and waits for it,
-// falling back to registry mirrors when Docker Hub stalls (pull_fallback.go).
-// It returns the local reference that holds the image: ref itself, or the
-// mirror's name for an image pinned by digest.
-func (d *Docker) pull(ctx context.Context, ref string, platforms []ocispec.Platform) (string, error) {
+// trying the image sources in turn (pull_fallback.go). It returns the local
+// reference that holds the image (ref itself, or the mirror's name for an
+// image pinned by digest) and the source it came from.
+func (d *Docker) pull(ctx context.Context, ref string, platforms []ocispec.Platform) (string, pullUsed, error) {
 	return d.pullFallback(ctx, ref, platforms)
 }
 
@@ -530,8 +550,47 @@ func (d *Docker) hostIsARM(ctx context.Context) bool {
 	return a == "aarch64" || a == "arm64"
 }
 
-// pullImageTimeout bounds a single image pull (contract: 10 minutes).
-const pullImageTimeout = 10 * time.Minute
+// pullMaxTotal bounds the pull of one image over all its sources. Within it a
+// pull that keeps moving is waited for (pull_fallback.go). An app install as
+// a whole is cancelled after 60 minutes (the install engine), so this leaves
+// it 10 minutes for the later steps and the report.
+const pullMaxTotal = 50 * time.Minute
+
+// pullCallerMargin: a pull stops this long before the caller's deadline, so
+// the runner's answer still reaches it.
+var pullCallerMargin = 30 * time.Second
+
+var (
+	errPullMaxTotal   = errors.New("一个镜像的拉取总时限到了")
+	errCallerDeadline = errors.New(CallerDeadlineWords)
+)
+
+// pullContext bounds a pull to pullMaxTotal, or to pullCallerMargin before
+// ctx's deadline when that is earlier. context.Cause tells which ended it.
+func pullContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	limit := time.Now().Add(pullMaxTotal)
+	if dl, ok := ctx.Deadline(); ok {
+		if early := dl.Add(-pullCallerMargin); early.Before(limit) {
+			return context.WithDeadlineCause(ctx, early, errCallerDeadline)
+		}
+	}
+	return context.WithDeadlineCause(ctx, limit, errPullMaxTotal)
+}
+
+// pullEndReason says what ended a pull under ctx (pullContext): "" while
+// it runs.
+func pullEndReason(ctx context.Context) string {
+	if ctx.Err() == nil {
+		return ""
+	}
+	switch c := context.Cause(ctx); {
+	case errors.Is(c, errCallerDeadline):
+		return ReasonCallerDeadline
+	case errors.Is(c, errPullMaxTotal), errors.Is(c, context.DeadlineExceeded):
+		return ReasonPullDeadline
+	}
+	return ReasonCancelled
+}
 
 // pullNotFoundPattern matches "image not found / access denied" pull errors.
 // Registry mirrors (e.g. DaoCloud) answer 403 for images they do not carry, so
@@ -543,6 +602,10 @@ var pullNotFoundPattern = regexp.MustCompile(`(?i)(manifest unknown|manifest for
 func classifyPull(ctx context.Context, err error) *Failure {
 	if err == nil {
 		return nil
+	}
+	var pe *PullError
+	if errors.As(err, &pe) {
+		return pullErrorFailure(pe)
 	}
 	// Timeout: our own deadline elapsed, or the daemon reported a timeout.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
@@ -859,17 +922,19 @@ func (d *Docker) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 		Env:          envSlice(req.Env),
 		ExposedPorts: network.PortSet{containerPort: {}},
 	}
-	// App containers publish only on loopback; Caddy is the public entry point.
-	// Add-ons publish nothing: they are reachable only by name inside
-	// NetworkName(app).
+	// App containers publish only on loopback; the entry proxy is the public entry point.
+	// Add-ons and internal apps publish nothing: they are reachable only by
+	// name inside NetworkName(app) (and the networks linked to it).
 	var bindings network.PortMap
 	var netCfg *network.NetworkingConfig
 	var links []string
 	if addon == nil {
-		bindings = network.PortMap{containerPort: {{
-			HostIP:   netip.MustParseAddr("127.0.0.1"),
-			HostPort: "0",
-		}}}
+		if !req.Internal {
+			bindings = network.PortMap{containerPort: {{
+				HostIP:   netip.MustParseAddr("127.0.0.1"),
+				HostPort: "0",
+			}}}
+		}
 		if len(req.Command) > 0 {
 			cfg.Cmd = append([]string(nil), req.Command...)
 		}
@@ -980,9 +1045,9 @@ func (d *Docker) ensureAddonImage(ctx context.Context, ref string) error {
 	} else if !cerrdefs.IsNotFound(err) {
 		return err
 	}
-	pctx, cancel := context.WithTimeout(ctx, pullImageTimeout)
+	pctx, cancel := pullContext(ctx)
 	defer cancel()
-	if _, err := d.pullFallback(pctx, ref, nil); err != nil {
+	if _, _, err := d.pullFallback(pctx, ref, nil); err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrPullFailed, ref, err)
 	}
 	return nil
@@ -1131,6 +1196,11 @@ func (d *Docker) containerInfoByID(ctx context.Context, id string) (ContainerInf
 		}
 	}
 	info.HostPort, info.Port = firstHostPort(c.NetworkSettings)
+	if c.NetworkSettings != nil && info.App != "" {
+		if ep := c.NetworkSettings.Networks[NetworkName(info.App)]; ep != nil && ep.IPAddress.IsValid() {
+			info.IP = ep.IPAddress.String()
+		}
+	}
 	return info, nil
 }
 

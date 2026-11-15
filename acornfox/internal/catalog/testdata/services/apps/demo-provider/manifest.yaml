@@ -1,0 +1,124 @@
+# Test material: an app that provides a service the new way (values plus the
+# steps that issue, revoke and check a credential). Not a real app.
+id: demo-provider
+schema: 3
+source: official
+maintainer: acornfox
+
+app:
+  name: 样例提供方
+  summary: 提供样例令牌服务，只为测试清单格式
+  category: dev
+  icon: icon.svg
+  homepage: https://example.com/demo-provider
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64]
+
+release:
+  version: v1.0.0
+  images:
+    - name: app
+      repository: example/demo-provider
+      tag: v1.0.0
+      digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+endpoints:
+  - name: web
+    port: 8080
+    protocol: http
+    primary: true
+    health:
+      path: /healthz
+
+params:
+  - key: admin_password
+    type: secret
+    generate: { length: 24 }
+    hidden: true
+  - key: region_hint
+    type: string
+    default: demo
+
+init:
+  - when: after_healthy
+    http:
+      method: POST
+      path: /api/setup
+      json: { password: "{{params.admin_password}}" }
+      expect_status: [200, 201]
+      save:
+        setup_token: data.token
+  - name: finish-setup
+    when: after_healthy
+    http:
+      method: PATCH
+      path: /api/setup/finish
+      headers: { Authorization: "Bearer {{saved.setup_token}}" }
+
+provides:
+  - kind: demo_token
+    endpoint: web
+    values:
+      url: "{{self.internal_url}}/api/{{params.region_hint}}"
+      token: { issued: token }
+    issue:
+      - name: login
+        http:
+          method: POST
+          path: /api/login
+          json: { password: "{{params.admin_password}}" }
+          expect_json: { ok: true }
+          save:
+            session: { path: data.session, secret: true }
+      - name: create
+        http:
+          method: POST
+          path: /api/tokens
+          headers: { X-Session: "{{saved.session}}" }
+          json: { name: "acornfox-{{consumer.name}}", owner: "{{consumer.id}}" }
+      - name: read
+        http:
+          method: GET
+          path: /api/tokens
+          headers: { X-Session: "{{saved.session}}" }
+          save:
+            token_id:
+              list: data.items
+              where: { name: "acornfox-{{consumer.name}}" }
+              sort_by: id
+              pick: last
+              field: id
+            token: { list: data.items, where: { name: "acornfox-{{consumer.name}}" }, field: key, prefix: "dt-", secret: true }
+    revoke:
+      - name: login
+        http:
+          method: POST
+          path: /api/login
+          json: { password: "{{params.admin_password}}" }
+          save: { session: data.session }
+      - name: delete
+        http:
+          method: DELETE
+          path: "/api/tokens/{{issued.token_id}}"
+          headers: { X-Session: "{{saved.session}}" }
+          expect_status: [200, 404]
+    check:
+      - http:
+          method: GET
+          path: /api/whoami
+          headers: { Authorization: "Bearer {{issued.token}}" }
+          expect_status: [200]
+
+delivery:
+  tier: auto
+  minutes: 1
+
+uninstall:
+  data: []

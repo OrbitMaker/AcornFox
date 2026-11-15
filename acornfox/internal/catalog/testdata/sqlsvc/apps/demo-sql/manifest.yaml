@@ -1,0 +1,145 @@
+# Test material: an app that provides a database-shaped service. Its primary
+# endpoint is tcp, it is reached over the app network only (internal), and
+# what it hands each consumer is made by commands run in its own container.
+# Not a real app: the commands and the image are made up.
+id: demo-sql
+schema: 3
+source: official
+maintainer: acornfox
+
+app:
+  name: 样例数据库
+  summary: 提供样例数据库服务，只为测试清单格式
+  category: database
+  icon: icon.svg
+  homepage: https://example.com/demo-sql
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64]
+
+release:
+  version: v1.0.0
+  images:
+    - name: app
+      repository: example/demo-sql
+      tag: v1.0.0
+      digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
+
+container:
+  command: [demo-sqld, --config, /etc/demo-sql/server.conf]
+
+endpoints:
+  - name: db
+    port: 5000
+    protocol: tcp
+    primary: true
+    health:
+      exec: [demo-sql-ping, --host, 127.0.0.1, --port, "5000"]
+      timeout_s: 120
+  - name: stats
+    port: 5001
+    protocol: tcp
+    health: { tcp: true }
+
+exposure:
+  default: internal
+
+volumes:
+  - name: data
+    path: /var/lib/demo-sql
+    backup: true
+  - name: conf
+    path: /etc/demo-sql
+
+params:
+  - key: admin_password
+    type: secret
+    generate: { length: 32, charset: alnum }
+    hidden: true
+    editable: never
+
+env:
+  - { key: DEMO_SQL_ADMIN_PASSWORD, from: params.admin_password, secret: true }
+  - { key: TZ, from: platform.tz }
+
+files:
+  - volume: conf
+    path: server.conf
+    overwrite: install
+    mode: "0600"
+    template: |
+      listen = 0.0.0.0:5000
+      stats = 0.0.0.0:5001
+
+init:
+  - name: quiet-log
+    when: after_healthy
+    exec:
+      user: demo
+      command: [demo-sql, --admin, --on-error-stop]
+      env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+      stdin: |
+        SET statement_log = 'off';
+
+provides:
+  - kind: demo_sql
+    endpoint: db
+    issue_vars:
+      database: "af_{{issue.id}}"
+      username: "af_{{issue.id}}"
+      password: { generate: { length: 32, charset: alnum }, secret: true }
+    values:
+      host: "{{self.host}}"
+      port: "{{self.port}}"
+      database: { issued: database }
+      username: { issued: username }
+      password: { issued: password, secret: true }
+      url: { template: "demo-sql://{{issued.username}}:{{issued.password}}@{{self.host}}:{{self.port}}/{{issued.database}}", secret: true }
+    issue:
+      - name: create
+        exec:
+          user: demo
+          command: [demo-sql, --admin, --on-error-stop]
+          env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+          stdin: |
+            CREATE ROLE "{{issue.username}}" LOGIN PASSWORD '{{issue.password}}';
+            CREATE DATABASE "{{issue.database}}" OWNER "{{issue.username}}";
+            COMMENT ON DATABASE "{{issue.database}}" IS 'for {{consumer.name}}';
+          timeout_s: 60
+          expect_exit: [0]
+      - name: describe
+        exec:
+          user: demo
+          command: [demo-sql, --admin, --json, --database, "{{issue.database}}", --describe]
+          env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+          save:
+            database_oid: data.oid
+            server_line: { stdout: true }
+    revoke:
+      - name: lock
+        exec:
+          user: demo
+          command: [demo-sql, --admin, --on-error-stop]
+          env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+          stdin: |
+            ALTER ROLE "{{issued.username}}" NOLOGIN;
+          expect_exit: [0]
+          finish_if: { exit: [3] }
+    check:
+      - name: connect
+        exec:
+          command: [demo-sql, --host, 127.0.0.1, --user, "{{issued.username}}", --database, "{{issued.database}}", --oid, "{{issued.database_oid}}", --ping]
+          env: { DEMO_SQL_PASSWORD: "{{issued.password}}" }
+
+delivery:
+  tier: auto
+  minutes: 1
+
+uninstall:
+  data: [volumes.data]

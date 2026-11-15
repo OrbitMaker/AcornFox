@@ -20,7 +20,12 @@ import (
 //	POST /v1/catalog/connect             connect a private catalog with a code {"code"} (W10)
 //	GET  /v1/catalog/sources             public and private catalogs: serial, last sync, disconnected
 //	GET  /v1/catalog/platform-vars       platform variables apps can use, with this machine's values
-//	POST /v1/catalog/install             start an install task (202); "platform" changes user_can_set variables
+//	POST /v1/catalog/plan                what an install request (same body) would do, read-only:
+//	                                     the apps asked for in install order, every need and what it
+//	                                     is matched with, the required parameters still empty, and
+//	                                     every problem (always 200; can_install says)
+//	POST /v1/catalog/install             start an install task (202); "platform" changes user_can_set variables;
+//	                                     "use" names the service of a need
 //	GET  /v1/catalog/install             recent tasks
 //	GET  /v1/catalog/install/{task}      one task's progress; both carry "timing", the verdict on
 //	                                     the step times by this server's clock (done, slow, stuck,
@@ -45,6 +50,7 @@ func (s *server) registerCatalog(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/catalog/connect", s.catalogConnect)
 	mux.HandleFunc("GET /v1/catalog/sources", s.catalogSources)
 	mux.HandleFunc("GET /v1/catalog/platform-vars", s.catalogPlatformVars)
+	mux.HandleFunc("POST /v1/catalog/plan", s.catalogPlan)
 	mux.HandleFunc("POST /v1/catalog/install", s.catalogInstall)
 	mux.HandleFunc("GET /v1/catalog/install", s.catalogTasks)
 	mux.HandleFunc("GET /v1/catalog/install/{task}", s.catalogTask)
@@ -62,7 +68,7 @@ func (s *server) wireAppCenter() {
 		Delete:  s.removeApp,
 		WithApp: s.withApp,
 		Kick:    s.kicker.Kick,
-		URL:     s.catalogAppURL,
+		Where:   s.where,
 	})
 }
 
@@ -214,6 +220,26 @@ func (s *server) catalogInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, v)
 }
 
+// catalogPlan answers what an install request would do; it creates nothing.
+// Problems are in the answer (can_install false), not an error status.
+func (s *server) catalogPlan(w http.ResponseWriter, r *http.Request) {
+	if !s.appCenterOn(w) {
+		return
+	}
+	var req appinstall.Request
+	if err := decodeJSON(r, &req); err != nil {
+		writeFault(w, &appinstall.Fault{Code: appinstall.CodeBadParams, Message: "请求体不是合法 JSON"})
+		return
+	}
+	req.App, req.Recipe, req.Name, req.Catalog = strings.TrimSpace(req.App), strings.TrimSpace(req.Recipe), strings.TrimSpace(req.Name), strings.TrimSpace(req.Catalog)
+	v, err := s.appCenter.Plan(r.Context(), req)
+	if err != nil {
+		writeFault(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
 func (s *server) catalogTasks(w http.ResponseWriter, r *http.Request) {
 	if !s.appCenterOn(w) {
 		return
@@ -235,7 +261,38 @@ func (s *server) catalogTask(w http.ResponseWriter, r *http.Request) {
 		writeFault(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, v)
+	writeJSON(w, http.StatusOK, s.taskWithOpenHints(r.Context(), v))
+}
+
+// taskOut is one install task as GET /v1/catalog/install/{task} gives it:
+// once it has succeeded, every app of it that only opens on this server
+// carries open_hint, the same as GET /v1/apps gives for it, so whoever
+// reads the result can say how to open it without another call.
+type taskOut struct {
+	appinstall.TaskView
+	Apps []taskAppOut `json:"apps"`
+}
+
+type taskAppOut struct {
+	appinstall.AppResult
+	OpenHint *openHint `json:"open_hint,omitempty"`
+}
+
+// taskWithOpenHints is v with the open hints of its apps (succeeded only;
+// worked out now, never stored with the task: the app's exposure may have
+// changed since).
+func (s *server) taskWithOpenHints(ctx context.Context, v appinstall.TaskView) taskOut {
+	out := taskOut{TaskView: v, Apps: make([]taskAppOut, 0, len(v.Apps))}
+	for _, a := range v.Apps {
+		x := taskAppOut{AppResult: a}
+		if v.Status == state.TaskSucceeded {
+			if app, err := s.store.GetApp(ctx, a.App); err == nil {
+				x.OpenHint = s.localOpenHint(ctx, app)
+			}
+		}
+		out.Apps = append(out.Apps, x)
+	}
+	return out
 }
 
 func (s *server) appFirstLogin(w http.ResponseWriter, r *http.Request) {
@@ -267,11 +324,4 @@ func (s *server) appVars(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, v)
-}
-
-// catalogAppURL is the address an installed catalog app opens at. An app
-// that is only reachable from this machine gets its loopback address, not
-// the server's public host (which would not answer).
-func (s *server) catalogAppURL(ctx context.Context, a state.App) string {
-	return s.buildAppView(ctx, a, false).URL
 }

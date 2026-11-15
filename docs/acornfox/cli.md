@@ -4,7 +4,7 @@
 
 同一个 `acornfox` 程序既是命令行，也是服务器上的 AcornFox 服务。Linux 服务器用安装脚本安装，装好后服务器上就有这个命令；Mac、Linux 电脑可以另装一个命令行，经 SSH 管理服务器。安装方法见 [使用手册](../user-guide.md)。
 
-标着“v0.5.1 起”的要 0.5.1 以上的 `acornfox`；其中要连服务器的命令，服务器也要是 0.5.1（`install status --wait` 例外，连 0.5.0 的服务器也能用；`faults` 不连服务器）。
+标着“v0.5.1 起”“v0.6.0 起”的要那个版本以上的 `acornfox`；其中要连服务器的命令，服务器也要是 0.5.1（`install status --wait` 例外，连 0.5.0 的服务器也能用；`faults` 不连服务器）。
 
 ## 全局参数
 
@@ -50,7 +50,7 @@
 
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
-| `status` | 应用的状态和访问地址；跟一个部署编号时看那次部署 | `acornfox status --app web` |
+| `status` | 应用的状态和访问地址；从应用中心装的应用还列出“它用的服务”（每个需要接的哪条服务、现在能不能用，v0.6.0 起）；跟一个部署编号时看那次部署 | `acornfox status --app web` |
 | `apps` | 列出这台服务器上的所有应用；只本机能打开的标“只本机” | `acornfox apps` |
 | `diagnose [部署编号]` | 最近一次（或指定的）部署为什么失败、怎么办 | `acornfox diagnose` |
 | `logs [应用]` | 应用最近的日志（`-f` 持续跟随，`--tail N` 行数） | `acornfox logs web -f` |
@@ -91,28 +91,44 @@
 | `domain remove 域名`、`domain list` | 解绑、列出域名 | `acornfox domain list --app web` |
 | `lan-console enable` | 在局域网里打开控制台（端口 18802）：第一次打开时在浏览器里设密码，登录时可勾“记住这台设备 90 天”；只给局域网里的地址用，云主机开不了。局域网服务器第一次安装时默认已打开。`status` 看状态和密码是何时从哪设的，`disable` 关闭，`reset-password` 清掉密码重设（所有登录和记住的设备作废），`devices` 看记住的设备，`forget 编号` 或 `forget --all` 让设备失效；`lan-console --help` 看全 | `acornfox lan-console status` |
 | `public-console enable 域名` | 用一个域名开放控制台的公网访问，带 HTTPS（`disable` 关闭，`status` 查看） | `acornfox public-console enable panel.example.com` |
-| `open 应用名` | 在你自己的电脑上打开一个应用：经 SSH 隧道转到本地端口，只本机能打开的应用也能这样开，看完按 Ctrl+C 关闭 | `acornfox open new-api` |
+| `open 应用名` | 在你自己的电脑上打开一个应用：经 SSH 隧道转到本地端口，只本机能打开的应用也能这样开，看完按 Ctrl+C 关闭 | `acornfox open web` |
 
 ## 应用中心
 
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
 | `catalog list` | 目录里的应用和配方、目录序号、上次同步结果 | `acornfox catalog list` |
-| `catalog info 应用` | 应用详情和安装时能填的参数 | `acornfox catalog info hermes-agent` |
+| `catalog info 应用` | 应用详情、安装时能填的参数、需要的服务和能提供的服务 | `acornfox catalog info 应用` |
 | `catalog sync` | 让服务器现在同步一次目录 | `acornfox catalog sync` |
-| `catalog platform-vars` | 平台按这台机器自动填给应用的时区、下载源、默认模型等，以及哪些能改 | `acornfox catalog platform-vars` |
-| `install 应用` | 从目录装一个应用，默认只本机能打开（`--llm local\|own` 选大模型来源，`--set 参数=值` 填参数，`--no-wait` 只提交，`--reuse-data` 接上以前同名应用留下的数据） | `acornfox install hermes-agent --llm local` |
-| `install --recipe 配方` | 装一个配方里的几个应用并连起来 | `acornfox install --recipe hermes-with-new-api` |
+| `catalog platform-vars` | 平台按这台机器自动填给应用的时区、下载源、访问地址等，以及哪些能改 | `acornfox catalog platform-vars` |
+| `install 应用 --plan` | 只看安装前的计划，什么都不装：它需要的每一种服务接哪条（已接上、可选的没有先跳过、必须的没有、有好几条要选）、还缺哪些必填参数、装不了的原因。必须的没有时给出该运行的命令：登记一条（保密项写成 `项=-`），或者让这台机器上已有、现在用不了的那条能用（启动提供方、填上还差的项、用旧数据把已删的提供方装回来）。配方也能看（`--recipe 配方 --plan`）。只读，v0.6.0 起 | `acornfox install 应用 --plan` |
+| `install 应用` | 从目录装一个应用，默认只本机能打开（`--set 参数=值` 填参数，保密的参数写成 `--set 参数=-` 从键盘输入；`--use 需要名=服务名` 指定某个需要接哪条服务，`--no-wait` 只提交，`--reuse-data` 接上以前同名应用留下的数据）。必须的服务没有时停下，告诉你怎么登记一条；不会替你装别的应用。目录里一个可装的应用都没有时，直接说要等应用按新格式重新上架 | `acornfox install 应用` |
+| `install --name 应用名 --reuse-data` | 用以前留下的数据把删掉的应用装回来，不用写它是目录里哪个应用：平台按留下的数据找回来。v0.6.0 起 | `acornfox install --name 应用名 --reuse-data --plan` |
+| `install --recipe 配方` | 按配方的顺序装几个应用并接上：后装的应用接先装的应用提供的服务 | `acornfox install --recipe 配方` |
 | `install status 任务编号` | 查安装进度和首次登录信息（`--show-secrets` 显示密码）。加 `--wait` 等到装好或失败再返回（默认最多 90 秒，`--timeout 秒` 最多 600，没装完再运行一次），输出写明装到哪一步、用了多久、算不算比平常慢（`CAT-INST-30`）；v0.5.1 起 | `acornfox install status 3f9a0c1b2d4e --wait` |
-| `apps vars 应用` | 看一个从应用中心装的应用是用什么设置装的：每个变量的值、谁给的、能不能改；密码和 Key 默认只显示后 4 位（`--reveal` 显示全）。只读，v0.5.1 起 | `acornfox apps vars new-api` |
+| `apps vars 应用` | 看一个从应用中心装的应用是用什么设置装的：每个变量的值、谁给的、能不能改；密码和 Key 默认只显示后 4 位（`--reveal` 显示全）。用旧格式清单装的应用会说明（`acornfox status 应用` 里也有这句说明）。只读，v0.5.1 起 | `acornfox apps vars 应用` |
 
 装好的应用默认只本机能打开，在你自己的电脑上用 `acornfox open 应用名` 打开。详细说明见 [使用手册的“应用中心”](../user-guide.md#应用中心)。
+
+## 服务（v0.6.0 起）
+
+服务是这台机器上能给应用用的东西：装好的应用提供的（装好就自动登记），或者你自己已有、登记进来的（例如自己的邮箱、别家的大模型 Key）。装应用时按服务类型自动接上。密码、Key 这类保密项不要写在命令行里：写成 `项=-`，命令会让你输入；所有输出里保密项只显示后 4 位。装应用时的保密参数同样能写成 `install --set 参数=-`（v0.6.0 起）。
+
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `services kinds` | 有哪些服务类型、每种有哪几项（哪些必填、哪些保密、默认值）。只读 | `acornfox services kinds` |
+| `services list` | 这台机器上的服务：类型、来源（自己登记的或由哪个应用提供）、状态、哪些应用在用。只读 | `acornfox services list` |
+| `services show 名字` | 一条服务的每一项；要你在提供它的应用里做一步再填的项会写明怎么做。只读 | `acornfox services show 我的邮箱` |
+| `services add 类型 --name 名字 --set 项=值…` | 登记一条你已有的服务；地址不能写本机回环地址（`CAT-SVC-07`） | `acornfox services add smtp --name 我的邮箱 --set host=mail.example.com --set password=-` |
+| `services set 名字 项=值…` | 改几项；`项=` 清掉一项。应用提供的服务只能填要你做一步的那几项 | `acornfox services set 我的邮箱 port=465` |
+| `services test 名字` | 照这种服务类型的办法试一下通不通（会从服务器去连那个地址），没通时写明原因（`CAT-SVC-06`） | `acornfox services test 我的邮箱` |
+| `services remove 名字` | 删一条自己登记的服务；不加 `--yes` 只试跑。有应用在用时删不掉（`CAT-SVC-04`） | `acornfox services remove 我的邮箱 --yes` |
 
 ## 本机服务和自检
 
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
-| `doctor` | 检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟，以及下载网关能不能连上、应用目录上次同步的情况（这两项 v0.5.1 起，只给警告）；每个问题带故障编号（`--json` 输出 JSON）。用 sudo 运行看得更全 | `sudo acornfox doctor` |
+| `doctor` | 检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟，以及下载网关能不能连上、应用目录上次同步的情况（这两项 v0.5.1 起，只给警告）、已装的应用接着的服务现在能不能用（`CAT-SVC-08`，v0.6.0 起，只给警告）；每个问题带故障编号（`--json` 输出 JSON）。用 sudo 运行看得更全 | `sudo acornfox doctor` |
 | `faults [编号]` | 故障目录：一个故障编号是什么、可能的原因和怎么判断、按什么顺序查、怎么处理、什么时候要先问你；不带编号列出全部，`--group 组` 只列一组，`--markdown` 输出全文。只读，不连服务器，Mac 上也能用；v0.5.1 起 | `acornfox faults CAT-INST-27` |
 | `identity show` | 这台机器在下载网关上的安装编号和公钥（还没生成时说明原因，不会生成） | `sudo acornfox identity show` |
 | `identity reset` | 重新生成机器钥匙，安装编号随之改变；不加 `--yes` 只说明会做什么。之后 `sudo systemctl restart acornfox-server` 才生效 | `sudo acornfox identity reset --yes` |
@@ -130,6 +146,6 @@
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
 | `catalog lint 目录` | 检查应用目录的清单和配方，只读 | `acornfox catalog lint .` |
-| `catalog vars 目录` | 列出应用装的时候用到哪些变量、哪些要用户动手（`--app` 只看一个），只读 | `acornfox catalog vars . --app new-api` |
+| `catalog vars 目录` | 列出应用装的时候用到哪些变量、哪些要用户动手、需要和提供哪些服务（`--app` 只看一个），只读 | `acornfox catalog vars . --app 应用` |
 | `catalog gaps 目录` | 核对目录里登记的“平台还缺的变量”，只读 | `acornfox catalog gaps .` |
 | `catalog build`、`catalog keygen`、`catalog verify` | 打包签名发布目录、生成签名钥匙、校验发布目录；各自加 `-h` 看用法 | `acornfox catalog verify dist --pubkey 公钥` |

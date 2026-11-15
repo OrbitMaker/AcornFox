@@ -251,7 +251,7 @@ describe('设置', () => {
     const nav = screen.getByRole('navigation', { name: '设置分区' })
     expect(within(nav).queryByText('提醒')).toBeNull()
     expect(within(nav).queryByText('账号')).toBeNull()
-    expect(screen.getAllByText(/upgrade.sh \| sudo bash/, { selector: 'code' }).length).toBe(2)
+    expect(screen.getAllByText(/get\.sh \| sudo bash -s -- upgrade/, { selector: 'code' }).length).toBe(2)
   })
 
   it('下载源：换源顺序、目录来源（含已断开的）；这一版不显示“连接私有目录”', async () => {

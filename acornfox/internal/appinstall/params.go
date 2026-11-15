@@ -18,32 +18,12 @@ import (
 
 // Parameters of one app install.
 //
-// Values maps a parameter key to its value: a string for every plain type
-// (int and bool are kept as their text), or an *LLMChoice for llm_provider.
-// Templates and "from" references read them as params.<key> and, for the
-// model, params.<key>.base_url / api_key / model / source.
-
-// LLM sources a user can choose (POST /v1/catalog/install params.<key>.source;
-// CLI --llm own|local|platform).
-const (
-	LLMOwn          = "own"
-	LLMLocalGateway = "local_gateway"
-	LLMPlatform     = "platform"
-)
-
-// LLMChoice is the value of an llm_provider parameter.
-type LLMChoice struct {
-	Source  string `json:"source"`
-	BaseURL string `json:"base_url,omitempty"`
-	APIKey  string `json:"api_key,omitempty"`
-	Model   string `json:"model,omitempty"`
-	App     string `json:"app,omitempty"` // local_gateway: the provider app on this machine
-}
-
-// DefaultGatewayModel is the model name an app is configured with when it uses
-// the local gateway and the user named none. The user adds a channel with this
-// model in the gateway (or changes the model in the app afterwards).
-const DefaultGatewayModel = "deepseek-chat"
+// Values maps a parameter key to its value, as text (int and bool are kept
+// as their text). Templates and "from" references read them as
+// params.<key>. Besides the parameters, Values carry the engine's own
+// entries under keys starting with "@" (platform variables, origins, the
+// items of the services the app's needs are plugged into), which no
+// parameter key can start with.
 
 // Values are resolved parameters.
 type Values map[string]any
@@ -93,9 +73,27 @@ func singleLine(s string) bool {
 }
 
 // resolveParams merges defaults, the user's values and generated secrets.
-// llm_provider parameters are only parsed here (the engine resolves the
-// source). user may carry nested objects for llm parameters.
 func resolveParams(m *catalog.Manifest, user map[string]any) (Values, error) {
+	vals, _, err := resolveParamsOpt(m, user, false)
+	return vals, err
+}
+
+// ParamMissing is a required parameter that has no value yet (the plan
+// before an install lists them; the install itself refuses, CAT-INST-02).
+type ParamMissing struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// resolveParamsOpt is resolveParams; with lenient a required parameter that
+// has no value is not an error but listed in missing (and left empty), so
+// that a plan can be shown before the form is filled in. With lenient a key
+// that is no parameter of the app is still an error (CAT-INST-02, returned),
+// but the values and what is missing are worked out as well, without it: a
+// plan then lists both, the wrong key and the required parameter it was
+// probably meant for.
+func resolveParamsOpt(m *catalog.Manifest, user map[string]any, lenient bool) (Values, []ParamMissing, error) {
+	var missing []ParamMissing
 	known := map[string]catalog.Param{}
 	for _, p := range m.Params {
 		known[p.Key] = p
@@ -105,64 +103,99 @@ func resolveParams(m *catalog.Manifest, user map[string]any) (Values, error) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var unknown error
 	for _, k := range keys {
 		p, ok := known[k]
 		if !ok {
-			return nil, fault(CodeBadParams, nil, "应用 %s 没有参数 %s", m.ID, k)
+			f := unknownParam(m, k)
+			if !lenient {
+				return nil, nil, f
+			}
+			if unknown == nil {
+				unknown = f
+			}
+			continue
 		}
 		if p.Hidden {
-			return nil, fault(CodeBadParams, nil, "参数 %s 由平台生成，不能填", k)
+			return nil, nil, fault(CodeBadParams, nil, "参数 %s 由平台生成，不能填", k)
 		}
 	}
+	vals, missing, err := resolveKnownParams(m, user, lenient, missing)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vals, missing, unknown
+}
+
+// unknownParam is CAT-INST-02 for key k that is no parameter of m. It names
+// the parameters the app has (key and label); a key written as a
+// parameter's label (the words a form shows, e.g. 模型名) is pointed to that
+// parameter's key.
+func unknownParam(m *catalog.Manifest, k string) *Fault {
+	var list []string
+	for _, p := range m.Params {
+		if p.Hidden {
+			continue
+		}
+		if p.Label != "" && strings.TrimSpace(p.Label) == strings.TrimSpace(k) {
+			return fault(CodeBadParams, nil, "应用 %s 没有参数 %s：参数名是 %s（%s），写成 --set %s=值", m.ID, k, p.Key, p.Label, p.Key)
+		}
+		if p.Label != "" && p.Label != p.Key {
+			list = append(list, p.Key+"（"+p.Label+"）")
+		} else {
+			list = append(list, p.Key)
+		}
+	}
+	if len(list) == 0 {
+		return fault(CodeBadParams, nil, "应用 %s 没有参数 %s：这个应用没有能填的参数", m.ID, k)
+	}
+	return fault(CodeBadParams, nil, "应用 %s 没有参数 %s。它的参数有：%s（--set 左边写参数名，不写括号里的说明）", m.ID, k, strings.Join(list, "、"))
+}
+
+// resolveKnownParams merges defaults, the values given for the app's
+// parameters (keys that are none of them are left out) and generated
+// secrets; see resolveParamsOpt.
+func resolveKnownParams(m *catalog.Manifest, user map[string]any, lenient bool, missing []ParamMissing) (Values, []ParamMissing, error) {
 	vals := Values{}
 	for _, p := range m.Params {
 		raw, given := user[p.Key]
-		if p.Type == "llm_provider" {
-			if !given || raw == nil {
-				continue
-			}
-			c, err := parseLLM(p.Key, raw)
-			if err != nil {
-				return nil, err
-			}
-			vals[p.Key] = c
-			continue
-		}
 		var s string
 		if given && raw != nil {
 			v, err := scalarText(raw)
 			if err != nil {
-				return nil, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
+				return nil, nil, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
 			}
 			s = v
 		} else if p.Default != nil {
 			v, err := scalarText(p.Default)
 			if err != nil {
-				return nil, fault(CodeBadParams, nil, "参数 %s 的默认值不对", p.Key)
+				return nil, nil, fault(CodeBadParams, nil, "参数 %s 的默认值不对", p.Key)
 			}
 			s = v
 		}
 		if s == "" && p.Generate != nil {
 			g, err := generateSecret(p.Generate.Length, p.Generate.Charset)
 			if err != nil {
-				return nil, fault(CodeInternal, err, "生成 %s 失败", p.Key)
+				return nil, nil, fault(CodeInternal, err, "生成 %s 失败", p.Key)
 			}
 			vals[p.Key] = g
 			continue
 		}
 		if s == "" {
-			if p.Required {
-				return nil, fault(CodeBadParams, nil, "缺少必填参数 %s（%s）", p.Key, p.Label)
+			if p.Required && lenient {
+				missing = append(missing, ParamMissing{Key: p.Key, Label: p.Label})
+			} else if p.Required {
+				return nil, nil, fault(CodeBadParams, nil, "缺少必填参数 %s（%s）", p.Key, p.Label)
 			}
 			vals[p.Key] = ""
 			continue
 		}
 		if err := checkScalar(p, s); err != nil {
-			return nil, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
+			return nil, nil, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
 		}
 		vals[p.Key] = s
 	}
-	return vals, nil
+	return vals, missing, nil
 }
 
 func scalarText(v any) (string, error) {
@@ -192,6 +225,11 @@ func checkScalar(p catalog.Param, s string) error {
 	}
 	switch p.Type {
 	case "secret":
+		if s == "-" {
+			// What a command line writes for "read it from standard
+			// input": never installed as the password itself.
+			return fmt.Errorf("值是“-”：命令行里写 --set %s=- 时，值要从标准输入给（acornfox install 会读一行）；页面和接口里直接填它本身", p.Key)
+		}
 		if len(s) < minUserSecret {
 			return fmt.Errorf("至少 %d 个字符", minUserSecret)
 		}
@@ -235,54 +273,15 @@ func checkScalar(p catalog.Param, s string) error {
 	return nil
 }
 
-// parseLLM reads an llm_provider value: an object {source, base_url,
-// api_key, model, app} or just the source as text.
-func parseLLM(key string, raw any) (*LLMChoice, error) {
-	var c LLMChoice
-	switch x := raw.(type) {
-	case string:
-		c.Source = x
-	case *LLMChoice:
-		c = *x
-	case map[string]any:
-		b, _ := json.Marshal(x)
-		if err := json.Unmarshal(b, &c); err != nil {
-			return nil, fault(CodeBadParams, err, "参数 %s 的格式不对", key)
-		}
-	default:
-		return nil, fault(CodeBadParams, nil, "参数 %s 要是对象 {source, base_url, api_key, model}", key)
-	}
-	switch c.Source {
-	case "local":
-		c.Source = LLMLocalGateway
-	case "", LLMOwn, LLMLocalGateway, LLMPlatform:
-		// "": only fields such as the model; the source comes from a recipe
-		// link or the default choice.
-	default:
-		return nil, fault(CodeBadParams, nil, "参数 %s 的 source 只能是 own、local_gateway、platform", key)
-	}
-	for _, v := range []string{c.BaseURL, c.APIKey, c.Model, c.App} {
-		if !singleLine(v) || len(v) > 2048 {
-			return nil, fault(CodeBadParams, nil, "参数 %s 里不能有换行或控制字符", key)
-		}
-	}
-	if c.Source == LLMOwn {
-		if c.BaseURL == "" || c.APIKey == "" || c.Model == "" {
-			return nil, fault(CodeBadParams, nil, "自己的 Key 要填 base_url、api_key、model 三项（参数 %s）", key)
-		}
-		u, err := url.Parse(c.BaseURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return nil, fault(CodeBadParams, nil, "参数 %s 的 base_url 要是 http:// 或 https:// 开头的地址", key)
-		}
-	}
-	return &c, nil
-}
-
-// lookup resolves "params.<key>", "params.<key>.<field>" or
-// "platform.<name>".
+// lookup resolves "params.<key>", "platform.<name>" or
+// "uses.<name>.<item>" (an item of the service a need of the app is
+// connected to; see usesKey).
 func (v Values) lookup(ref string) (string, error) {
 	if name, ok := strings.CutPrefix(ref, "platform."); ok {
 		return v.lookupPlatform(name)
+	}
+	if rest, ok := strings.CutPrefix(ref, "uses."); ok {
+		return v.lookupUse(rest)
 	}
 	parts := strings.Split(ref, ".")
 	if len(parts) < 2 || parts[0] != "params" {
@@ -292,52 +291,34 @@ func (v Values) lookup(ref string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("没有参数 %s", parts[1])
 	}
-	switch x := val.(type) {
-	case string:
-		if len(parts) != 2 {
-			return "", fmt.Errorf("参数 %s 没有字段 %s", parts[1], strings.Join(parts[2:], "."))
-		}
-		return x, nil
-	case *LLMChoice:
-		if len(parts) != 3 {
-			return "", fmt.Errorf("大模型参数要写 %s.base_url / api_key / model", ref)
-		}
-		switch parts[2] {
-		case "base_url":
-			return x.BaseURL, nil
-		case "api_key":
-			return x.APIKey, nil
-		case "model":
-			return x.Model, nil
-		case "source":
-			return x.Source, nil
-		}
-		return "", fmt.Errorf("大模型参数没有字段 %s", parts[2])
+	x, ok := val.(string)
+	if !ok {
+		return "", fmt.Errorf("参数 %s 的值不对", parts[1])
 	}
-	return "", fmt.Errorf("参数 %s 的值不对", parts[1])
+	if len(parts) != 2 {
+		return "", fmt.Errorf("参数 %s 没有字段 %s", parts[1], strings.Join(parts[2:], "."))
+	}
+	return x, nil
 }
 
-var placeholderRe = regexp.MustCompile(`\{\{\s*([^{}\s]+)\s*\}\}`)
-
-// render replaces every {{params.…}} in tmpl; escape (may be nil) is applied
-// to each inserted value. An unknown reference is an error.
+// render fills in the references of tmpl (catalog.ParseTemplate: params.*,
+// platform.*, uses.* with their transforms; any other {{…}} is kept as
+// written); escape (may be nil) is applied to each inserted value. A
+// reference that cannot be resolved is an error; so is one that cannot be
+// read or a transform that fails (catalog.IsRenderError).
 func (v Values) render(tmpl string, escape func(string) string) (string, error) {
-	var firstErr error
-	out := placeholderRe.ReplaceAllStringFunc(tmpl, func(m string) string {
-		ref := placeholderRe.FindStringSubmatch(m)[1]
-		s, err := v.lookup(ref)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			return m
-		}
-		if escape != nil {
-			s = escape(s)
-		}
-		return s
-	})
-	return out, firstErr
+	return catalog.RenderTemplate(tmpl, v.lookup, escape)
+}
+
+// holds works out a condition (an env entry's or a config file's if) with
+// these values. A reference with no value (an optional use that is not
+// connected) makes it false.
+func (v Values) holds(cond string) (bool, error) {
+	c, err := catalog.ParseCondition(cond)
+	if err != nil {
+		return false, err
+	}
+	return c.Eval(v.lookup)
 }
 
 // quotedEscape makes a value safe inside a double-quoted YAML or JSON string.

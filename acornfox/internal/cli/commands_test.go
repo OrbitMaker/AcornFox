@@ -76,7 +76,8 @@ func TestAppsLocalOnlyNote(t *testing.T) {
 	h.api.appsFn = func(ctx context.Context) ([]client.App, error) {
 		return []client.App{
 			{Name: "new-api", URL: "http://127.0.0.1:18810", Exposure: "local", LocalOnly: true,
-				OpenHint: &client.OpenHint{LANAddress: "192.168.1.20", LANURL: "http://192.168.1.20:18810", HasLogin: true, CanLAN: true, Recommend: "lan", Command: "acornfox open new-api"}},
+				OpenHint: &client.OpenHint{LANAddress: "192.168.1.20", LANURLAfterExpose: "http://192.168.1.20:18810", HasLogin: true, CanLAN: true, Recommend: "lan", Command: "acornfox open new-api",
+					TunnelCommand: "ssh -N -L 18810:127.0.0.1:18810 用户@服务器地址", TunnelURL: "http://127.0.0.1:18810"}},
 			{Name: "web", URL: "http://127.0.0.1:18811", Exposure: "local", LocalOnly: true,
 				OpenHint: &client.OpenHint{Recommend: "tunnel", Command: "acornfox open web"}},
 		}, nil
@@ -86,12 +87,18 @@ func TestAppsLocalOnlyNote(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
+	// The LAN address is only ever the address after switching, said to
+	// not open yet; the plain ssh tunnel is there for a computer without
+	// the command line.
 	if len(lines) != 2 || !strings.Contains(lines[0], "acornfox open new-api") || !strings.Contains(lines[0], "--expose lan") ||
-		!strings.Contains(lines[0], "http://192.168.1.20:18810") || !strings.Contains(lines[1], "acornfox open web") || strings.Contains(lines[1], "--expose") {
+		!strings.Contains(lines[0], "改好以后才能用 http://192.168.1.20:18810 打开（现在还打不开）") ||
+		!strings.Contains(lines[0], "ssh -N -L 18810:127.0.0.1:18810 用户@服务器地址") ||
+		!strings.Contains(lines[1], "acornfox open web") || strings.Contains(lines[1], "--expose") {
 		t.Fatalf("output:\n%s", out)
 	}
 	code, out, _ = h.run("--json", "apps")
-	if code != exitOK || !strings.Contains(out, `"exposure":"local"`) || !strings.Contains(out, `"recommend":"lan"`) {
+	if code != exitOK || !strings.Contains(out, `"exposure":"local"`) || !strings.Contains(out, `"recommend":"lan"`) ||
+		!strings.Contains(out, `"lan_url_after_expose":"http://192.168.1.20:18810"`) || strings.Contains(out, `"lan_url":`) {
 		t.Fatalf("json: %s", out)
 	}
 }

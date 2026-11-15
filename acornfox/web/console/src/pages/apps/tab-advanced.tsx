@@ -18,7 +18,7 @@ import type { TabProps } from './app-page'
 
 // 页面上能选的访问方式。应用当前是别的值（例如经 AFX 云）时只显示、不让在这里改。
 const EXPOSURES: [string, string][] = [['local', '只本机'], ['lan', '局域网'], ['public', '公网']]
-const EXPOSURE_TEXT: Record<string, string> = { local: '只本机', lan: '局域网', public: '公网', afx_cloud: '经 AFX 云' }
+const EXPOSURE_TEXT: Record<string, string> = { local: '只本机', lan: '局域网', public: '公网', afx_cloud: '经 AFX 云', internal: '只在内部网络' }
 // 下拉框里“跟随默认”的取值；保存时发 exposure: ""（和 acornfox app set --expose default 一样）。
 export const FOLLOW_DEFAULT = 'default'
 
@@ -99,7 +99,11 @@ export function AdvancedTab({ app: a, reload }: TabProps) {
         <Card className="flex flex-col gap-1 p-3.5" data-testid="exposure-readonly">
           <div className="text-sm font-medium">访问方式</div>
           <div className="text-sm">{EXPOSURE_TEXT[a.exposure] || a.exposure || '默认'}</div>
-          <div className="text-2xs text-muted-foreground">这里不能改这种访问方式，要改用命令行 <span className="mono">acornfox app set --app {a.name} --expose …</span></div>
+          {a.internal_only ? (
+            <div className="text-2xs text-muted-foreground">{a.internal_note || '只在内部网络，给别的应用用'}：没有网页可以打开，访问方式不能改。别的应用按名字 <span className="mono">{a.name}</span> 在内部网络里连它。</div>
+          ) : (
+            <div className="text-2xs text-muted-foreground">这里不能改这种访问方式，要改用命令行 <span className="mono">acornfox app set --app {a.name} --expose …</span></div>
+          )}
         </Card>
       )}
       <Dialog open={pubOpen} onClose={() => setPubOpen(false)} labelledBy="pub-title">

@@ -289,14 +289,14 @@ func TestRuntimeChecksLinuxHealthy(t *testing.T) {
 	if !v.OK || v.OS != "linux" || v.DataDir != "/var/lib/acornfox" {
 		t.Fatalf("view = %+v", v)
 	}
-	for _, p := range []string{"后台服务", "Docker", "网关（Caddy）：运行中", "磁盘：数据目录 /var/lib/acornfox、Docker 数据目录 /var/lib/docker 所在分区剩余 50.0 GB", "端口："} {
+	for _, p := range []string{"后台服务", "Docker", "网关：运行中", "磁盘：数据目录 /var/lib/acornfox、Docker 数据目录 /var/lib/docker 所在分区剩余 50.0 GB", "端口："} {
 		it := itemWith(v, p)
 		if it == nil || it.Level != "ok" {
 			t.Fatalf("missing ok item %q in %+v", p, v.Items)
 		}
 	}
 	// Passed items name their check (code stays empty, as before).
-	for p, check := range map[string]string{"后台服务": "SETUP-SVC-01", "Docker": "SETUP-RT-03", "网关（Caddy）": "SETUP-EDGE-01", "磁盘：": "SETUP-DISK-01", "端口：": "SETUP-PORT-01"} {
+	for p, check := range map[string]string{"后台服务": "SETUP-SVC-01", "Docker": "SETUP-RT-03", "网关：": "SETUP-EDGE-01", "磁盘：": "SETUP-DISK-01", "端口：": "SETUP-PORT-01"} {
 		if it := itemWith(v, p); it.Check != check || it.Code != "" {
 			t.Fatalf("item %q: check %q code %q", p, it.Check, it.Code)
 		}
@@ -315,13 +315,13 @@ func TestRuntimeChecksFaults(t *testing.T) {
 	cfg, _, _ := newTestConfig(t)
 	cfg.DataDir = "/var/lib/acornfox"
 	cfg.Runner.(*fakeRunner).pingErr = errors.New("dial unix: connection refused")
-	cfg.EdgeStatus = func() (string, string) { return reconcile.EdgeStateError, "Caddy 容器启动失败" }
+	cfg.EdgeStatus = func() (string, string) { return reconcile.EdgeStateError, "入口容器启动失败" }
 	cfg.CheckPorts = hostcheck.Ports{Admin: 18808, LAN: 18802, AppMin: 18810, AppMax: 18899}
 	v := runtimeGet(t, New(cfg))
 	if v.OK {
 		t.Fatalf("faults must make ok false: %+v", v)
 	}
-	want := map[string]string{"Docker：": "SETUP-SVC-01", "网关（Caddy）：": "SETUP-EDGE-01", "磁盘：": "SETUP-DISK-01", "端口：18832": "SETUP-PORT-05"}
+	want := map[string]string{"Docker：": "SETUP-SVC-01", "网关：": "SETUP-EDGE-01", "磁盘：": "SETUP-DISK-01", "端口：18832": "SETUP-PORT-05"}
 	for p, code := range want {
 		it := itemWith(v, p)
 		if it == nil || it.Code != code {

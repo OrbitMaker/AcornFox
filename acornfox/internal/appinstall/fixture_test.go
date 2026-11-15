@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/catalog"
+	"gopkg.in/yaml.v3"
 )
 
 // Hand-made catalogs for tests. `catalog build` refuses a manifest its own
@@ -43,22 +44,63 @@ type fixApp struct {
 	indexFrom string
 }
 
-// publishedManifest reads a manifest of the published catalog (serial 3).
-func publishedManifest(t testing.TB, id string) string {
+// goodDir is the test material written the current way: an app that
+// provides a model API and hands each consumer a token of its own (catalog
+// id new-api), an app that needs one (hermes-agent), the recipe that
+// installs both and wires them, and the service type.
+const goodDir = "../catalog/testdata/good"
+
+// goodManifest reads a manifest of that material.
+// hermesModel is the setting a fresh install of the material's consumer
+// (hermes-agent) needs: the model it talks to, which is its own setting.
+func hermesModel() map[string]any { return map[string]any{"model": "demo-model"} }
+
+func goodManifest(t testing.TB, id string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "catalog", "testdata", "published-3", "src", "apps", id, "manifest.yaml"))
+	b, err := os.ReadFile(filepath.Join(goodDir, "apps", id, "manifest.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(b)
 }
 
-// withMinPlatform rewrites the manifest's lifecycle.min_platform.
+// goodRecipe reads the material's recipe.
+func goodRecipe(t testing.TB, id string) catalog.Recipe {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(goodDir, "recipes", id, "recipe.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r catalog.Recipe
+	if err := yaml.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// oneAppRecipe is a recipe that installs app alone (an app of a recipe
+// already installed is used as it is).
+func oneAppRecipe(app string) catalog.Recipe {
+	return catalog.Recipe{ID: app, Schema: 1, Title: app, Summary: "只装 " + app, Apps: []catalog.RecipeApp{{App: app}},
+		Delivery: catalog.Delivery{Tier: "auto"}}
+}
+
+// goodBundle is the catalog the engine tests install from (setup): the two
+// apps of the material, its recipe, a one-app recipe for each app, and the
+// material's service types.
+func goodBundle(t testing.TB) *catalog.Bundle {
+	t.Helper()
+	return typedBundle(t, goodDir, []catalog.Recipe{goodRecipe(t, "hermes-with-new-api"), oneAppRecipe("new-api"), oneAppRecipe("hermes-agent")},
+		goodManifest(t, "new-api"), goodManifest(t, "hermes-agent"))
+}
+
+// withMinPlatform rewrites the manifest's lifecycle.min_platform (the
+// material says 0.6.0).
 func withMinPlatform(t testing.TB, manifest, min string) string {
 	t.Helper()
-	const old = `min_platform: "0.5.0"`
+	const old = `min_platform: "0.6.0"`
 	if !strings.Contains(manifest, old) {
-		t.Fatal("manifest has no min_platform 0.5.0 to rewrite")
+		t.Fatal("manifest has no min_platform 0.6.0 to rewrite")
 	}
 	return strings.Replace(manifest, old, `min_platform: "`+min+`"`, 1)
 }
@@ -209,11 +251,11 @@ func nothingCreated(t *testing.T, v *env) {
 //
 // What the catalog holds (index bound to "public"):
 //
-//	new-api         the published manifest: installs
-//	hermes-agent    the published manifest but min_platform 9.9.9: needs_platform, CAT-INST-08 before any download
-//	needs-next      a copy of new-api with min_platform 0.5.1 (what an older AcornFox meets first)
-//	odd-app         a copy of new-api with a field no schema has, min_platform 0.5.0: CAT-INST-29, catalog at fault
-//	odd-newer       the same field, the manifest says 9.9.9 but the index 0.5.0: CAT-INST-29 with needs_platform
+//	new-api         the test material's manifest (testdata/good): installs
+//	hermes-agent    the material's manifest but min_platform 9.9.9: needs_platform, CAT-INST-08 before any download
+//	needs-next      a copy of new-api with min_platform 0.6.1 (what an older AcornFox meets first)
+//	odd-app         a copy of new-api with a field no schema has, min_platform 0.6.0: CAT-INST-29, catalog at fault
+//	odd-newer       the same field, the manifest says 9.9.9 but the index 0.6.0: CAT-INST-29 with needs_platform
 //	recipes         "new-api" (installs)
 //	recipes_v2      "future-bundle" (new-api, min_platform 9.9.9): unseen by the first release, marked by later ones
 //
@@ -237,7 +279,7 @@ func TestWriteAcceptanceCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newAPI, hermes := publishedManifest(t, "new-api"), publishedManifest(t, "hermes-agent")
+	newAPI, hermes := goodManifest(t, "new-api"), goodManifest(t, "hermes-agent")
 	as := func(id, manifest string) string {
 		if !strings.Contains(manifest, "id: new-api\n") {
 			t.Fatal("manifest has no id line to rewrite")
@@ -251,9 +293,9 @@ func TestWriteAcceptanceCatalog(t *testing.T) {
 	b := fixtureBundle(t, serial, catalog.PublicCatalog, []fixApp{
 		{manifest: newAPI},
 		{manifest: withMinPlatform(t, hermes, "9.9.9")},
-		{manifest: as("needs-next", withMinPlatform(t, newAPI, "0.5.1"))},
+		{manifest: as("needs-next", withMinPlatform(t, newAPI, "0.6.1"))},
 		{manifest: as("odd-app", withUnknownField(newAPI))},
-		{manifest: as("odd-newer", withUnknownField(withMinPlatform(t, newAPI, "9.9.9"))), indexMin: "0.5.0"},
+		{manifest: as("odd-newer", withUnknownField(withMinPlatform(t, newAPI, "9.9.9"))), indexMin: "0.6.0"},
 	}, []catalog.Recipe{recipe("new-api", "")}, []catalog.Recipe{recipe("future-bundle", "9.9.9")})
 	b.Sign(key)
 	files, err := b.Write(out)

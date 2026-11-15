@@ -1,0 +1,134 @@
+# Only for testing: a minimal app that writes every way of putting a value
+# into an app the format has (templates in env values, transforms, if, two
+# entries of one env key for different cases, a template in the start
+# command, config files with an if and with the json and yaml transforms, a
+# first-login value made from a template, an optional service's item with a
+# default). Not for the catalog. See ../../README.md for what each value is
+# expected to be.
+id: demo-values
+schema: 3
+source: community
+maintainer: acornfox
+
+app:
+  name: 值的写法样例
+  summary: 只用于验收：把清单里值的各种写法都用一遍
+  category: dev
+  homepage: https://example.com/demo-values
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64, linux/arm64]
+
+release:
+  version: "1.0.0"
+  images:
+    - name: app
+      repository: busybox
+      tag: "1.36"
+      # A placeholder of the right shape: the acceptance run puts the real
+      # digest of the image it uses here before installing.
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+container:
+  # One item is one argument: "{{params.realm | upper}}" becomes one
+  # argument with a blank in it, no shell splits it.
+  command: [httpd, -f, -p, "8080", -h, /www, -r, "{{params.realm | upper}}"]
+
+endpoints:
+  - name: web
+    port: 8080
+    protocol: http
+    primary: true
+    health:
+      path: /index.html
+      timeout_s: 60
+
+exposure:
+  default: local
+
+volumes:
+  - name: www
+    path: /www
+
+params:
+  - key: realm
+    type: string
+    label: 名字
+    default: demo values
+  - key: greeting
+    type: string
+    label: 问候语
+    default: 'say "hi" \ back'
+  - key: flag
+    type: bool
+    label: 开关
+    default: true
+  - key: admin_password
+    type: secret
+    generate: { length: 20 }
+    hidden: true
+    editable: never
+
+uses:
+  - { name: mail, kind: smtp, optional: true, without: 能用，但发不了通知邮件 }
+
+env:
+  - { key: APP_URL_SLASH, value: "{{platform.app.url}}/" }
+  - { key: REGION_UPPER, value: "{{platform.region | upper}}" }
+  - { key: REGION_IS_CN, value: '{{platform.region | map "cn=yes" "*=no"}}' }
+  - { key: PIP_ONLY_IN_CN, from: platform.mirror.pypi, if: "platform.region == cn" }
+  - { key: MODE, value: domestic, if: "platform.region == cn" }
+  - { key: MODE, value: abroad, if: "platform.region != cn" }
+  - { key: FLAG_ON, value: "on", if: params.flag }
+  - { key: GREETING_B64, value: "{{params.greeting | b64}}" }
+  - { key: GREETING_URL, value: "{{params.greeting | urlencode}}" }
+  - { key: GREETING_SHA256, value: "{{params.greeting | sha256}}" }
+  - { key: GREETING_SHELL, value: "{{params.greeting | shell}}" }
+  - { key: GREETING_SNAKE, value: '{{params.greeting | lower | replace " " "_"}}' }
+  - { key: MAIL_HOST, value: '{{uses.mail.host | default "none"}}' }
+  - { key: MAIL_ONLY_WHEN_THERE, from: uses.mail.host, optional: true }
+  - { key: LITERAL_BRACES, value: '\{{params.greeting}} and {{ $json.x }}' }
+  - { key: ADMIN_DSN, value: "admin:{{params.admin_password | urlencode}}@db", secret: true }
+
+files:
+  - volume: www
+    path: index.html
+    overwrite: install
+    template: |
+      <h1>{{params.realm}}</h1>
+  - volume: www
+    path: settings.json
+    overwrite: install
+    template: |
+      {"greeting": {{params.greeting | json}}, "raw": "{{params.greeting}}", "region": "{{platform.region}}"}
+  - volume: www
+    path: settings.yaml
+    overwrite: install
+    template: |
+      greeting: {{params.greeting | yaml}}
+      raw: "{{params.greeting}}"
+  - volume: www
+    path: cn-only.txt
+    overwrite: install
+    if: "platform.region == cn"
+    template: |
+      mirror={{platform.mirror.pypi}}
+  - volume: www
+    path: mail.txt
+    overwrite: install
+    if: uses.mail.host
+    template: |
+      host={{uses.mail.host}}
+
+first_login:
+  - { label: 地址, value: "{{platform.app.url}}/index.html" }
+  - { label: 密码, from: params.admin_password, secret: true }
+
+delivery:
+  tier: auto

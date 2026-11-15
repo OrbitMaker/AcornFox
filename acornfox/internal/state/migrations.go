@@ -477,6 +477,79 @@ ALTER TABLE kept_catalog_secrets ADD COLUMN manifest TEXT NOT NULL DEFAULT '';
 ALTER TABLE kept_catalog_secrets ADD COLUMN manifest_sha256 TEXT NOT NULL DEFAULT '';
 `
 
+// migration0014 adds the service registry: what this machine can offer to its
+// apps, and which app is plugged into what.
+//
+// services holds one row per service. A service is either provided by an
+// installed app (source 'app': app is the providing app, provide_index the
+// entry of that app's manifest it comes from) or registered by the user
+// (source 'user': something the user already has elsewhere). values_enc is
+// the encrypted JSON object {item: value} of the values every consumer gets;
+// the store never sees them in clear. Whether a service is usable is not
+// stored: it is worked out from these rows and the app's current state.
+//
+// service_bindings holds one row per need of an app that is plugged into a
+// service (use_name is the name of the need in that app's manifest).
+// issued_enc is the encrypted JSON object of what the provider issued to this
+// consumer alone. A service that still has bindings cannot be deleted.
+//
+// app columns deliberately do not reference apps(name): a service outlives
+// the deletion of its provider until nothing uses it any more, and the
+// credentials of a binding are needed to take them back after the consumer's
+// own row is gone.
+const migration0014 = `
+CREATE TABLE services (
+    name          TEXT PRIMARY KEY NOT NULL,
+    kind          TEXT NOT NULL,
+    source        TEXT NOT NULL CHECK (source IN ('app','user')),
+    app           TEXT NOT NULL DEFAULT '',
+    provide_index INTEGER NOT NULL DEFAULT 0 CHECK (provide_index >= 0),
+    values_enc    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    CHECK (length(name) > 0),
+    CHECK (length(kind) > 0),
+    CHECK ((source = 'app' AND app <> '') OR (source = 'user' AND app = '' AND provide_index = 0)),
+    CHECK (created_at GLOB '` + timePattern + `'),
+    CHECK (updated_at GLOB '` + timePattern + `')
+);
+CREATE INDEX services_kind_idx ON services (kind, name);
+CREATE UNIQUE INDEX services_app_provide_idx ON services (app, provide_index) WHERE source = 'app';
+CREATE TABLE service_bindings (
+    app        TEXT NOT NULL,
+    use_name   TEXT NOT NULL,
+    service    TEXT NOT NULL REFERENCES services(name) ON DELETE RESTRICT,
+    issued_enc TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (app, use_name),
+    CHECK (length(app) > 0),
+    CHECK (length(use_name) > 0),
+    CHECK (created_at GLOB '` + timePattern + `')
+);
+CREATE INDEX service_bindings_service_idx ON service_bindings (service, app, use_name);
+`
+
+// migration0015 records, for an app installed from the app catalog, whether
+// it is reached over the app network only (internal: a database or a cache
+// that no browser opens; its port is not published on the host and it gets
+// no entry route) and how the reconciler tells a new container is up when
+// that is not a GET to health_path (health_check: JSON {"exec": [...],
+// "expect_stdout": "...", "timeout_s": n} or {"tcp": true, ...}; "" keeps the
+// HTTP check). Every existing app keeps 0 and "": nothing changes for it.
+const migration0015 = `
+ALTER TABLE apps ADD COLUMN internal INTEGER NOT NULL DEFAULT 0 CHECK (internal IN (0, 1));
+ALTER TABLE apps ADD COLUMN health_check TEXT NOT NULL DEFAULT '';
+`
+
+// migration0016 records, for a binding, whether the need takes the service
+// for itself (its manifest's uses[].dedicated): while such a binding is
+// there no other app may be plugged into the service (SetServiceBinding
+// checks it in the transaction that writes a binding). Every existing
+// binding keeps 0: none was dedicated before.
+const migration0016 = `
+ALTER TABLE service_bindings ADD COLUMN dedicated INTEGER NOT NULL DEFAULT 0 CHECK (dedicated IN (0, 1));
+`
+
 // migrationList is the complete, ordered schema history. Never edit a shipped
 // entry; append a new one instead.
 func migrationList() []migration {
@@ -494,6 +567,9 @@ func migrationList() []migration {
 		{"0011_app_catalog_origin", migration0011},
 		{"0012_kept_catalog_secrets", migration0012},
 		{"0013_app_catalog_manifests", migration0013},
+		{"0014_service_registry", migration0014},
+		{"0015_app_internal_health", migration0015},
+		{"0016_binding_dedicated", migration0016},
 	}
 }
 

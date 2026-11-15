@@ -82,17 +82,14 @@ func TestNoArtifactReason(t *testing.T) {
 }
 
 // hermesArchives rewrites the good catalog's Hermes image to the
-// per-architecture form with the given lines under "artifacts:" and, unless
-// keepMin, min_platform 0.5.1. It returns the catalog dir and the file.
-func hermesArchives(t *testing.T, lines string, keepMin bool) (string, string) {
+// per-architecture form with the given lines under "artifacts:". It returns
+// the catalog dir and the file.
+func hermesArchives(t *testing.T, lines string) (string, string) {
 	t.Helper()
 	dir := copyTree(t)
 	file := filepath.Join(dir, "apps", "hermes-agent", manifestName)
 	edit(t, file, "      artifact: hermes-agent-v0.23.0-image\n      artifact_sha256: d356bba314af272039743d82123bf57a38e67696d69558a6871c4b999700df45\n      artifact_size: 1120227840\n",
 		"      artifacts:\n"+lines)
-	if !keepMin {
-		edit(t, file, `min_platform: "0.5.0"`, `min_platform: "0.5.1"`)
-	}
 	return dir, file
 }
 
@@ -110,63 +107,37 @@ func lintCodes(t *testing.T, dir string) (Report, map[string]int) {
 	return r, codes(r)
 }
 
-// The per-architecture form lints clean with both architectures and
-// min_platform 0.5.1, and builds.
+// The per-architecture form lints clean with both architectures, needs no
+// more than the first platform of format 3 (which has always understood
+// it), and builds.
 func TestLintPerArchClean(t *testing.T) {
-	dir, _ := hermesArchives(t, amdLine+armLine, false)
+	dir, _ := hermesArchives(t, amdLine+armLine)
 	r, _ := lintCodes(t, dir)
 	if len(r.Problems) != 0 {
 		t.Fatalf("problems %+v", r.Problems)
 	}
-	if info := r.MinPlatform.Apps["hermes-agent"]; info.Computed != "0.5.1" || len(info.Reasons) == 0 ||
-		!strings.HasPrefix(info.Reasons[0].Feature, "manifest:/release/images/*/artifacts") {
+	if info := r.MinPlatform.Apps["hermes-agent"]; info.Computed != BasePlatform || len(info.Reasons) != 0 {
 		t.Fatalf("min platform %+v", info)
 	}
 	b, err := Build(dir, 7)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	// The first feature newer than the base release: recipes using Hermes
-	// move to recipes_v2 with 0.5.1, so a 0.5.0 client does not list them;
-	// the New API recipe stays where it was.
 	idx, err := ParseIndex(b.Index)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(idx.Recipes) != 1 || idx.Recipes[0].ID != "new-api" || idx.Recipes[0].MinPlatform != "" {
-		t.Fatalf("recipes = %+v", idx.Recipes)
-	}
-	if len(idx.RecipesV2) != 2 || idx.RecipesV2[0].ID != "hermes-agent" || idx.RecipesV2[0].MinPlatform != "0.5.1" ||
-		idx.RecipesV2[1].ID != "hermes-with-new-api" || idx.RecipesV2[1].MinPlatform != "0.5.1" {
-		t.Fatalf("recipes_v2 = %+v", idx.RecipesV2)
+	if len(idx.Recipes) != 0 || len(idx.RecipesV2) != 3 {
+		t.Fatalf("recipes = %+v, recipes_v2 = %+v", idx.Recipes, idx.RecipesV2)
 	}
 	for _, a := range idx.Apps {
-		if want := map[string]string{"hermes-agent": "0.5.1", "new-api": "0.5.0"}[a.ID]; a.MinPlatform != want {
-			t.Fatalf("app %s min_platform %q, want %q", a.ID, a.MinPlatform, want)
+		if a.MinPlatform != BasePlatform {
+			t.Fatalf("app %s min_platform %q, want %q", a.ID, a.MinPlatform, BasePlatform)
 		}
 	}
-}
-
-// Writing the new form with min_platform 0.5.0 is CAT-LINT-17 (a 0.5.0
-// platform would install it ignoring the archives), and the catalog cannot
-// be built.
-func TestLintPerArchNeedsMinPlatform(t *testing.T) {
-	dir, _ := hermesArchives(t, amdLine+armLine, true)
-	r, c := lintCodes(t, dir)
-	if c[CodeMinPlatform] != 1 {
-		t.Fatalf("want %s: %+v", CodeMinPlatform, r.Problems)
-	}
-	for _, p := range r.Problems {
-		if p.Code == CodeMinPlatform && (!strings.Contains(p.Message, "0.5.1") || !strings.Contains(p.Message, "artifacts")) {
-			t.Fatalf("message %q", p.Message)
-		}
-	}
-	if _, err := Build(dir, 7); CodeOf(err) != CodeBuildLint {
-		t.Fatalf("build: %v", err)
-	}
-	raw, _ := os.ReadFile(filepath.Join(dir, "apps", "hermes-agent", manifestName))
-	if mp, err := ManifestMinPlatform(raw); err != nil || mp.Version != "0.5.1" {
-		t.Fatalf("%+v %v", mp, err)
+	var h Manifest
+	if err := readYAML(filepath.Join(dir, "apps", "hermes-agent", manifestName), &h); err != nil || len(h.Release.Images[0].Artifacts) != 2 {
+		t.Fatalf("%+v %v", h.Release.Images, err)
 	}
 }
 
@@ -200,7 +171,7 @@ func TestLintPerArchProblems(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			dir, file := hermesArchives(t, c.lines, false)
+			dir, file := hermesArchives(t, c.lines)
 			if c.edit != nil {
 				c.edit(t, file)
 			}
@@ -224,7 +195,7 @@ func TestLintPerArchProblems(t *testing.T) {
 // The schema at install time (ValidateManifest) takes the new form and
 // still refuses an architecture it does not know.
 func TestValidateManifestPerArch(t *testing.T) {
-	_, file := hermesArchives(t, amdLine+armLine, false)
+	_, file := hermesArchives(t, amdLine+armLine)
 	raw, _ := os.ReadFile(file)
 	if ps := ValidateManifest(raw); len(ps) != 0 {
 		t.Fatalf("%+v", ps)

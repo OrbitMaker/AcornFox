@@ -14,8 +14,20 @@ import (
 
 const statusUsage = `用法：acornfox status [应用名 | 部署编号]
 
-用途：查看一个应用的状态（网址、期望状态和观察状态、当前版本、数据卷、域名、环境变量名），
-  或者一次部署的进度和诊断。
+用途：查看一个应用的状态（网址、期望状态和观察状态、当前版本、数据卷、域名、环境变量名、
+  它用的服务），或者一次部署的进度和诊断。
+  它用的服务（从应用中心装的应用）：每个需要一行，写需要的名字、服务类型、必须还是可选、接的是哪条服务、
+  那条服务现在的状态（可用、还差必填项、提供它的应用停着、提供它的应用已删）；没接上的写“没接上”。
+  --json 里是 services：[{use, kind, kind_label, required, service, status, status_label}]，
+  和 GET /v1/apps/{应用} 的 services 一样；没接上的 service 是空、status 是 not_connected；没有时是空数组。
+  怎么打开：url 是网址（只本机能打开的是 127.0.0.1 开头，只有服务器自己能打开）；lan_url 只在已经开放到
+  局域网时才有。只本机能打开、服务器是 Linux 时另有 open_hint（和 acornfox --json apps 里的一样）：
+  有 ask 时把 ask 原样问用户，同意后运行 ask_yes_command，改好以后才能用 lan_url_after_expose 打开（之前打不开）；
+  不改的话让用户在自己的电脑上运行 command，电脑上没有 acornfox 命令行时运行 tunnel_command
+  （“用户@服务器地址”换成他登录这台服务器用的）再打开 tunnel_url。两条都在用户自己电脑上运行，
+  不在服务器上：command_where、tunnel_where 是写给用户的这句话，照抄。
+  port（和 container_port 一样）是应用在容器里听的端口，不是访问地址的端口，port_note 写着这句话；
+  普通输出里写成“容器内端口”。
   不写参数：看 --app 或当前目录对应的应用。
   写应用名：看这个应用；和 --app 一起用时两者要一致。
   写部署编号：看这次部署。部署编号是 deploy、redeploy --no-wait 打印的 12 位编号，只有 0-9 和 a-f。
@@ -167,6 +179,11 @@ func (a *app) statusApp(ctx context.Context, api client.API, appName string) int
 	return a.renderAppStatus(app)
 }
 
+// portNote says what the port in `status --json` is: the port the app
+// listens on inside its container. The field keeps its name (scripts read
+// it); container_port is the same number under a name that says so.
+const portNote = "port 和 container_port 是应用在容器里听的端口，不是访问地址的端口；访问地址看 url、lan_url（已开放到局域网才有），只本机能打开的看 open_hint"
+
 // renderAppStatus prints one app's status.
 func (a *app) renderAppStatus(app client.App) int {
 	envKeys := make([]map[string]any, 0, len(app.Env))
@@ -183,8 +200,13 @@ func (a *app) renderAppStatus(app client.App) int {
 	for _, d := range app.Domains {
 		domains = append(domains, map[string]any{"name": d.Name, "status": d.Status})
 	}
+	services := app.Services
+	if services == nil {
+		services = []client.AppService{}
+	}
 	if a.out.json {
-		a.out.emitJSON(map[string]any{
+		fields := map[string]any{
+			"services":           services,
 			"app":                app.Name,
 			"url":                app.URL,
 			"lan_url":            app.LANURL,
@@ -193,24 +215,53 @@ func (a *app) renderAppStatus(app client.App) int {
 			"observed_state":     app.ObservedState,
 			"current_deployment": app.CurrentDeployment,
 			"port":               app.Port,
+			"container_port":     app.Port,
+			"port_note":          portNote,
 			"memory_mb":          app.MemoryMB,
 			"cpu_milli":          app.CPUMilli,
 			"health_path":        app.HealthPath,
 			"volumes":            volumes,
 			"env":                envKeys,
 			"domains":            domains,
-		})
+		}
+		if app.LegacyNote != "" {
+			fields["legacy_note"] = app.LegacyNote
+		}
+		if app.OpenHint != nil {
+			fields["open_hint"] = app.OpenHint
+		}
+		if app.InternalOnly {
+			fields["internal_only"], fields["internal_note"] = true, app.InternalNote
+		}
+		a.out.emitJSON(fields)
 		return exitOK
 	}
 	a.out.human("应用 %s", app.Name)
+	if app.LegacyNote != "" {
+		a.out.human("说明：%s", app.LegacyNote)
+	}
 	if app.URL != "" {
-		a.out.human("网址：%s", app.URL)
+		if app.OpenHint != nil {
+			a.out.human("网址：%s（只在服务器本机能打开）", app.URL)
+		} else {
+			a.out.human("网址：%s", app.URL)
+		}
 	}
 	if app.LANURL != "" {
 		a.out.human("局域网地址：%s", app.LANURL)
 	}
-	if app.Exposure != "" {
+	if app.OpenHint != nil {
+		a.out.human("怎么打开：%s", localOnlyNote(app.Name, app.OpenHint))
+	}
+	if app.InternalOnly {
+		a.out.human("访问：%s（没有网页可以打开；别的应用按名字 %s 和容器内端口连它）", internalNoteOf(app), app.Name)
+	} else if app.Exposure != "" {
 		a.out.human("暴露方式：%s", app.Exposure)
+	}
+	if app.InternalOnly && app.Port > 0 {
+		a.out.human("容器内端口：%d（别的应用在内部网络里连 %s:%d）", app.Port, app.Name, app.Port)
+	} else if app.Port > 0 {
+		a.out.human("容器内端口：%d（应用在容器里听的端口，不是访问地址的端口；打开用上面的网址）", app.Port)
 	}
 	a.out.human("期望状态：%s；观察状态：%s", app.Desired, app.ObservedState)
 	a.out.human("当前版本：%s", app.CurrentDeployment)
@@ -233,7 +284,39 @@ func (a *app) renderAppStatus(app client.App) int {
 		}
 		a.out.human("环境变量：%s", strings.Join(keys, ", "))
 	}
+	if len(services) > 0 {
+		a.out.human("它用的服务：")
+		for _, s := range services {
+			a.out.human("  %s", appServiceLine(s))
+		}
+	}
 	return exitOK
+}
+
+// appServiceLine is one need of an app in `status APP`: its name, the
+// service type, whether it is required, which service it is plugged into and
+// that service's state.
+func appServiceLine(s client.AppService) string {
+	kind := s.KindLabel
+	if kind == "" {
+		kind = s.Kind
+	}
+	need := "可选"
+	if s.Required {
+		need = "必须"
+	}
+	state := s.StatusLabel
+	if state == "" {
+		state = s.Status
+	}
+	if s.Service == "" {
+		return fmt.Sprintf("%s（%s，%s）：没接上", s.Use, kind, need)
+	}
+	line := fmt.Sprintf("%s（%s，%s）→ %s：%s", s.Use, kind, need, s.Service, state)
+	if s.Status != "ok" {
+		line += "（acornfox services show " + s.Service + " 看原因）"
+	}
+	return line
 }
 
 // cmdApps implements `apps`.
@@ -274,6 +357,9 @@ func (a *app) cmdApps(ctx context.Context, args []string) int {
 			if ap.OpenHint != nil {
 				item["open_hint"] = ap.OpenHint
 			}
+			if ap.InternalOnly {
+				item["internal_only"], item["internal_note"] = true, ap.InternalNote
+			}
 			list = append(list, item)
 		}
 		a.out.emitJSON(map[string]any{"apps": list})
@@ -285,24 +371,56 @@ func (a *app) cmdApps(ctx context.Context, args []string) int {
 	}
 	for _, ap := range apps {
 		note := ""
+		where := ap.URL
 		if ap.LocalOnly {
 			note = "\t" + localOnlyNote(ap.Name, ap.OpenHint)
 		}
-		a.out.human("%s\t%s\t%s%s", ap.Name, ap.ObservedState, ap.URL, note)
+		if ap.InternalOnly {
+			where = internalNoteOf(ap)
+		}
+		a.out.human("%s\t%s\t%s%s", ap.Name, ap.ObservedState, where, note)
 	}
 	return exitOK
+}
+
+// internalNoteOf is what to say of an app reached over the app network only
+// (the server's words; a fixed text from an older server that said none).
+func internalNoteOf(ap client.App) string {
+	if ap.InternalNote != "" {
+		return ap.InternalNote
+	}
+	return "只在内部网络，给别的应用用"
 }
 
 // localOnlyNote tells how to open a local-only app from the user's own
 // computer: acornfox open APP there (an SSH tunnel, like the console);
 // on a server in the user's LAN, switching to lan exposure is the other
 // way, with the user's consent.
+//
+// The address it would have on the LAN does not open before the switch, so
+// it is only ever printed as the address after switching.
 func localOnlyNote(name string, h *client.OpenHint) string {
-	note := "只本机：在你自己的电脑上运行 acornfox open " + name + " 打开（经 SSH 隧道，不用放行安全组）"
+	note := "只在服务器本机能打开：在你自己的电脑上运行 acornfox open " + name + " 打开（经 SSH 隧道，不用放行安全组）"
+	if h != nil && h.TunnelCommand != "" {
+		note += "；电脑上没有 acornfox 命令行时运行 " + h.TunnelCommand + "（用户@服务器地址 换成你登录这台服务器用的）并保持不关，再打开 " + h.TunnelURL
+	}
 	if h != nil && h.CanLAN {
-		note += "；也可以经用户同意改成局域网：acornfox app set --app " + name + " --expose lan，之后用 " + h.LANURL + " 打开"
+		note += "；也可以经用户同意改成局域网：acornfox app set --app " + name + " --expose lan"
+		if after := lanAfter(h); after != "" {
+			note += "，改好以后才能用 " + after + " 打开（现在还打不开）"
+		}
 	}
 	return note
+}
+
+// lanAfter is the address a local-only app opens at once switched to lan
+// exposure: lan_url_after_expose; from a server before it had that field,
+// the lan_url it then gave in the hint meant the same.
+func lanAfter(h *client.OpenHint) string {
+	if h.LANURLAfterExpose != "" {
+		return h.LANURLAfterExpose
+	}
+	return h.LANURL
 }
 
 // cmdEnv implements `env set KEY=VALUE [--secret]` / `env unset KEY` /
@@ -496,7 +614,7 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 		cpu        = fs.Float64("cpu", -1, "CPU 核数（小数，至少 0.5）")
 		port       = fs.Int("port", -1, "容器端口")
 		healthPath = fs.String("health-path", "\x00", "健康检查路径")
-		expose     = fs.String("expose", "", "暴露方式：local（只本机）、lan（本机和局域网）、public（所有网卡 + 域名）、default（恢复本平台默认）")
+		expose     = fs.String("expose", "", "暴露方式：local（只本机）、lan（本机和局域网）、public（所有网卡 + 域名）、default（恢复本平台默认）；只在内部网络的应用（数据库这类）不能改")
 	)
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitUsage
@@ -610,14 +728,17 @@ const deleteUsage = `用法：acornfox delete [应用名] [--volumes]
 
 用途：删除一个应用：停掉并删掉它的容器、网络和记录。不写应用名时，用 --app 或当前目录对应的应用。
   默认保留数据卷（以后同名重装会被 CAT-INST-24 拦下，先问用户旧数据还要不要）；加 --volumes 连数据一起删，不能恢复。
-  从应用中心装的、用了本机 New API 的应用（例如 Hermes）：加 --volumes 时顺带吊销给它发的令牌；
-  保留数据时令牌和设置跟着数据留下，以后 install 应用 --reuse-data 接上旧数据时接着用；
-  被别的应用连着的模型网关（例如 Hermes 还在用的 New API）拒绝删除，先删用它的应用。
+  从应用中心装的、接了别的应用提供的服务的应用：加 --volumes 时顺带收回那个应用发给它的凭据，提供方的清单写了
+  删数据的步骤（数据库这类）时，再照着删掉给它建的库（收不回、删不掉的，输出的 warnings 里有 CAT-INST-35 提醒，
+  要用户到提供它的应用里手工删）；保留数据时凭据、在提供方里的库和设置都跟着数据留下，
+  以后 install 应用 --reuse-data 接上旧数据时检查过还能用就接着用；
+  它自己提供的服务还有别的应用在用时拒绝删除（先删用它的应用）；
+  用旧格式的清单装的应用照常能删，但平台不再替它收回当初拿到的凭据，warnings 里写了要到哪个应用里手工删。
 副作用：会删数据，执行前必须得到用户明确同意。
 例子：
-  acornfox delete hermes-agent
-  acornfox delete new-api --volumes
-  acornfox --json delete hermes-agent`
+  acornfox delete demo-app
+  acornfox delete demo-app --volumes
+  acornfox --json delete demo-app`
 
 // cmdDelete implements `delete [app] [--volumes]`.
 func (a *app) cmdDelete(ctx context.Context, args []string) int {

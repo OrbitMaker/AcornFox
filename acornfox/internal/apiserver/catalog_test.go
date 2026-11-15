@@ -8,11 +8,30 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/acornfox/acornfox/internal/appinstall"
+	"github.com/acornfox/acornfox/internal/catalog"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
+
+// goodCatalog is an app center catalog whose snapshot is the test material
+// of the current manifest format (catalog/testdata/good: two apps and their
+// recipes); the catalog built into the program has no apps yet. Sync goes
+// nowhere.
+func goodCatalog(t *testing.T, dir string) *appinstall.Catalog {
+	t.Helper()
+	b, err := catalog.BuildFor(filepath.Join("..", "catalog", "testdata", "good"), 5, catalog.PublicCatalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := fstest.MapFS{catalog.IndexFile: {Data: b.Index}, catalog.VersionFile: {Data: []byte("5\n")}}
+	for p, data := range b.Packages {
+		snap[p] = &fstest.MapFile{Data: data}
+	}
+	return appinstall.NewCatalog(appinstall.CatalogConfig{CacheDir: filepath.Join(dir, "catalog"), Snapshot: snap, Sources: []string{"http://127.0.0.1:1"}})
+}
 
 func TestCatalogRoutesWithoutAppCenter(t *testing.T) {
 	h, _, _, _, _ := newTestServer(t)
@@ -71,7 +90,7 @@ func TestPrivateCatalogRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	eng := appinstall.New(appinstall.Config{Store: db, Catalog: appinstall.NewCatalog(appinstall.CatalogConfig{CacheDir: filepath.Join(dir, "catalog")}), DataDir: dir})
+	eng := appinstall.New(appinstall.Config{Store: db, Catalog: goodCatalog(t, dir), DataDir: dir})
 	defer eng.Close()
 	st := newFakeStore()
 	h := New(Config{Store: st, Kicker: &fakeKicker{}, Runner: newFakeRunner(), UploadDir: dir, HostMetrics: fakeHostSized(8192, 4), AppCenter: eng})
@@ -90,11 +109,13 @@ func TestPrivateCatalogRoutes(t *testing.T) {
 		t.Fatalf("sources: %d %s", w.Code, w.Body.String())
 	}
 	w = do(t, h, "GET", "/v1/catalog/platform-vars", nil, nil)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"mirror.pypi"`) || !strings.Contains(w.Body.String(), `"name":"llm.api_key"`) {
+	// nothing about a model: a model API is a service, not a platform variable
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"mirror.pypi"`) || strings.Contains(w.Body.String(), `"name":"llm.`) ||
+		strings.Contains(w.Body.String(), "via_param") || strings.Contains(w.Body.String(), `"issued"`) {
 		t.Fatalf("platform-vars: %d %s", w.Code, w.Body.String())
 	}
 	// every variable says from which platform version on it exists
-	if n := strings.Count(w.Body.String(), `"since":"0.5.0"`); n != strings.Count(w.Body.String(), `"name":`) || n == 0 {
+	if n := strings.Count(w.Body.String(), `"since":"`+catalog.BasePlatform+`"`); n != strings.Count(w.Body.String(), `"name":`) || n == 0 {
 		t.Fatalf("platform-vars: %d of the variables carry since: %s", n, w.Body.String())
 	}
 	// a bad platform change is refused before a task starts (CAT-INST-28, 400)
@@ -135,18 +156,18 @@ func TestNeedsPlatformAndAppVarsRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	// Version 0.4.9: older than what the built-in catalog's apps ask for.
-	eng := appinstall.New(appinstall.Config{Store: db, Runner: refusingCatalogRunner{}, Version: "0.4.9", DataDir: dir,
-		Catalog: appinstall.NewCatalog(appinstall.CatalogConfig{CacheDir: filepath.Join(dir, "catalog"), Sources: []string{"http://127.0.0.1:1"}})})
+	// Version 0.4.9: older than what the catalog's apps ask for.
+	eng := appinstall.New(appinstall.Config{Store: db, Runner: refusingCatalogRunner{}, Version: "0.4.9", DataDir: dir, Catalog: goodCatalog(t, dir)})
 	defer eng.Close()
 	h := New(Config{Store: newFakeStore(), Kicker: &fakeKicker{}, Runner: newFakeRunner(), UploadDir: dir, HostMetrics: fakeHostSized(8192, 4), AppCenter: eng})
 
 	w := do(t, h, "GET", "/v1/catalog", nil, nil)
-	if w.Code != http.StatusOK || strings.Count(w.Body.String(), `"needs_platform":"0.5.0"`) < 2 || strings.Contains(w.Body.String(), `"needs_platform":""`) {
+	if w.Code != http.StatusOK || strings.Count(w.Body.String(), `"needs_platform":"0.6.0"`) < 2 || strings.Contains(w.Body.String(), `"needs_platform":""`) ||
+		strings.Contains(w.Body.String(), `"former"`) {
 		t.Fatalf("list: %d %s", w.Code, w.Body.String())
 	}
 	w = do(t, h, "GET", "/v1/catalog/apps/new-api", nil, nil)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"needs_platform":"0.5.0"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"needs_platform":"0.6.0"`) {
 		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
 	}
 	for _, body := range []string{`{"app":"new-api"}`, `{"recipe":"hermes-with-new-api"}`} {
@@ -155,7 +176,7 @@ func TestNeedsPlatformAndAppVarsRoutes(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &e); err != nil {
 			t.Fatal(err)
 		}
-		if w.Code != http.StatusConflict || e.Error.Code != appinstall.CodeTooOld || e.Error.NeedsPlatform != "0.5.0" || e.Error.Hint == "" {
+		if w.Code != http.StatusConflict || e.Error.Code != appinstall.CodeTooOld || e.Error.NeedsPlatform != "0.6.0" || e.Error.Hint == "" {
 			t.Fatalf("install %s: %d %s", body, w.Code, w.Body.String())
 		}
 	}

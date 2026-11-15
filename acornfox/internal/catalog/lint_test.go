@@ -101,11 +101,23 @@ func TestLintFindsProblems(t *testing.T) {
 		{"app video javascript:", "apps/new-api/manifest.yaml", "delivery:\n  tier: auto\n", "delivery:\n  tier: auto\n  video: \"javascript:alert(1)\"\n", CodeURL},
 		{"recipe video javascript:", "recipes/new-api/recipe.yaml", "  tier: auto\n", "  tier: auto\n  video: \"javascript:alert(1)\"\n", CodeURL},
 		{"env refers to unknown platform var", "apps/new-api/manifest.yaml", "from: platform.tz", "from: platform.timezone", CodePlatformVar},
-		{"file refers to unknown platform var", "apps/hermes-agent/manifest.yaml", `default: "{{params.llm.model}}"`, `default: "{{platform.llm.model.default}}"`, CodePlatformVar},
-		{"platform key used directly", "apps/hermes-agent/manifest.yaml", `api_key: "{{params.llm.api_key}}"`, `api_key: "{{platform.llm.api_key}}"`, CodePlatformVar},
+		{"file refers to unknown platform var", "apps/hermes-agent/manifest.yaml", `default: "{{params.model}}"`, `default: "{{platform.llm.model.default}}"`, CodePlatformVar},
+		{"model key as a platform variable", "apps/hermes-agent/manifest.yaml", `api_key: "{{uses.llm.api_key}}"`, `api_key: "{{platform.llm.api_key}}"`, CodePlatformVar},
 		{"schema: env from unknown kind", "apps/new-api/manifest.yaml", "from: platform.tz", "from: host.tz", CodeSchema},
 		{"recipe unknown app", "recipes/new-api/recipe.yaml", "app: new-api", "app: no-such-app", CodeRecipe},
-		{"link to missing use", "recipes/hermes-with-new-api/recipe.yaml", "uses: llm_gateway", "uses: nothing", CodeRecipe},
+		{"link to missing use", "recipes/hermes-with-new-api/recipe.yaml", "uses: llm }", "uses: nothing }", CodeRecipe},
+		{"link names the kind, not the need", "recipes/hermes-with-new-api/recipe.yaml", "uses: llm }", "uses: llm_gateway }", CodeRecipe},
+		{"link from an app installed later", "recipes/hermes-with-new-api/recipe.yaml", "  - app: new-api\n  - app: hermes-agent\n", "  - app: hermes-agent\n  - app: new-api\n", CodeRecipe},
+		{"link from an app that does not provide the kind", "apps/new-api/manifest.yaml", "  - kind: llm_gateway\n", "  - kind: smtp\n", CodeRecipe},
+		// Format 3 has none of the former forms: each is a schema error.
+		{"former format version", "apps/new-api/manifest.yaml", "schema: 3", "schema: 2", CodeSchema},
+		{"former model setting", "apps/hermes-agent/manifest.yaml", "params:\n", "params:\n  - { key: llm, type: llm_provider, required: true }\n", CodeSchema},
+		{"former model setting block", "apps/hermes-agent/manifest.yaml", "    hidden: true\n", "    hidden: true\n    llm: { local_gateway: true }\n", CodeSchema},
+		{"former provider adapter", "apps/new-api/manifest.yaml", "    endpoint: web\n", "    endpoint: web\n    adapter: new-api\n", CodeSchema},
+		{"former provider base_path", "apps/new-api/manifest.yaml", "    endpoint: web\n", "    endpoint: web\n    base_path: /v1\n", CodeSchema},
+		{"former use for_param", "apps/hermes-agent/manifest.yaml", "{ name: llm, kind: llm_gateway }", "{ name: llm, kind: llm_gateway, for_param: llm }", CodeSchema},
+		{"env from requires", "apps/new-api/manifest.yaml", "from: platform.tz", "from: requires.db.url", CodeSchema},
+		{"uninstall data requires", "apps/hermes-agent/manifest.yaml", "data: [volumes.data]", "data: [volumes.data, requires.db]", CodeSchema},
 		{"steps without user_steps", "recipes/new-api/recipe.yaml", "delivery:\n  tier: auto\n  minutes: 1\n  memory_mb: 512\n  user_steps:\n    - 登录后新建一个渠道，填上游的 Key 和模型，点“测试”\n", "delivery:\n  tier: steps\n", CodeUserSteps},
 	}
 	for _, c := range cases {
@@ -159,6 +171,15 @@ func TestLintEmptyDir(t *testing.T) {
 	if codes(r)[CodeEmpty] != 1 {
 		t.Fatalf("空目录要报 %s：%+v", CodeEmpty, r.Problems)
 	}
+	// Service type definitions alone are a catalog with no apps yet (what
+	// the built-in snapshot is made from), not a wrong directory.
+	r, err = Lint("snapshotsrc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Problems) != 0 || len(r.Apps) != 0 || strings.Join(r.ServiceTypes, ",") != "llm_gateway,mysql,postgres,redis,smtp" {
+		t.Fatalf("只有服务类型定义的目录：%+v", r)
+	}
 }
 
 // catalogRepoSchemaDir finds the catalog repository's schema/ directory: the
@@ -188,7 +209,7 @@ func TestEmbeddedSchemasMatchCatalogCopy(t *testing.T) {
 	if !ok {
 		t.Skip("附近没有目录仓库（可用环境变量 ACORNFOX_CATALOG_REPO 指定），跳过")
 	}
-	for _, f := range []string{"manifest.schema.json", "recipe.schema.json", "gaps.schema.json"} {
+	for _, f := range []string{"manifest.schema.json", "recipe.schema.json", "gaps.schema.json", "service-type.schema.json"} {
 		b2, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
 			t.Fatalf("目录仓库 %s 里没有 %s：格式定义改了要同步过去（%v）", dir, f, err)
@@ -198,12 +219,27 @@ func TestEmbeddedSchemasMatchCatalogCopy(t *testing.T) {
 			t.Fatalf("%s 和目录仓库 %s 里的副本不一致", f, dir)
 		}
 	}
+	// The built-in snapshot carries the catalog's service types: its source
+	// holds the same files as the catalog repository.
+	repo := filepath.Dir(dir)
+	want, _ := filepath.Glob(filepath.Join(repo, ServiceTypesDir, "*"+serviceTypeExt))
+	got, _ := filepath.Glob(filepath.Join("snapshotsrc", ServiceTypesDir, "*"+serviceTypeExt))
+	if len(want) == 0 || len(got) != len(want) {
+		t.Fatalf("snapshotsrc 的服务类型 %v，目录仓库 %v", got, want)
+	}
+	for _, w := range want {
+		b1, err := os.ReadFile(filepath.Join("snapshotsrc", ServiceTypesDir, filepath.Base(w)))
+		b2, _ := os.ReadFile(w)
+		if err != nil || string(b1) != string(b2) {
+			t.Fatalf("snapshotsrc 的 %s 和目录仓库的不一致（改了要重新 go generate 快照）：%v", filepath.Base(w), err)
+		}
+	}
 }
 
 func TestPlatformRefs(t *testing.T) {
 	m := &Manifest{
 		Env:   []EnvVar{{Key: "TZ", From: "platform.tz"}, {Key: "X", From: "params.x"}, {Key: "P", From: "platform.mirror.pypi"}},
-		Files: []File{{Template: "url: {{ platform.app.url }}\nk: {{params.llm.api_key}}\nm: {{platform.mirror.pypi}}"}},
+		Files: []File{{Template: "url: {{ platform.app.url }}\nk: {{uses.llm.api_key}}\nm: {{platform.mirror.pypi}}"}},
 		Init:  []InitStep{{HTTP: InitHTTP{JSON: map[string]any{"a": []any{"{{platform.region}}"}, "b": "{{params.y}}"}}}},
 	}
 	got := strings.Join(PlatformRefs(m), ",")
@@ -226,18 +262,22 @@ func TestPlatformVarTable(t *testing.T) {
 			t.Fatalf("%s: a secret the user can change", v.Name)
 		}
 		if v.Since != BasePlatform {
-			// The first batch shipped with the first release. A later variable
-			// carries the version that first has it; then relax this line.
+			// Every variable is there from the first platform that installs
+			// format 3. A later variable carries the version that first has
+			// it; then relax this line.
 			t.Fatalf("%s: since %q, want %s", v.Name, v.Since, BasePlatform)
 		}
+		// What one app offers another is a service, not a platform variable.
+		if strings.HasPrefix(v.Name, "llm.") {
+			t.Fatalf("%s: a model API is a service (uses), not a platform variable", v.Name)
+		}
 	}
-	// the first batch of platform variables
-	for _, n := range []string{PVLLMBaseURL, PVLLMAPIKey, PVLLMModelChat, PVTZ, PVRegion, PVMirrorPyPI, PVMirrorNPM, PVAppURL} {
+	for _, n := range []string{PVTZ, PVRegion, PVMirrorPyPI, PVMirrorNPM, PVAppURL, PVAppScheme, PVAppHost} {
 		if !seen[n] {
 			t.Fatalf("missing %s", n)
 		}
 	}
-	if len(PlatformVars) != 8 {
+	if len(PlatformVars) != 7 {
 		t.Fatalf("%d variables: update the docs when adding one", len(PlatformVars))
 	}
 }

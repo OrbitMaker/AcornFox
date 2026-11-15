@@ -30,10 +30,10 @@ func TestCatalogLintCommand(t *testing.T) {
 	apps, _ := mp["apps"].(map[string]any)
 	recipes, _ := mp["recipes"].(map[string]any)
 	na, _ := apps["new-api"].(map[string]any)
-	if len(apps) != 2 || len(recipes) != 3 || na["declared"] != "0.5.0" || na["computed"] != "0.5.0" || na["reasons"] == nil {
+	if len(apps) != 2 || len(recipes) != 3 || na["declared"] != "0.6.0" || na["computed"] != "0.6.0" || na["reasons"] == nil {
 		t.Fatalf("min_platform: %s", out)
 	}
-	if r, _ := recipes["hermes-with-new-api"].(map[string]any); r["declared"] != "" || r["computed"] != "0.5.0" {
+	if r, _ := recipes["hermes-with-new-api"].(map[string]any); r["declared"] != "" || r["computed"] != "0.6.0" {
 		t.Fatalf("recipe min_platform: %s", out)
 	}
 	if code, out, _ := h.run("catalog", "lint", "-h"); code != exitOK || !strings.Contains(out, "CAT-LINT-17") || !strings.Contains(out, "副作用：无，只读") {
@@ -173,6 +173,78 @@ func copyGoodCatalog(t *testing.T) string {
 	return dst
 }
 
+// The two service tables for people: service types by their label from the
+// catalog, the three ways an item is obtained, and none of the manifest's
+// field names.
+func TestCatalogVarsCommandServices(t *testing.T) {
+	h := newHarness(t)
+	dir := filepath.Join("..", "catalog", "testdata", "services")
+	code, out, _ := h.run("catalog", "vars", dir)
+	if code != exitOK {
+		t.Fatalf("exit %d out %s", code, out)
+	}
+	for _, want := range []string{
+		"demo-consumer v1.0.0",
+		"它需要什么服务（名字 | 服务类型 | 必须还是可选 | 没有会怎样）：",
+		"    demo | 样例令牌 | 必须 | 装不上：这台机器上要先有一条能用的（没有就登记一条已有的）\n",
+		"    mail | 邮箱（发信） | 可选 | 能用，但发不了通知邮件\n",
+		"它能提供什么服务（服务类型 | 每一项怎么来）：",
+		"    样例令牌 | token：给每个使用方单独发；url：平台算出来\n",
+		"      平台代做的步骤：发凭据 有，收回 有，检查旧凭据 有\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("人看的输出里没有 %q：\n%s", want, out)
+		}
+	}
+	// Each app has both tables, "没有" when empty.
+	if strings.Count(out, "它需要什么服务") != 2 || strings.Count(out, "它能提供什么服务") != 2 || strings.Count(out, "它能提供什么服务：没有") != 1 || strings.Count(out, "它需要什么服务：没有") != 1 {
+		t.Fatalf("两个应用各有两张表：\n%s", out)
+	}
+	for _, word := range []string{"kind", "uses", "provides", "computed", "issued"} {
+		for _, line := range strings.Split(out, "\n") {
+			// Variable rows name references such as uses.demo.url; the
+			// service tables must not use the manifest's words.
+			if strings.Contains(line, " | ") && strings.Contains(line, word) {
+				t.Fatalf("服务表里出现了 %q：%s", word, line)
+			}
+		}
+	}
+	// A dedicated use, an ask item and a service type the catalog does
+	// not define (shown by its name).
+	cp := t.TempDir()
+	for _, id := range []string{"demo-consumer", "demo-provider"} {
+		b, err := os.ReadFile(filepath.Join(dir, "apps", id, "manifest.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(b)
+		src = strings.Replace(src, "  - { name: demo, kind: demo_token }", "  - { name: demo, kind: demo_token, dedicated: true }", 1)
+		src = strings.Replace(src, "token: { issued: token }", "token: { ask: 在应用里新建一个令牌，贴进来, secret: true }", 1)
+		src = strings.Replace(src, "kind: smtp, optional: true", "kind: fax, optional: true", 1)
+		if err := os.MkdirAll(filepath.Join(cp, "apps", id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cp, "apps", id, "manifest.yaml"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, _ = h.run("catalog", "vars", cp)
+	for _, want := range []string{
+		"    demo | demo_token | 必须，只接没有别的应用在用的服务（dedicated：接上以后别的应用不能再接） |",
+		"    mail | fax | 可选 | 能用，但发不了通知邮件\n",
+		"    demo_token | token：要用户做一步（在应用里新建一个令牌，贴进来）；url：平台算出来\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("exit %d：人看的输出里没有 %q：\n%s", code, want, out)
+		}
+	}
+	code, out, _ = h.run("--json", "catalog", "vars", cp, "--app", "demo-provider")
+	if code != exitOK || !strings.Contains(out, `"uses":[],"provides":[{"kind":"demo_token","values":[{"key":"token","how":"ask"},{"key":"url","how":"computed"}],"has_issue":true,"has_revoke":true,"has_check":true}]`) ||
+		strings.Contains(out, "在应用里新建") {
+		t.Fatalf("exit %d out %s", code, out)
+	}
+}
+
 func TestCatalogVarsCommand(t *testing.T) {
 	h := newHarness(t)
 	good := filepath.Join("..", "catalog", "testdata", "good")
@@ -184,15 +256,28 @@ func TestCatalogVarsCommand(t *testing.T) {
 		t.Fatalf("exit %d out %s", code, out)
 	}
 	hermes := apps[0].(map[string]any)
-	for _, f := range []string{"app", "version", "file", "delivery_tier", "min_platform", "vars", "counts", "hardcoded", "fingerprint"} {
+	for _, f := range []string{"app", "version", "file", "delivery_tier", "min_platform", "vars", "counts", "hardcoded", "fingerprint",
+		"uses", "provides", "fingerprint_version"} {
 		if _, ok := hermes[f]; !ok {
 			t.Fatalf("报告缺字段 %s：%s", f, out)
 		}
 	}
 	counts := hermes["counts"].(map[string]any)
-	if hermes["app"] != "hermes-agent" || len(counts) != 6 || counts["llm_source"] != float64(1) || counts["user_required"] != float64(0) ||
-		hermes["fingerprint"] != "bd7dfeb61301654ae8628d2b5f37f5ad7f9ff0b0a6c1ec49d461a25102877d3b" {
+	if hermes["app"] != "hermes-agent" || len(counts) != 5 || counts["system"] != float64(5) || counts["user_required"] != float64(1) ||
+		hermes["fingerprint"] != "993efab5344ede8eac44b3cbc465d2c7c230125e16c8bc63bbccad489e6a930c" || hermes["fingerprint_version"] != float64(2) {
 		t.Fatalf("hermes-agent：%s", out)
+	}
+	if _, ok := counts["llm_source"]; ok {
+		t.Fatalf("a class format 3 does not have: %s", out)
+	}
+	// Both service lists are always there; Hermes needs one service and
+	// offers none, New API offers one, its items obtained three ways.
+	if uses := hermes["uses"].([]any); len(uses) != 1 || len(hermes["provides"].([]any)) != 0 ||
+		!strings.Contains(out, `"uses":[{"name":"llm","kind":"llm_gateway","optional":false,"without":"","dedicated":false}]`) {
+		t.Fatalf("hermes-agent 的服务：%s", out)
+	}
+	if !strings.Contains(out, `"uses":[],"provides":[{"kind":"llm_gateway","values":[{"key":"api_key","how":"issued"},{"key":"base_url","how":"computed"},{"key":"model","how":"ask"}],"has_issue":true,"has_revoke":true,"has_check":true}]`) {
+		t.Fatalf("new-api 的服务：%s", out)
 	}
 	row := hermes["vars"].([]any)[0].(map[string]any)
 	if row["name"] != "params.dashboard_password" || row["layer"] != "custom" || row["class"] != "generated" || row["used_in"] == nil {
@@ -203,18 +288,21 @@ func TestCatalogVarsCommand(t *testing.T) {
 	for _, args := range [][]string{{"--json", "catalog", "vars", good, "--app", "new-api"}, {"--json", "catalog", "vars", "--app", "new-api", good}} {
 		code, out, _ = h.run(args...)
 		one, _ := decodeJSON(t, out)["apps"].([]any)
-		if code != exitOK || len(one) != 1 || one[0].(map[string]any)["fingerprint"] != "42c2264decb6fc511deaf585a3907e5bc2bd462337f6322a56958835dbfc5c61" {
+		if code != exitOK || len(one) != 1 || one[0].(map[string]any)["fingerprint"] != "33a0170464fcfa372c3e774386d62da8d057e6cb720659b304aba23e9e87517a" {
 			t.Fatalf("%v: exit %d out %s", args, code, out)
 		}
 	}
 	code, out, _ = h.run("catalog", "vars", good, "--app", "hermes-agent")
-	for _, want := range []string{"hermes-agent v0.23.0", "交付方式：全自动", "最低平台版本：算出来 0.5.0，清单写的 0.5.0", "要选模型来源 1", "必须用户填 0",
-		"[系统给] platform.tz（时区），用在 /env/TZ", "[要选模型来源] params.llm（大模型），用在 /files/config.yaml", "[平台生成] params.dashboard_password", "指纹：bd7dfeb6"} {
+	for _, want := range []string{"hermes-agent v0.23.0", "交付方式：要用户做几步", "最低平台版本：算出来 0.6.0，清单写的 0.6.0", "系统给 5", "必须用户填 1",
+		"[必须用户填] params.model（模型名），用在 /files/config.yaml",
+		"[系统给] platform.tz（时区），用在 /env/TZ", "[系统给] uses.llm.base_url，用在 /files/config.yaml", "[平台生成] params.dashboard_password",
+		"它需要什么服务（名字 | 服务类型 | 必须还是可选 | 没有会怎样）：", "llm | 大模型接口 | 必须 | 装不上：这台机器上要先有一条能用的（没有就登记一条已有的）",
+		"它能提供什么服务：没有", "指纹：993efab5", "（第 2 版）"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("人看的输出里没有 %q：\n%s", want, out)
 		}
 	}
-	if code != exitOK || strings.Contains(out, "new-api") {
+	if code != exitOK || strings.Contains(out, "new-api") || strings.Contains(out, "模型来源") || strings.Contains(out, "旧写法") {
 		t.Fatalf("exit %d out %s", code, out)
 	}
 
@@ -256,7 +344,8 @@ func TestCatalogVarsCommand(t *testing.T) {
 	if code, _, _ := h.run("catalog", "vars"); code != exitUsage {
 		t.Fatalf("没给目录 exit %d", code)
 	}
-	if code, out, _ := h.run("catalog", "vars", "-h"); code != exitOK || !strings.Contains(out, "副作用：无，只读") || !strings.Contains(out, "fingerprint") || !strings.Contains(out, "例子") {
+	if code, out, _ := h.run("catalog", "vars", "-h"); code != exitOK || !strings.Contains(out, "副作用：无，只读") || !strings.Contains(out, "fingerprint") || !strings.Contains(out, "例子") ||
+		!strings.Contains(out, "它需要什么服务") || !strings.Contains(out, "它能提供什么服务") || !strings.Contains(out, "fingerprint_version") {
 		t.Fatalf("帮助：%d %s", code, out)
 	}
 	if code, out, _ := h.run("catalog", "-h"); code != exitOK || !strings.Contains(out, "vars 目录") || !strings.Contains(out, "gaps 目录") {

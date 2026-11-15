@@ -26,15 +26,16 @@ import (
 
 // CodeStuck is the fault code of a running step past its stuck threshold. It
 // is a warning carried in the verdict, not an error: the task goes on, and
-// the engine's own time limits end it (CAT-INST-15, -16, -17, the task's
-// 60 minutes).
+// the engine's own time limits end it (CAT-INST-15, -16, -17, one image's
+// pull 50 minutes, the task's 60 minutes not counting the pulls).
 const CodeStuck = "CAT-INST-30"
 
-// NotRevokedPrefix begins the line an install puts in apps[].carried when it
-// could not revoke a token an earlier app of the name had in a local model
-// gateway. Such a line is a must-tell (the token has no quota and no expiry,
-// and nothing will try again).
-const NotRevokedPrefix = "没能吊销"
+// RevokeCode begins the line an install puts in apps[].carried about a
+// credential that was not taken back (a revoke that did not work, an old
+// credential that did not pass the check and was replaced): it may still
+// work in the app that issued it and nothing will try again, so such a
+// line is a must-tell.
+const RevokeCode = "CAT-INST-35"
 
 // Task statuses and the running step status, as the engine writes them.
 const (
@@ -54,31 +55,33 @@ type Limit struct {
 
 // Limits are the steps' times, by step name (the names of the engine's
 // steps). Measured on test VMs (2 cores, 4 GB, Ubuntu 24.04) in 2026-11 with
-// the published New API and Hermes manifests.
+// the apps of the published catalog (a small model gateway and a large
+// agent app).
 var Limits = map[string]Limit{
 	"check": {
 		Normal: 10 * time.Second, StuckAfter: time.Minute,
 		Typical: "不到 1 秒",
-		Source:  "只查本机的数据库：测试机上 New API、Hermes 各装过十余次，每次不到 1 秒",
+		Source:  "只查本机的数据库：测试机上两个应用各装过十余次，每次不到 1 秒",
 	},
 	"create": {
 		Normal: 20 * time.Second, StuckAfter: 2 * time.Minute,
-		Typical: "几秒（要在本机 New API 里发令牌时多几秒）",
-		Source:  "测试机上每次不到 2 秒；要在本机 New API 里发令牌时，登录和建令牌各一次请求，每次最多等 30 秒（安装引擎的 HTTP 超时），两次加余量算 2 分钟",
+		Typical: "几秒（要让别的应用发凭据时多几秒）",
+		Source:  "测试机上每次不到 2 秒；要让提供服务的应用发凭据时，按它清单里的步骤发几个请求（实测一个模型网关发一把令牌 4 个请求，不到 1 秒），每个请求最多等 15 秒，加余量算 2 分钟",
 	},
-	// image without download progress: the image is here already, or it is
-	// pulled from the public sources (no progress to show).
+	// image not through the download gateway: the image is here already,
+	// or it is pulled from the public sources (progress phase pull: the
+	// runner's status of the pull).
 	"image": {
-		Normal: 5 * time.Minute, StuckAfter: 12 * time.Minute,
-		Typical: "本机已有时几秒；从公共源拉看不到进度，要看网速：小镜像几十秒到几分钟，1 GB 左右的要将近 10 分钟",
-		Source:  "测试机实测（出口在境外，经国内镜像站）：本机已有不到 1 秒；New API（约 80 MB）从公共源 126 秒、422 秒，Hermes（约 1.1 GB）561 秒。从公共源拉一次最多等 10 分钟（运行器的拉取时限），到时判失败（CAT-INST-12），所以过了 12 分钟还在这一步、又没有下载进度就不对了（下载网关没成功、改从公共源拉时，前面还有试网关的时间）",
+		Normal: 15 * time.Minute, StuckAfter: 52 * time.Minute,
+		Typical: "本机已有时几秒；从公共源拉要看网速（进度里写着从哪个源拉、拉到多少、多快）：网速好时小镜像几十秒、1 GB 左右的几分钟；家庭宽带等慢网络上 1～2 GB 的镜像要十几到三十几分钟",
+		Source:  "测试机实测（2026-11）：本机已有不到 1 秒；约 80 MB 的镜像从公共源 126 秒、422 秒，约 1.1 GB 的 561 秒；家庭宽带上一个大镜像最大的一层（232 MB）0.12～0.64 MB/s，要 6～32 分钟。运行器拉一个镜像先对各个源实测（最多约 10 秒），只要还在往下走就一直等，所有源加起来最多 50 分钟，到时判失败（CAT-INST-12）；拉镜像的时间不算进整次安装的 60 分钟。所以拉了 52 分钟还在拉就不对了（按 progress.pull_seconds 算，下载网关没成功、改从公共源拉时前面试网关的时间不算）",
 	},
 	// image.gateway: the image archive downloaded through the download
 	// gateway, with progress (download, then load).
 	"image.gateway": {
 		Normal: 20 * time.Minute, StuckAfter: 40 * time.Minute,
 		Typical: "经下载网关下载有进度和剩余时间：1 GB 左右的镜像包网速好时一两分钟（下载加导入），网速慢的要十几分钟",
-		Source:  "测试机实测：Hermes（约 1.1 GB）经下载网关下载约 40 秒，导入 46～75 秒。下载没有总时限，靠 60 秒收不到数据就断开接着下，所以按 1 MB/s 的慢网算 20 分钟以内正常、40 分钟算卡住（整次安装 60 分钟还没完会被取消）；两分钟一个字节都没收到也算卡住（DownloadStallStuck）",
+		Source:  "测试机实测：约 1.1 GB 的镜像包经下载网关下载约 40 秒，导入 46～75 秒。下载没有总时限，靠 60 秒收不到数据就断开接着下，所以按 1 MB/s 的慢网算 20 分钟以内正常、40 分钟算卡住（经下载网关下载算在整次安装的 60 分钟里，到时还没完会被取消；从公共源拉镜像的时间才不算）；两分钟一个字节都没收到也算卡住（DownloadStallStuck）",
 	},
 	"files": {
 		Normal: 10 * time.Second, StuckAfter: time.Minute,
@@ -88,17 +91,17 @@ var Limits = map[string]Limit{
 	"start": {
 		Normal: time.Minute, StuckAfter: 5 * time.Minute,
 		Typical: "几秒到半分钟",
-		Source:  "测试机实测：New API 6 秒，Hermes 21 秒，接旧数据重装 10～15 秒；安装引擎等 15 分钟还没上线才判失败（CAT-INST-15），过了 5 分钟已远超平常",
+		Source:  "测试机实测：小应用 6 秒，大应用 21 秒，接旧数据重装 10～15 秒；安装引擎等 15 分钟还没上线才判失败（CAT-INST-15），过了 5 分钟已远超平常",
 	},
 	"health": {
 		Normal: time.Minute, StuckAfter: 6 * time.Minute,
 		Typical: "几秒到十几秒",
-		Source:  "测试机实测：New API 4 秒，Hermes 10 秒；清单里最长的等待是 Hermes 的 300 秒（timeout_s），到时没通过就判失败（CAT-INST-16），过了 6 分钟还在这一步就不对了",
+		Source:  "测试机实测：4 秒到 10 秒；目录里的清单写的最长等待是 300 秒（timeout_s），到时没通过就判失败（CAT-INST-16），过了 6 分钟还在这一步就不对了",
 	},
 	"init": {
 		Normal: 20 * time.Second, StuckAfter: 4 * time.Minute,
 		Typical: "几秒",
-		Source:  "测试机上不到 1 秒（New API 还要关自助注册，也在 1 秒内）；初始化请求连不上时最多试 5 次、每次最多等 30 秒，约 160 秒后判失败（CAT-INST-17），过了 4 分钟就不对了",
+		Source:  "测试机上不到 1 秒（三步请求：建管理员、登录、关自助注册）；初始化请求连不上时最多试 5 次、每次最多等 15 秒，约 160 秒后判失败（CAT-INST-17），过了 4 分钟就不对了",
 	},
 	"reuse": {
 		Normal: 5 * time.Second, StuckAfter: time.Minute,
@@ -126,7 +129,7 @@ const (
 // while running; once done its message says so) or not.
 func LimitFor(s Step) Limit {
 	name := s.Name
-	if name == "image" && (s.Progress != nil || strings.HasPrefix(s.Message, GatewayDone)) {
+	if name == "image" && ((s.Progress != nil && s.Progress.Phase != PhasePull) || strings.HasPrefix(s.Message, GatewayDone)) {
 		name = "image.gateway"
 	}
 	if l, ok := Limits[name]; ok {
@@ -151,6 +154,10 @@ type Task struct {
 	FaultCode   string
 	FaultMsg    string
 	KeepVolumes bool // keep_volumes_on_failure
+	// HasSecrets: some first-login field of the task is a secret (a
+	// password the user looks up with ShowSecretsCommand). An app that lets
+	// the user make their own account on first open has none.
+	HasSecrets bool
 }
 
 // Step is one step of one app.
@@ -160,26 +167,39 @@ type Step struct {
 	Progress                          *Progress
 }
 
-// Progress is how far a running step is (the image archive downloaded
-// through the download gateway). The engine's StepProgress is this type.
+// Progress is how far a running step is: the image archive downloaded
+// through the download gateway (phase download, then load), or an image
+// pulled from the public sources (phase pull: the runner's status of the
+// pull, only what Docker reported). The engine's StepProgress is this type.
 type Progress struct {
-	Phase       string `json:"phase"` // download | load (docker load after the download)
+	Phase       string `json:"phase"` // download | load (docker load after the download) | pull (from the public sources)
 	DoneBytes   int64  `json:"done_bytes"`
 	TotalBytes  int64  `json:"total_bytes,omitempty"`
 	BytesPerSec int64  `json:"bytes_per_sec,omitempty"`
 	ETASeconds  int64  `json:"eta_seconds,omitempty"`
 	// StalledSeconds is how long no byte has come in (download phase).
 	StalledSeconds int64 `json:"stalled_seconds,omitempty"`
+	// Pull phase: Source is the image source pulling now (empty while the
+	// sources are measured first); Blind that Docker sends no progress now
+	// (done_bytes is its last figure, how far the pull is cannot be seen)
+	// while the machine's network and disk say it still moves; PullSeconds
+	// how long this image has been pulled.
+	Source      string `json:"source,omitempty"`
+	Blind       bool   `json:"blind,omitempty"`
+	PullSeconds int64  `json:"pull_seconds,omitempty"`
 }
 
-// App is one app of the task, for the lines to pass on.
+// PhasePull is Progress.Phase of an image pulled from the public sources.
+const PhasePull = "pull"
+
+// App is one app of the task, for the lines to pass on. Tell are the
+// sentences the providers of the services it was plugged into wrote for the
+// user (the items of theirs to fill in after a step in that app: the
+// manifest's provides values written ask), as they are.
 type App struct {
 	Name    string
 	Carried []string
-	// TokenProvider is the local model gateway (New API) the app has a token
-	// in with no quota and no expiry (issued by this task or taken over from
-	// the old app of the name); "" when none.
-	TokenProvider string
+	Tell    []string
 }
 
 // Verdict is the task's state worked out from its step times.
@@ -203,9 +223,16 @@ type Verdict struct {
 	Say         string `json:"say"`
 	Next        string `json:"next"`
 	NextCommand string `json:"next_command,omitempty"`
+	// ShowSecretsCommand (succeeded only, and only when a first-login field
+	// is a secret) is the command that shows the first-login passwords,
+	// with this task's id: the user runs it on the server themselves, so
+	// the password never passes through the chat. Absent: there is no
+	// password to look up, so nothing tells the user to.
+	ShowSecretsCommand string `json:"show_secrets_command,omitempty"`
 	// MustTell are lines to pass on to the user word for word (only once
-	// succeeded): an old token that could not be revoked, a token with no
-	// quota and no expiry.
+	// succeeded): a credential that was not taken back (RevokeCode), then
+	// what the providers of the services the apps were plugged into wrote
+	// for the user (App.Tell), each line once.
 	MustTell []string `json:"must_tell,omitempty"`
 }
 
@@ -230,21 +257,27 @@ type StepTime struct {
 // What to do next, by state. They speak to whoever reads the output (the AI
 // workbench), and refer to the other fields by name.
 const (
-	NextRunning   = "还没装完，结果还不知道：只把 say 告诉用户，不要说“卡住”“装不好”“容器没在运行”“没有令牌”这类结论，也不要自己估计还要多久；接着运行 next_command 再等，直到 done 是 true"
+	NextRunning   = "还没装完，结果还不知道：只把 say 告诉用户，不要说“卡住”“装不好”“容器没在运行”“没接上服务”这类结论，也不要自己估计还要多久；接着运行 next_command 再等，直到 done 是 true"
 	NextStuck     = "这一步比平常慢很多（CAT-INST-30），但安装还没有失败：先运行 next_command 看原因（只读，不用问用户），把 say 和看到的要点告诉用户，再问用户是接着等还是不装了；完整的排查步骤用 acornfox faults CAT-INST-30 --json 看。不要自己删除、重装或重启服务"
-	NextSucceeded = "装好了：把 first_login 告诉用户（密码不要复述），再说怎么打开和 user_steps；must_tell 里的每一句都要照原话告诉用户，一句都不能漏；接上旧数据重装的，再把 apps[].carried、kept_files、file_backups 告诉用户"
-	NextFailed    = "装失败了：先运行 next_command 看这个编号怎么处理，照着做；处理好原因后重新安装"
+	NextSucceeded = "装好了，给用户发一条收尾消息，按这个顺序写：① 先一句话说装好了、接的是哪条服务（apps[].bindings）；" +
+		"② first_login：账号和地址原样说，带 url_note 时把它一起说，这个地址不要当成用户现在就能打开的；密码不复述；有 show_secrets_command 时它就是查密码的命令，单独放一个代码块交给用户自己运行，没有这一项就是这个应用没有密码要查，不要提查密码；" +
+		"③ 怎么打开，看 apps[].open_hint：把 command 和 tunnel_command 各放一个代码块给用户，两条都是在用户自己电脑上运行的（见 command_where、tunnel_where），不要说成在服务器上运行；" +
+		"lan_url_after_expose 是改好以后的地址，改之前打不开，不要当成现在能用的地址；没有 open_hint 就用 apps[].url；" +
+		"apps[].internal 是 true 的应用没有地址、不用打开，只说一句它只在内部网络、是给别的应用用的；" +
+		"④ 逐条说 user_steps；⑤ must_tell 每一句照原话说，一句不漏；接上旧数据重装的，再说 apps[].carried、kept_files、file_backups；" +
+		"⑥ 最后：open_hint 有 ask 就把 ask 原样放在这条消息的结尾问用户，然后停下等他回答，同意了才运行 ask_yes_command，成功后告诉他可以用 lan_url_after_expose 打开了"
+	NextFailed = "装失败了：先运行 next_command 看这个编号怎么处理，照着做；处理好原因后重新安装"
 )
+
+// ShowSecretsCommand is the command that shows the first-login passwords of
+// task id, for the user to run on the server.
+func ShowSecretsCommand(id string) string {
+	return "acornfox install status " + id + " --show-secrets"
+}
 
 // WaitCommand is the command that waits on task id.
 func WaitCommand(id string) string {
 	return "acornfox --json install status " + id + " --wait"
-}
-
-// TokenNote is the line for an app that has a token with no quota and no
-// expiry in provider (a local New API).
-func TokenNote(app, provider string) string {
-	return app + " 用的是 " + provider + " 里一把不限额、不过期的令牌；要控制花费，可在 " + provider + " 后台的“令牌”页给它设上限。"
 }
 
 // Assess works out the verdict of t at now; clock is "server" or "client".
@@ -276,6 +309,9 @@ func Assess(t Task, now time.Time, clock string) Verdict {
 		v.Done = true
 		v.Say = "已装好，整次用了 " + durText(v.ElapsedSeconds) + "。"
 		v.Next = NextSucceeded
+		if t.ID != "" && t.HasSecrets {
+			v.ShowSecretsCommand = ShowSecretsCommand(t.ID)
+		}
 		v.MustTell = mustTell(t.Apps)
 	case StatusFailed:
 		v.Done = true
@@ -338,6 +374,11 @@ func stepTime(s Step, index int, now time.Time, live bool) StepTime {
 		return st
 	}
 	st.Stuck = el > lim.StuckAfter
+	if p := s.Progress; s.Name == "image" && p != nil && p.Phase == PhasePull && p.PullSeconds > 0 {
+		// A pull from the public sources is judged by its own time (the
+		// step may have tried the download gateway first).
+		st.Stuck = time.Duration(p.PullSeconds)*time.Second > lim.StuckAfter
+	}
 	if p := s.Progress; s.Name == "image" && p != nil && p.Phase == "download" {
 		stall := time.Duration(p.StalledSeconds) * time.Second
 		st.StalledSeconds = p.StalledSeconds
@@ -359,14 +400,23 @@ func look(s Step) string {
 
 func mustTell(apps []App) []string {
 	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
 	for _, a := range apps {
 		for _, c := range a.Carried {
-			if strings.HasPrefix(c, NotRevokedPrefix) {
-				out = append(out, c)
+			if strings.HasPrefix(c, RevokeCode+" ") {
+				add(c)
 			}
 		}
-		if a.TokenProvider != "" {
-			out = append(out, TokenNote(a.Name, a.TokenProvider))
+	}
+	for _, a := range apps {
+		for _, s := range a.Tell {
+			add(s)
 		}
 	}
 	return out

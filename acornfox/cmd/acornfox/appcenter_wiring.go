@@ -16,6 +16,7 @@ import (
 	"github.com/acornfox/acornfox/internal/hostcheck"
 	"github.com/acornfox/acornfox/internal/identity"
 	"github.com/acornfox/acornfox/internal/platform"
+	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -23,8 +24,9 @@ import (
 // server. The catalog lives under <data>/catalog; the download gateway is
 // used for large images that name an artifact and for private catalogs
 // (connect, their indexes and packages). The machine key is created only
-// when the gateway is actually contacted.
-func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRunner) *appinstall.Engine {
+// when the gateway is actually contacted. host is what the apps' addresses
+// are worked out from (platformvar.Host).
+func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRunner, host platformvar.Host) *appinstall.Engine {
 	var gw appinstall.Gateway
 	var cgw appinstall.CatalogGateway
 	network := setupNetwork(dataDir)
@@ -45,13 +47,16 @@ func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRu
 		UploadDir: uploadDir,
 		Gateway:   gw,
 		Version:   cli.Version,
-		Platform: appinstall.PlatformEnv{
+		// The platform variables: the standalone edition's provider, filled
+		// from this machine's settings.
+		PlatformVars: platformvar.NewStandalone(platformvar.Machine{
 			// Same rule as downloadSources: a Linux server without
 			// install.env pulls as outside China, so apps get that region.
 			China: network.China && (network.Source == "install.env" || platform.DesktopMode() || platform.GOOS != "linux"),
 			Cloud: platform.LinuxInstallCloud(linuxInstallEnv),
 			TZ:    hostTimezone(),
-		},
+			Host:  host,
+		}),
 		DiskFree: func(ctx context.Context) (appinstall.DiskSpace, error) {
 			return appDiskFree(ctx, runnerAPI, uploadDir)
 		},

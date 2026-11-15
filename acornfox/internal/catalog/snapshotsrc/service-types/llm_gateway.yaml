@@ -1,0 +1,12 @@
+# 大模型接口：兼容 OpenAI 接口的服务。提供它的应用（例如模型网关）给每个使用方发一把 Key；
+# 用户也可以把自己已有的接口地址和 Key 登记成一条。
+schema: 1
+kind: llm_gateway
+label: 大模型接口
+summary: 兼容 OpenAI 接口的大模型服务，给要调用大模型的应用用
+fields:
+  - { key: base_url, label: 接口地址, type: url, required: true }
+  - { key: api_key, label: API Key, type: string, required: true, secret: true }
+  - { key: model, label: 默认模型, type: string }
+test:
+  http: { url: "{{base_url}}/models", bearer: "{{api_key}}", expect_status: [200] }

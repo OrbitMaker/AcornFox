@@ -1,12 +1,14 @@
 // 应用中心列表页：配方卡片、来源和分类标签、搜索、应用小卡片、连接私有目录。数据全部来自 GET /v1/catalog。
 // 要更新版本的 AcornFox 才能装的应用和配方（needs_platform 有值）：卡片上说明要升到哪个版本，安装按钮不可点。
 // 私有目录的应用标“来自：目录名”，详情和安装都带上目录编号；已断开的私有目录在顶部提示。
+// 目录里还是旧格式清单的应用和配方（former）：卡片上原样显示服务端给的那句话（note），安装按钮不可点。
+// 目录里一个应用都没有、用户也没在搜索时说“还没有可以安装的应用”，不说成“没找到”。
 // 这一版私有目录先不开放：“连接私有目录”按钮和来源标签由 PRIVATE_CATALOG_UI 控制，默认藏起。
 import { useMemo, useState } from 'react'
-import { Link2, PlayCircle, RefreshCw, Search, Sparkles, Unlink } from 'lucide-react'
+import { Ban, Link2, PlayCircle, RefreshCw, Search, Sparkles, Unlink } from 'lucide-react'
 import { cn, safeHref } from '@/lib/utils'
 import { api } from '@/lib/api'
-import { PUBLIC, appKey, appsIn, categoryTabs, disconnectedSources, filterApps, filterSource, freeMB, matchRecipe, memoryCheck, recipeAppNames, recipeMemory, sourceId, sourceTabs } from '@/lib/catalog'
+import { PUBLIC, appKey, appsIn, categoryTabs, disconnectedSources, filterApps, filterSource, formerNote, freeMB, matchRecipe, memoryCheck, recipeAppNames, recipeMemory, sourceId, sourceTabs, storeEmpty } from '@/lib/catalog'
 import { mbText } from '@/lib/format'
 import { PRIVATE_CATALOG_UI } from '@/lib/features'
 import { needsPlatform, needsPlatformText } from '@/lib/upgrade'
@@ -29,6 +31,15 @@ export function runningTaskFor(tasks: TaskView[], kind: 'app' | 'recipe', id: st
   return tasks.find((t) => t.status === 'running' && t.kind === kind && t.target === id && (t.catalog || PUBLIC) === catalog)
 }
 
+// FormerHint：卡片上的一行，旧格式的清单装不了时服务端给的那句话（原样）。
+export function FormerHint({ note, className }: { note: string; className?: string }) {
+  return (
+    <div className={cn('flex min-w-0 items-start gap-1.5 text-2xs text-muted-foreground', className)} data-testid="former-note">
+      <Ban className="mt-px size-3 shrink-0" /><span className="min-w-0 break-words">{note}</span>
+    </div>
+  )
+}
+
 // SourceBadge：私有目录的应用和配方标“来自：目录名”。
 export function SourceBadge({ x }: { x: { source?: { id: string; name: string } } }) {
   if (sourceId(x) === PUBLIC) return null
@@ -44,6 +55,7 @@ function RecipeCard({ r }: { r: Recipe }) {
   const video = safeHref(r.delivery.video)
   // 已经在装的照常能点开看进度。
   const needs = running ? '' : needsPlatform(r)
+  const former = running || needs ? '' : formerNote(r)
   return (
     <div className="flex min-w-0 flex-col gap-2.5 rounded-lg border bg-card p-3.5" data-testid="catalog-recipe">
       <div className="flex items-center gap-2">
@@ -56,6 +68,7 @@ function RecipeCard({ r }: { r: Recipe }) {
         {recipeAppNames(r, catalog).map((x) => <Badge key={x} variant="secondary" className="font-normal">{x}</Badge>)}
       </div>
       {needs && <UpgradeHint version={needs} />}
+      {former && <FormerHint note={former} />}
       <div className="mt-auto flex items-center gap-2 pt-1">
         <span className={cn('tnum flex-1 text-2xs', check.tone === 'ok' ? 'text-muted-foreground' : 'text-warning')} title={check.text}>
           {mem.need > 0 ? <>{minutes ? `${minutes} 分钟 · ` : ''}{mbText(mem.need)} 内存</> : '都已装好，不再占内存'}
@@ -65,7 +78,7 @@ function RecipeCard({ r }: { r: Recipe }) {
             <PlayCircle className="size-3.5" />
           </a>
         )}
-        <Button size="sm" disabled={!!needs} title={needs ? needsPlatformText(needs) : undefined} onClick={() => install({ kind: 'recipe', id: r.id, taskId: running?.id, catalog: sourceId(r) })}>
+        <Button size="sm" disabled={!!needs || !!former} title={needs ? needsPlatformText(needs) : former || undefined} onClick={() => install({ kind: 'recipe', id: r.id, taskId: running?.id, catalog: sourceId(r) })}>
           {running ? <><Spinner />安装中</> : '开始'}
         </Button>
       </div>
@@ -80,9 +93,12 @@ function AppCard({ a }: { a: CatalogApp }) {
   const href = itemHref(a.id, src)
   // 装过的、正在装的、这台机器用不了的，各有各的说法，不再提升级。
   const needs = !running && a.installed.length === 0 && a.supported ? needsPlatform(a) : ''
+  // 旧格式的清单：装不了，不管这台机器支不支持；装过的照常进管理。
+  const former = !running && a.installed.length === 0 ? formerNote(a) : ''
   let action
   if (running) action = <Button size="sm" variant="secondary" onClick={(e) => { e.stopPropagation(); install({ kind: 'app', id: a.id, taskId: running.id, catalog: src }) }}><Spinner />安装中</Button>
   else if (a.installed.length > 0) action = <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); go(appHref(a.installed[0])) }}>已安装 · 管理</Button>
+  else if (former) action = <Button size="sm" variant="secondary" disabled title={former}>安装</Button>
   else if (!a.supported) action = <span className="text-2xs text-muted-foreground" title={'只支持 ' + a.platforms.join('、')}>这台机器用不了</span>
   else if (needs) action = <Button size="sm" variant="secondary" disabled title={needsPlatformText(needs)}>安装</Button>
   else action = <Button size="sm" variant="secondary" onClick={(e) => { e.stopPropagation(); install({ kind: 'app', id: a.id, catalog: src }) }}>安装</Button>
@@ -100,6 +116,7 @@ function AppCard({ a }: { a: CatalogApp }) {
         <div className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{a.name}</span><SourceBadge x={a} /></div>
         <div className="truncate text-2xs text-muted-foreground">{a.summary}</div>
         {needs && <UpgradeHint version={needs} className="mt-0.5" />}
+        {former && <FormerHint note={former} className="mt-0.5" />}
       </div>
       {action}
     </div>
@@ -120,6 +137,7 @@ export function StorePage() {
   const tabs = useMemo(() => categoryTabs(apps), [apps])
   const list = filterApps(apps, group, q)
   const recipes = filterSource(catalog?.recipes || [], source).filter((r) => matchRecipe(r, q))
+  const empty = storeEmpty(apps.length, list.length, q)
   const gone = disconnectedSources(catalog)
 
   const sync = async () => {
@@ -187,8 +205,13 @@ export function StorePage() {
       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
         {list.map((a) => <AppCard key={appKey(a)} a={a} />)}
       </div>
-      {list.length === 0 && (
-        <Empty>没找到{q ? `“${q}”` : ''}</Empty>
+      {empty && (
+        <Empty>
+          <div data-testid="store-empty" data-searching={empty.searching ? 'true' : 'false'}>
+            <div className={cn(!empty.searching && 'text-sm font-medium text-foreground')}>{empty.title}</div>
+            {empty.sub && <div className="mt-1">{empty.sub}</div>}
+          </div>
+        </Empty>
       )}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <ExpertButton variant="ghost" />

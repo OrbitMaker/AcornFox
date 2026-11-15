@@ -10,6 +10,11 @@
 // objects carrying LabelManaged=1, never creates privileged or host-network
 // containers, never bind-mounts host paths or the Docker socket, and only
 // mounts named volumes whose name starts with "af-<app>-".
+//
+// It runs a command inside a container only through Exec (exec.go): in a
+// running app-role container of the app the request names, with an argument
+// vector no shell reads, never privileged, secrets only in env and stdin,
+// output and time bounded.
 package runner
 
 import (
@@ -17,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 )
 
 // Labels on every managed Docker object.
@@ -61,7 +67,7 @@ const (
 const (
 	PathPing            = "/v1/ping"              // GET  -> PingResponse
 	PathBuild           = "/v1/images/build"      // POST BuildRequest -> BuildResponse (long: up to 20 min)
-	PathImagePull       = "/v1/images/pull"       // POST PullRequest -> PullResponse (long: up to 10 min)
+	PathImagePull       = "/v1/images/pull"       // POST PullRequest -> PullResponse (long: up to 50 min)
 	PathImageInspect    = "/v1/images/inspect"    // POST ImageRef -> ImageInfo (404 when missing)
 	PathImageList       = "/v1/images/list"       // POST AppRef -> ImageListResponse
 	PathImageRemove     = "/v1/images/remove"     // POST ImageRef -> OK (missing is success)
@@ -158,6 +164,44 @@ type Failure struct {
 	Message    string `json:"message"`
 	LogExcerpt string `json:"log_excerpt,omitempty"` // <= 40 lines, ANSI and step noise removed
 	Hint       string `json:"hint,omitempty"`
+	// Sources is what each image source did in a failed pull (stage
+	// "image"): the ones the probe skipped, then the ones tried.
+	Sources []SourceResult `json:"sources,omitempty"`
+	// Reason says what ended a pull that ran out of time (stage "image"):
+	// "pull_deadline" (one image's total, pullMaxTotal), "caller_deadline"
+	// (the caller's own limit came first, PullRequest.Deadline) or
+	// "cancelled" (the caller went away). Empty otherwise. PullSeconds is
+	// how long the image was pulled, over all sources.
+	Reason      string `json:"reason,omitempty"`
+	PullSeconds int    `json:"pull_seconds,omitempty"`
+}
+
+// Failure reasons of a pull that ran out of time.
+const (
+	ReasonPullDeadline   = "pull_deadline"
+	ReasonCallerDeadline = "caller_deadline"
+	ReasonCancelled      = "cancelled"
+)
+
+// SourceResult is one image source's part in a pull.
+type SourceResult struct {
+	Host  string `json:"host"`
+	Layer string `json:"layer"` // self | cloud | public | upstream | user (sources.go)
+	Name  string `json:"name,omitempty"`
+	// Probe is the probe's status (ok, slow, denied, notfound, limited,
+	// unreachable); empty when the source was not probed.
+	Probe     string  `json:"probe,omitempty"`
+	ProbeMBps float64 `json:"probe_mbps,omitempty"`
+	FinalHost string  `json:"final_host,omitempty"` // where the layer sample came from after redirects
+	// Outcome: skipped (the probe left it out), slow, stalled, timeout (the
+	// pull's total time ran out), cut_off (the caller's limit came first),
+	// cancelled, not_found, unreachable, failed.
+	Outcome string  `json:"outcome"`
+	Bytes   int64   `json:"bytes,omitempty"`
+	Total   int64   `json:"total,omitempty"`
+	Seconds int     `json:"seconds,omitempty"`
+	AvgKBps float64 `json:"avg_kbps,omitempty"` // the recent average when given up for slowness
+	Message string  `json:"message"`
 }
 
 type ImageInfo struct {
@@ -181,6 +225,11 @@ type PullRequest struct {
 	App          string `json:"app"`
 	DeploymentID string `json:"deployment_id"`
 	Ref          string `json:"ref"` // an external image reference, e.g. nginx:1.27-alpine
+	// Deadline is when the caller stops waiting (zero: no limit of its
+	// own). The runner then stops the pull pullCallerMargin earlier, so its
+	// classified answer (Failure.Reason "caller_deadline", what each source
+	// did) reaches the caller instead of a bare "runner: unavailable".
+	Deadline time.Time `json:"deadline,omitzero"`
 }
 
 // PullResponse mirrors BuildResponse: OK=false means a user-caused failure
@@ -194,6 +243,10 @@ type PullResponse struct {
 	// CPU and the linux/amd64 one was pulled instead (Apple silicon): it
 	// runs under emulation and may be slow.
 	Emulated bool `json:"emulated,omitempty"`
+	// Source is the registry host the image came from and Seconds how long
+	// that took (empty when the image was already here).
+	Source  string `json:"source,omitempty"`
+	Seconds int    `json:"seconds,omitempty"`
 }
 
 type Mount struct {
@@ -234,6 +287,12 @@ type EnsureContainerRequest struct {
 	// network does not exist yet is skipped; one that is not managed for that
 	// app is refused.
 	Links []string `json:"links,omitempty"`
+	// Internal: the app is reached over the app network only (a catalog app
+	// whose access is "internal", such as a database): its port is not
+	// published on the host, so it has no HostPort and no entry route. Other
+	// containers reach it by its alias (the app name) and Port, and this
+	// machine by ContainerInfo.IP. App role only.
+	Internal bool `json:"internal,omitempty"`
 }
 
 // MaxPidsLimit bounds EnsureContainerRequest.PidsLimit.
@@ -253,10 +312,14 @@ type ContainerInfo struct {
 	RestartCount int    `json:"restart_count"`
 	ExitCode     int    `json:"exit_code"`
 	OOMKilled    bool   `json:"oom_killed"`
-	HostPort     int    `json:"host_port"`        // published port on 127.0.0.1, 0 if none
-	Port         int    `json:"port,omitempty"`   // the container port HostPort maps to (0 if none)
-	StartedAt    string `json:"started_at"`       // RFC3339 from Docker, may be empty
-	Health       string `json:"health,omitempty"` // Docker healthcheck: starting | healthy | unhealthy; "" when the container has none
+	HostPort     int    `json:"host_port"`      // published port on 127.0.0.1, 0 if none
+	Port         int    `json:"port,omitempty"` // the container port HostPort maps to (0 if none)
+	// IP is the container's address on its own app network (NetworkName(App)),
+	// "" when it has none (not running). This machine reaches a container that
+	// publishes no port (an internal app) there; see ProbeAddr.
+	IP        string `json:"ip,omitempty"`
+	StartedAt string `json:"started_at"`       // RFC3339 from Docker, may be empty
+	Health    string `json:"health,omitempty"` // Docker healthcheck: starting | healthy | unhealthy; "" when the container has none
 }
 
 type ContainerListResponse struct {

@@ -7,17 +7,21 @@ import (
 
 // The built-in snapshot lets the app center browse the catalog with no
 // network. It is the output of Build without a signature (the binary itself
-// is the trust anchor). Regenerate it from a catalog checkout with:
+// is the trust anchor).
 //
-//	cd acornfox && go generate ./internal/catalog/
+// For now it is a catalog with no apps: the service type definitions only
+// (snapshotsrc/), at serial 4. This platform installs no app of a former
+// manifest format, and no app has been published in the current one yet;
+// the serial is above the last catalog published in the former format (3),
+// so that one is never synced over it. Before a release it is regenerated
+// from the catalog as published again in the current format, at that
+// publish's serial, which must be above 4. See snapshot/README.md.
 //
-// or point it at another catalog / serial:
+// Regenerate it (from this directory, as go generate runs it):
 //
-//	go run ./internal/catalog/gensnapshot -src ../../catalog -serial 7
+//	go run ./gensnapshot -src snapshotsrc -serial 4 -out snapshot
 //
-// See snapshot/README.md.
-//
-//go:generate go run ./gensnapshot -src testdata/good -serial 1 -out snapshot
+//go:generate go run ./gensnapshot -src snapshotsrc -serial 4 -out snapshot
 
 //go:embed snapshot
 var snapshotFS embed.FS

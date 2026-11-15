@@ -24,7 +24,7 @@ type GatewayConfig struct {
 	Logger   *slog.Logger     // nil => slog.Default()
 
 	// LAN serves the console on the local network over plain HTTP instead of
-	// behind Caddy on a domain: any Host is accepted, the Origin must match
+	// behind the entry proxy on a domain: any Host is accepted, the Origin must match
 	// the Host, the client address is the TCP peer (no proxy in front) and
 	// cookies are not marked Secure. The LAN entry is the relaxed one (see
 	// lan_gateway.go): only clients with a local-network address are served,
@@ -33,7 +33,7 @@ type GatewayConfig struct {
 	LAN bool
 }
 
-// NewGateway returns the handler Caddy reverse-proxies the public domain to.
+// NewGateway returns the handler the entry proxy reverse-proxies the public domain to.
 // It answers only for the configured domain, logs users in with the generated
 // password (rate limited), accepts only sessions it issued itself, requires an
 // exact HTTPS Origin on state-changing requests, and hands everything else to
@@ -271,7 +271,7 @@ func (g *gateway) forget(digest string) {
 	})
 }
 
-// clientIP is the visitor's address: Caddy, connecting over loopback, sets
+// clientIP is the visitor's address: the entry proxy, connecting over loopback, sets
 // X-Forwarded-For to the real client and drops what clients sent themselves.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

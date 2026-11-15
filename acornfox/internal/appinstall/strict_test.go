@@ -23,10 +23,10 @@ func faultOf(t *testing.T, err error) *Fault {
 // CAT-INST-08 and the version to upgrade to, before its package is even
 // looked for; the list and the detail say so too.
 func TestTooOldRefusedBeforeDownload(t *testing.T) {
-	future := withMinPlatform(t, publishedManifest(t, "new-api"), "9.9.9")
+	future := withMinPlatform(t, goodManifest(t, "new-api"), "9.9.9")
 	b := fixtureBundle(t, 5, "", []fixApp{
 		{manifest: future, noPackage: true}, // the package cannot be had at all
-		{manifest: publishedManifest(t, "hermes-agent")},
+		{manifest: goodManifest(t, "hermes-agent")},
 	}, nil, nil)
 	v, hits := setupSnapshot(t, bundleFS(b), nil)
 	ctx := context.Background()
@@ -87,7 +87,7 @@ func TestTooOldRefusedBeforeDownload(t *testing.T) {
 // for a newer platform the fault says which (upgrade first); when it does
 // not, the catalog is at fault and no version is named.
 func TestUnknownManifestRefused(t *testing.T) {
-	base := publishedManifest(t, "new-api")
+	base := goodManifest(t, "new-api")
 	retyped := strings.Replace(base, "port: 3000", "port: { number: 3000 }", 1)
 	if _, err := catalog.ParseManifest([]byte(retyped)); err == nil || retyped == base {
 		t.Fatal("the retyped manifest must be one this program cannot decode")
@@ -101,17 +101,17 @@ func TestUnknownManifestRefused(t *testing.T) {
 	}{
 		{"unknown field, catalog at fault", fixApp{manifest: withUnknownField(base)}, CodeBadManifest, "", "这份目录有问题"},
 		{"unknown value", fixApp{manifest: strings.Replace(base, "protocol: http", "protocol: quic", 1)}, CodeBadManifest, "", "这份目录有问题"},
-		{"unknown format version", fixApp{manifest: strings.Replace(base, "schema: 2", "schema: 3", 1)}, CodeBadManifest, "", "这份目录有问题"},
-		// The index says 0.5.0 but the manifest itself asks for more: the
+		{"unknown format version", fixApp{manifest: strings.Replace(base, "schema: 3", "schema: 4", 1)}, CodeBadManifest, "", "这份目录有问题"},
+		// The index says 0.6.0 but the manifest itself asks for more: the
 		// version check on the index passes, the manifest check names it.
-		{"unknown field, newer platform", fixApp{manifest: withUnknownField(withMinPlatform(t, base, "9.9.9")), indexMin: "0.5.0"}, CodeBadManifest, "9.9.9", "请先升级"},
+		{"unknown field, newer platform", fixApp{manifest: withUnknownField(withMinPlatform(t, base, "9.9.9")), indexMin: "0.6.0"}, CodeBadManifest, "9.9.9", "请先升级"},
 		// A field this program knows, holding another type than it expects
 		// (what a later format might do): the manifest cannot even be
 		// decoded here. It is still CAT-INST-29, not "broken package".
 		{"known field with a new type, catalog at fault", fixApp{manifest: retyped, indexFrom: base}, CodeBadManifest, "", "这份目录有问题"},
-		{"known field with a new type, newer platform", fixApp{manifest: withMinPlatform(t, retyped, "9.9.9"), indexFrom: base, indexMin: "0.5.0"}, CodeBadManifest, "9.9.9", "请先升级"},
+		{"known field with a new type, newer platform", fixApp{manifest: withMinPlatform(t, retyped, "9.9.9"), indexFrom: base, indexMin: "0.6.0"}, CodeBadManifest, "9.9.9", "请先升级"},
 		// Nothing unknown, but the manifest asks for more than the index.
-		{"manifest min above the index", fixApp{manifest: withMinPlatform(t, base, "9.9.9"), indexMin: "0.5.0"}, CodeTooOld, "9.9.9", "请先升级"},
+		{"manifest min above the index", fixApp{manifest: withMinPlatform(t, base, "9.9.9"), indexMin: "0.6.0"}, CodeTooOld, "9.9.9", "请先升级"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -145,7 +145,7 @@ func TestUnknownManifestRefused(t *testing.T) {
 	// The untouched manifest still installs from a hand-made catalog.
 	v, _ := setupSnapshot(t, bundleFS(fixtureBundle(t, 5, "", []fixApp{{manifest: base}}, nil, nil)), nil)
 	if tv := v.install(t, Request{App: "new-api"}); tv.Status != state.TaskSucceeded {
-		t.Fatalf("published manifest refused: %+v", tv.Fault)
+		t.Fatalf("the untouched manifest refused: %+v", tv.Fault)
 	}
 }
 
@@ -189,7 +189,7 @@ func TestNeedsPlatform(t *testing.T) {
 // recipe is checked whole before anything is created: a bad second app
 // leaves the first uninstalled.
 func TestRecipesNeedPlatform(t *testing.T) {
-	newAPI, hermes := publishedManifest(t, "new-api"), publishedManifest(t, "hermes-agent")
+	newAPI, hermes := goodManifest(t, "new-api"), goodManifest(t, "hermes-agent")
 	recipe := func(id string, apps ...string) catalog.Recipe {
 		r := catalog.Recipe{ID: id, Schema: 1, Title: id, Summary: id, Delivery: catalog.Delivery{Tier: "auto"}}
 		for _, a := range apps {
@@ -251,8 +251,8 @@ func TestPrivateCatalogManifestChecked(t *testing.T) {
 	v, g, priv, _ := privateSetup(t)
 	ctx := context.Background()
 	b := fixtureBundle(t, 2, "cat-demo", []fixApp{
-		{manifest: withUnknownField(publishedManifest(t, "new-api"))},
-		{manifest: withMinPlatform(t, publishedManifest(t, "hermes-agent"), "9.9.9")},
+		{manifest: withUnknownField(goodManifest(t, "new-api"))},
+		{manifest: withMinPlatform(t, goodManifest(t, "hermes-agent"), "9.9.9")},
 	}, nil, nil)
 	b.Sign(priv)
 	idx, _ := catalog.ParseIndex(b.Index)

@@ -3,8 +3,9 @@ package main
 // Linux server checks of `acornfox doctor` besides Docker: whether the
 // acornfox-server service answers, free disk space of the data directory and
 // Docker's data root, the ports AcornFox needs, the clock, the download
-// gateway and the app catalog sync (fault codes SETUP-SVC-01, SETUP-DISK-01,
-// SETUP-PORT-01..05, SETUP-CLOCK-01, SETUP-GW-01 and SETUP-SYNC-01; the full
+// gateway, the app catalog sync, the entry proxy (doctor_edge.go) and the
+// services the installed apps are plugged into (fault codes SETUP-SVC-01, EDGE-01..04, SETUP-DISK-01, SETUP-PORT-01..05,
+// SETUP-CLOCK-01, SETUP-GW-01, SETUP-SYNC-01 and CAT-SVC-08; the full
 // entries are in internal/faults, `acornfox faults <code>`).
 
 import (
@@ -41,6 +42,11 @@ var doctorGatewayProbes = hostcheck.DefaultGatewayProbes
 // doctorCatalogStatus asks acornfox-server for the app catalog's sync
 // status; ok is false when it cannot be asked (tests replace it).
 var doctorCatalogStatus = queryCatalogSync
+
+// doctorServices asks acornfox-server for the service registry and the
+// installed apps; ok is false when it cannot be asked or is too old to have
+// services (tests replace it).
+var doctorServices = queryServices
 
 // defaultDockerRoot is used when Docker does not answer.
 const defaultDockerRoot = hostcheck.DefaultDockerRoot
@@ -86,11 +92,15 @@ func linuxHostChecks(ctx context.Context, r *doctorReport, dc *dockerclient.Clie
 	if doctorService(r, func() (client.Status, error) { return svc.st, svc.err }) {
 		use = queryServerPortUse(ctx, socket, svc.healthy())
 	}
+	doctorEdge(ctx, r, dc, platform.DefaultPaths().DataDir)
 	doctorDisk(r, platform.DefaultPaths().DataDir, dockerRoot, hostcheck.FreeBytes, hostcheck.Device)
 	doctorPorts(r, "/proc", portCheckContainers(ctx, dc), os.Geteuid() == 0, use)
 	doctorClockAndGateway(ctx, r, platform.DefaultPaths().DataDir)
+	probed := doctorRegistry(ctx, r, platform.DefaultPaths().DataDir)
+	doctorDaemonMirrors(ctx, r, daemonConfigFile, probed)
 	if svc.err == nil {
 		doctorCatalog(ctx, r, socket)
+		doctorAppServices(ctx, r, socket)
 	}
 	doctorLANConsole(r, use.LANNoPassword)
 }
@@ -159,6 +169,77 @@ func queryCatalogSync(ctx context.Context, socket string) (hostcheck.CatalogSync
 		At: l.Sync.At, OK: l.Sync.OK, Skipped: l.Sync.Skipped, Code: l.Sync.Code, Message: l.Sync.Message,
 		Source: l.Sync.Source, Serial: l.Serial, Origin: l.Origin,
 	}, true
+}
+
+// doctorAppServices reports the services the installed apps are plugged
+// into (hostcheck.CheckAppServices). Nothing is added when the server cannot
+// be asked or is older than services.
+func doctorAppServices(ctx context.Context, r *doctorReport, socket string) {
+	q, ok := doctorServices(ctx, socket)
+	if !ok {
+		return
+	}
+	if q.err != nil {
+		r.warn(hostcheck.CodeServiceUnusable, "应用用的服务：读不了服务登记表（%v）", q.err)
+		return
+	}
+	hostcheck.CheckAppServices(r, q.services, q.unreadable, q.installed)
+}
+
+// servicesQuery is the service registry as acornfox-server answered it.
+type servicesQuery struct {
+	services   []hostcheck.ServiceInUse
+	unreadable []string
+	installed  func(app string) bool // nil: the apps could not be listed
+	err        error                 // the server answered with an error
+}
+
+// queryServices reads GET /v1/services and GET /v1/apps of acornfox-server.
+// ok is false when the server cannot be reached or is older than services
+// (server_too_old); err is set when it answered with an error.
+func queryServices(ctx context.Context, socket string) (servicesQuery, bool) {
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c, err := client.Connect(qctx, client.Target{URL: unixURL(socket)})
+	if err != nil {
+		return servicesQuery{}, false
+	}
+	defer c.Close()
+	sa, ok := any(c).(client.ServicesAPI)
+	if !ok {
+		return servicesQuery{}, false
+	}
+	l, err := sa.Services(qctx)
+	if err != nil {
+		// Only an answer of the server is reported; not reaching it (the
+		// service line says so already) or a server older than services
+		// adds nothing.
+		var ce *client.Error
+		if !errors.As(err, &ce) || ce.Diag.Stage != "server" || ce.Diag.Code == client.CodeServerTooOld {
+			return servicesQuery{}, false
+		}
+		return servicesQuery{err: err}, true
+	}
+	q := servicesQuery{unreadable: l.Unreadable}
+	if apps, err := c.Apps(qctx); err == nil {
+		names := make(map[string]bool, len(apps))
+		for _, a := range apps {
+			names[a.Name] = true
+		}
+		q.installed = func(app string) bool { return names[app] }
+	}
+	for _, sv := range l.Services {
+		in := hostcheck.ServiceInUse{Name: sv.Name, Kind: sv.Kind, KindLabel: sv.KindLabel, Status: sv.Status, StatusLabel: sv.StatusLabel, Missing: sv.Missing}
+		if sv.Source == state.ServiceFromApp {
+			in.Provider = sv.App
+		}
+		in.ReadySay = sv.ReadySay
+		for _, u := range sv.UsedBy {
+			in.Users = append(in.Users, hostcheck.ServiceUser{App: u.App, Use: u.Use})
+		}
+		q.services = append(q.services, in)
+	}
+	return q, true
 }
 
 // doctorLANConsole warns while the LAN console is open without a password:
@@ -341,4 +422,122 @@ func portCheckContainers(ctx context.Context, dc *dockerclient.Client) []hostche
 func doctorPorts(r *doctorReport, procRoot string, containers []hostcheck.Container, root bool, use serverPortUse) {
 	hostcheck.CheckPorts(r, procRoot, containers, root, hostcheck.PortUse{Known: use.Known, Users: use.Users, Own: use.Own},
 		hostcheck.Ports{Admin: defaultEdgeAdminPort, LAN: publicconsole.DefaultLANPort, AppMin: linuxAppPortMin, AppMax: linuxAppPortMax})
+}
+
+// doctorRegistry probes the Docker Hub sources this server pulls from (the
+// table in internal/runner/sources.go, in the runner's order) the way a pull
+// does: the manifest of the probe image (runner.ProbeImage) and a sample of its
+// largest layer, at most about 10 seconds. It says which source and layer
+// is used first and how fast; sources that refuse, do not answer or are slow
+// are a SETUP-NET-03 notice (the pull skips them or puts them last). None
+// usable is SETUP-NET-01.
+func doctorRegistry(ctx context.Context, r *doctorReport, dataDir string) map[string]runner.ProbeResult {
+	reg, _ := sourcesRegistry(dataDir)
+	srcs := reg.Sources()
+	if !reg.China {
+		return doctorRegistryAbroad(ctx, r, srcs)
+	}
+	res := sourcesProbe(ctx, srcs, runner.ProbeImage, "")
+	order, skipped := runner.RankSources(srcs, res)
+	var bad []string
+	usable := false
+	for _, s := range srcs {
+		p := res[s.Host]
+		switch p.Status {
+		case runner.ProbeOK:
+			usable = true
+		case runner.ProbeSlow:
+			usable = true
+			bad = append(bad, s.Host+" "+p.Detail+"（排到后面）")
+		default:
+			bad = append(bad, s.Host+" "+p.Detail+"（跳过）")
+		}
+	}
+	if !usable {
+		r.add(false, "SETUP-NET-01", "镜像下载源：都不能用：%s；拉镜像时还会按顺序都试一遍。先查网络和代理，acornfox sources --probe 再看", strings.Join(bad, "，"))
+		return res
+	}
+	first := order[0]
+	p := res[first.Host]
+	speed := fmt.Sprintf("，%.1f MB/s", p.MBps)
+	if p.Status == runner.ProbeSlow {
+		speed = fmt.Sprintf("，但也慢：%.2f MB/s，大镜像要等很久", p.MBps)
+	}
+	r.add(true, "SETUP-NET-01", "镜像下载源：现在先用 %s（%s%s）", first.Host, first.Layer.Label(), speed)
+	if len(bad) > 0 || len(skipped) > 0 {
+		r.warn("SETUP-NET-03", "镜像下载源：%s；拉镜像时会自动跳过或排到后面（acornfox sources --probe 看详情）", strings.Join(bad, "，"))
+	}
+	return res
+}
+
+// doctorRegistryAbroad is the registry check outside mainland China. There
+// the runner does not probe: it pulls from Docker Hub first and only moves
+// to the mirrors after it, in order, when Docker Hub stalls, is too slow or
+// fails. So only Docker Hub is probed; the mirrors only when Docker Hub is
+// not usable (and a mirror that refuses is then no "skip", only a fact).
+func doctorRegistryAbroad(ctx context.Context, r *doctorReport, srcs []runner.ImageSource) map[string]runner.ProbeResult {
+	if len(srcs) == 0 {
+		return nil
+	}
+	first := srcs[0]
+	res := sourcesProbe(ctx, srcs[:1], runner.ProbeImage, "")
+	p := res[first.Host]
+	switch p.Status {
+	case runner.ProbeOK:
+		r.add(true, "SETUP-NET-01", "镜像下载源：境外，先用 %s（%s，%.1f MB/s）", first.Host, first.Layer.Label(), p.MBps)
+		return res
+	case runner.ProbeSlow:
+		r.add(true, "SETUP-NET-01", "镜像下载源：境外，先用 %s（%s，但也慢：%.2f MB/s，大镜像要等很久）", first.Host, first.Layer.Label(), p.MBps)
+		return res
+	}
+	rest := srcs[1:]
+	if len(rest) > 0 {
+		for h, v := range sourcesProbe(ctx, rest, runner.ProbeImage, "") {
+			res[h] = v
+		}
+	}
+	for _, s := range rest {
+		if q := res[s.Host]; q.Usable() {
+			r.add(true, "SETUP-NET-01", "镜像下载源：境外，先用的 %s %s；拉镜像时它没有进展或太慢会换下一个源，现在能用的是 %s（%.1f MB/s）",
+				first.Host, p.Detail, s.Host, q.MBps)
+			r.warn("SETUP-NET-03", "镜像下载源：%s %s，每次拉镜像要先等它一会儿才换源（acornfox sources --probe 看详情）", first.Host, p.Detail)
+			return res
+		}
+	}
+	var bad []string
+	for _, s := range srcs {
+		bad = append(bad, s.Host+" "+res[s.Host].Detail)
+	}
+	r.add(false, "SETUP-NET-01", "镜像下载源：都不能用：%s；拉镜像时还会按顺序都试一遍。先查网络和代理，acornfox sources --probe 再看", strings.Join(bad, "，"))
+	return res
+}
+
+// doctorPing asks a registry's /v2/ (tests replace it).
+var doctorPing = runner.PingRegistry
+
+// doctorDaemonMirrors checks the registry-mirrors of the Docker daemon's
+// daemon.json: Docker uses them when it pulls by the original name (a
+// project's build, Docker Hub as the last source). An address that refuses
+// or does not answer is a SETUP-NET-03 notice; nothing is changed. A host the
+// registry check just probed is judged by that probe (one answer per host).
+func doctorDaemonMirrors(ctx context.Context, r *doctorReport, path string, probed map[string]runner.ProbeResult) {
+	hosts := runner.DaemonMirrorHosts(path)
+	if len(hosts) == 0 {
+		return
+	}
+	var bad []string
+	for _, h := range hosts {
+		p, ok := probed[h]
+		if !ok {
+			p = doctorPing(ctx, h)
+		}
+		if p.Status != runner.ProbeOK && p.Status != runner.ProbeSlow {
+			bad = append(bad, h+" "+p.Detail)
+		}
+	}
+	if len(bad) == 0 {
+		r.add(true, "SETUP-NET-03", "Docker 的镜像加速配置（%s）：%d 个地址都能连上", path, len(hosts))
+		return
+	}
+	r.warn("SETUP-NET-03", "Docker 的镜像加速配置（%s）里有不能用的地址：%s。自己 docker pull 和构建项目时 Docker 会先等它；可以从 registry-mirrors 里去掉再重启 Docker（改 Docker 配置，先问用户）", path, strings.Join(bad, "，"))
 }

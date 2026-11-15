@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
 	"github.com/acornfox/acornfox/internal/deploylog"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -61,12 +61,23 @@ type Store interface {
 	SetDomainStatus(ctx context.Context, app, name, status string, diag *state.Diagnosis) error
 }
 
-// Config configures a Reconciler. Store, Runner and Router are required.
+// Config configures a Reconciler. Store, Runner and Proxy are required.
 type Config struct {
-	Store         Store
-	Runner        runner.API
-	Router        caddyroute.Router
-	Probe         func(ctx context.Context, hostport, path string) error
+	Store  Store
+	Runner runner.API
+	// Proxy is the entry proxy in front of every app (package edge). The
+	// reconciler hands it the whole configuration and never builds
+	// proxy-specific settings itself.
+	Proxy edge.Proxy
+	// ExtraRoutes adds routes that belong to no app (the public console's
+	// domain route) to every configuration handed to Proxy. Nil adds none.
+	// An error fails that hand-over; the next round tries again.
+	ExtraRoutes func(ctx context.Context) ([]edge.Route, error)
+	Probe       func(ctx context.Context, hostport, path string) error
+	// TCPProbe connects once to addr (host:port) for an app whose health
+	// check is tcp. Nil uses runner.ProbeTCP. An exec health check goes
+	// through the runner (runner.ExecAPI).
+	TCPProbe      func(ctx context.Context, addr string) error
 	UploadDir     string
 	PublicHost    string
 	Logger        *slog.Logger
@@ -77,11 +88,12 @@ type Config struct {
 	// system git binary (DefaultGit); tests inject a fake.
 	Git Git
 
-	// HTTPS configures the shared "af-domains" server maintained by the router.
-	HTTPS caddyroute.HTTPSConfig
+	// HTTPS configures the proxy's shared domain listener and certificates
+	// (part of every configuration handed to Proxy).
+	HTTPS edge.HTTPS
 	// HTTPSCAFile is the PEM root(s) used to verify domain certificates during
-	// probing. Empty means use the system roots. For the internal Caddy CA
-	// (development), this points at pki/authorities/local/root.crt.
+	// probing. Empty means use the system roots. For the proxy's internal CA
+	// (development), this points at that CA's root certificate.
 	HTTPSCAFile string
 	// DomainProbe performs one TLS handshake against httpsAddr with SNI=name,
 	// verifying the presented chain against roots (system roots when nil) and
@@ -91,8 +103,9 @@ type Config struct {
 	// small). Zero uses the default.
 	DomainPendingBudget time.Duration
 
-	// Edge runs Caddy as a container managed through the runner (see
-	// edge.go); nil keeps the v0.3 host Caddy.
+	// Edge runs the entry proxy as a container managed through the runner
+	// (see edge.go); nil means the proxy runs outside AcornFox's control
+	// (the v0.3 host install).
 	Edge *EdgeConfig
 	// DefaultExposure applies to apps whose exposure is "" ("public" when empty).
 	DefaultExposure string
@@ -131,7 +144,11 @@ type Reconciler struct {
 	edgeState    string
 	edgeMsg      string
 	edgeFailures int
-	edgeOpMu     sync.Mutex
+	// edgeTokenRecreates counts the in-place recreations of an entry
+	// container that refused the management token (edge.go,
+	// maxEdgeTokenRecreates).
+	edgeTokenRecreates int
+	edgeOpMu           sync.Mutex
 	// lanUnbindable is a LAN address Docker could not bind (Docker runs in a
 	// VM that does not have it, e.g. WSL 2 in NAT mode); the edge then
 	// publishes on 127.0.0.1 only and apps get no LAN address.
@@ -180,6 +197,9 @@ func New(cfg Config) *Reconciler {
 	}
 	if cfg.Probe == nil {
 		cfg.Probe = DefaultProbe
+	}
+	if cfg.TCPProbe == nil {
+		cfg.TCPProbe = runner.ProbeTCP
 	}
 	if cfg.DomainProbe == nil {
 		cfg.DomainProbe = DefaultDomainProbe
@@ -600,7 +620,7 @@ func (r *Reconciler) build(ctx context.Context, app state.App, d *state.Deployme
 			return
 		}
 		if resp.Emulated {
-			r.event(ctx, app.Name, d.ID, "image", "这个镜像只有 amd64（x86）版本，苹果芯片上靠转译运行，可能较慢")
+			r.event(ctx, app.Name, d.ID, "image", "这个镜像只有 amd64（x86）版本，这台机器是 ARM，要靠转译运行，可能较慢；没有转译的机器（例如没装 qemu 的 ARM 服务器）上它启动不了")
 		}
 		if resp.Image != nil {
 			imageID = resp.Image.ID
@@ -767,6 +787,7 @@ func (r *Reconciler) doStart(ctx context.Context, app state.App, d *state.Deploy
 		Command:      app.Command,
 		PidsLimit:    app.PidsLimit,
 		Links:        app.Links,
+		Internal:     app.Internal,
 	})
 	if err != nil {
 		name := runner.ContainerName(app.Name, d.ID)
@@ -814,7 +835,12 @@ func (r *Reconciler) doCheck(ctx context.Context, app state.App, d *state.Deploy
 	}
 
 	containerPort, _ := r.containerPort(ctx, app, d.ImageID)
-	deadline := r.cfg.Now().Add(r.cfg.HealthTimeout)
+	timeout := r.cfg.HealthTimeout
+	if hc := app.HealthCheck; hc != nil && time.Duration(hc.TimeoutS)*time.Second > timeout {
+		timeout = time.Duration(hc.TimeoutS) * time.Second
+	}
+	deadline := r.cfg.Now().Add(timeout)
+	var lastErr error
 	for {
 		ci, ok := r.findContainer(ctx, app.Name, name)
 		if ok {
@@ -843,11 +869,8 @@ func (r *Reconciler) doCheck(ctx context.Context, app state.App, d *state.Deploy
 				})
 				return
 			}
-			if ci.HostPort > 0 {
-				hostport := fmt.Sprintf("127.0.0.1:%d", ci.HostPort)
-				if err := r.cfg.Probe(ctx, hostport, healthPath); err == nil {
-					goto healthy
-				}
+			if lastErr = r.probe(ctx, app, ci, containerPort, healthPath); lastErr == nil {
+				goto healthy
 			}
 		}
 		if !r.cfg.Now().Before(deadline) {
@@ -861,13 +884,23 @@ func (r *Reconciler) doCheck(ctx context.Context, app state.App, d *state.Deploy
 	}
 	// timed out
 	r.retireContainer(ctx, app.Name, name, *d, env, func(logs string) {
-		r.fail(ctx, app, d, env, &state.Diagnosis{
+		diag := &state.Diagnosis{
 			Stage:      "health",
 			Code:       "port_not_listening",
 			Message:    "健康检查超时，端口未监听",
 			LogExcerpt: logs,
 			Hint:       fmt.Sprintf("请确认应用在容器内监听 0.0.0.0:%d（可用 EXPOSE 声明端口）", containerPort),
-		})
+		}
+		if hc := app.HealthCheck; hc != nil && len(hc.Exec) > 0 {
+			// Same code (the deployment did not come up in time); the words
+			// say what was checked.
+			diag.Message = "健康检查超时，容器里的检查命令一直没通过"
+			if lastErr != nil {
+				diag.Message += "（" + lastErr.Error() + "）"
+			}
+			diag.Hint = "看日志里应用有没有启动完；检查命令写在应用清单的健康检查里"
+		}
+		r.fail(ctx, app, d, env, diag)
 	})
 	return
 
@@ -903,7 +936,8 @@ healthy:
 	r.event(ctx, app.Name, d.ID, "health", "健康检查通过，切换流量")
 }
 
-// doRoute switches Caddy to the new container, with retry and a 5-minute budget.
+// doRoute switches the entry proxy to the new container, with retry and a
+// 5-minute budget.
 func (r *Reconciler) doRoute(ctx context.Context, app state.App, d *state.Deployment) {
 	routes, err := r.desiredRoutes(ctx, app.Name, d)
 	if err != nil {
@@ -930,7 +964,7 @@ func (r *Reconciler) doRoute(ctx context.Context, app state.App, d *state.Deploy
 				Stage:   "route",
 				Code:    "route_failed",
 				Message: "路由持续同步失败超过 5 分钟",
-				Hint:    "请检查 Caddy admin 是否可用",
+				Hint:    "入口代理没有接受路由；运行 acornfox doctor 查看入口代理的状态",
 			})
 			r.retireContainer(ctx, app.Name, runner.ContainerName(app.Name, d.ID), *d, nil, nil)
 		}
@@ -945,7 +979,35 @@ func (r *Reconciler) doRoute(ctx context.Context, app state.App, d *state.Deploy
 		return
 	}
 	r.removeUpload(*d)
+	if app.Internal {
+		r.event(ctx, app.Name, d.ID, "deploy", "已上线（只在内部网络，给别的应用用）")
+		return
+	}
 	r.event(ctx, app.Name, d.ID, "deploy", fmt.Sprintf("已上线 http://%s:%d", r.cfg.PublicHost, app.PublicPort))
+}
+
+// probe runs one health check of the new container ci: the app's own check
+// when it has one (a command in the container, or a TCP connect), else a
+// GET to healthPath. The connection goes to the published loopback port
+// (nothing while the container publishes none: it is not up), or, for an
+// internal app, to the container's address on its app network (see
+// runner.ProbeAddr).
+func (r *Reconciler) probe(ctx context.Context, app state.App, ci runner.ContainerInfo, port int, healthPath string) error {
+	if hc := app.HealthCheck; hc != nil && len(hc.Exec) > 0 {
+		api, _ := r.cfg.Runner.(runner.ExecAPI)
+		return runner.ProbeExec(ctx, api, app.Name, ci.Name, hc.Exec, hc.ExpectStdout)
+	}
+	addr := runner.ProbeAddr(ci, port, app.Internal)
+	if addr == "" {
+		if !app.Internal {
+			return errors.New("容器还没有映射端口")
+		}
+		return errors.New("容器还没有地址")
+	}
+	if hc := app.HealthCheck; hc != nil && hc.TCP {
+		return r.cfg.TCPProbe(ctx, addr)
+	}
+	return r.cfg.Probe(ctx, addr, healthPath)
 }
 
 // fail marks a deployment failed with a redacted diagnosis and removes upload.
@@ -1085,6 +1147,7 @@ func (r *Reconciler) recreateLive(ctx context.Context, app state.App) {
 		Command:      app.Command,
 		PidsLimit:    app.PidsLimit,
 		Links:        app.Links,
+		Internal:     app.Internal,
 	}); err != nil {
 		r.log.Error("recreate live", "app", app.Name, "err", err)
 		return
@@ -1203,12 +1266,12 @@ func (r *Reconciler) gcUploads(ctx context.Context, appNames []string) {
 
 // desiredRoutes computes the full expected route set, substituting the given
 // pending deployment's container as this app's upstream when non-nil.
-func (r *Reconciler) desiredRoutes(ctx context.Context, thisApp string, override *state.Deployment) ([]caddyroute.Route, error) {
+func (r *Reconciler) desiredRoutes(ctx context.Context, thisApp string, override *state.Deployment) ([]edge.Route, error) {
 	apps, err := r.cfg.Store.ListApps(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var routes []caddyroute.Route
+	var routes []edge.Route
 	for _, a := range apps {
 		if a.Desired == state.DesiredStopped {
 			continue
@@ -1236,8 +1299,8 @@ func (r *Reconciler) desiredRoutes(ctx context.Context, thisApp string, override
 	return routes, nil
 }
 
-// RefreshRoutes syncs Caddy routes when they differ from the observed live
-// containers. The public console uses it because its route has no
+// RefreshRoutes hands the proxy the configuration again when the version in
+// effect differs from the one the observed live containers call for. The public console uses it because its route has no
 // app worker to trigger a round. Like a round it is skipped while the runner is
 // unreachable, so missing container observations never delete app routes.
 func (r *Reconciler) RefreshRoutes(ctx context.Context) {
@@ -1247,8 +1310,9 @@ func (r *Reconciler) RefreshRoutes(ctx context.Context) {
 	r.syncRoutesIfChanged(ctx)
 }
 
-// syncRoutesIfChanged computes routes from observed live containers and syncs
-// only when different from Caddy's current view (or always on the first round).
+// syncRoutesIfChanged computes routes from observed live containers and hands
+// the proxy the configuration only when its version differs from the one in
+// effect (or always on the first round).
 func (r *Reconciler) syncRoutesIfChanged(ctx context.Context) {
 	routes, err := r.observedRoutes(ctx)
 	if err != nil {
@@ -1260,14 +1324,19 @@ func (r *Reconciler) syncRoutesIfChanged(ctx context.Context) {
 	r.mu.Unlock()
 
 	if !first {
-		current, err := r.cfg.Router.Current(ctx)
-		if err == nil && routesEqual(current, routes) {
-			// Routes match; the edge may still need new published ports
-			// (an exposure change in bridge mode leaves routes unchanged).
+		want, werr := r.proxyConfig(ctx, routes)
+		have, verr := r.cfg.Proxy.Version(ctx)
+		if werr == nil && verr == nil && have == want.Version() {
+			// The management endpoint took the token: an earlier EDGE-03
+			// state is over.
+			r.clearEdgeAdminError()
+			// The configuration is in effect; the edge may still need new
+			// published ports (an exposure change in bridge mode leaves
+			// routes unchanged).
 			if recreated, eerr := r.ensureEdge(ctx, routes, false); eerr != nil {
 				r.log.Error("edge", "err", eerr)
 			} else if recreated {
-				if serr := r.cfg.Router.Sync(ctx, routes); serr != nil {
+				if serr := r.applyRoutes(ctx, routes); serr != nil {
 					r.log.Error("route sync", "err", serr)
 				}
 			}
@@ -1279,30 +1348,82 @@ func (r *Reconciler) syncRoutesIfChanged(ctx context.Context) {
 	}
 }
 
+// proxyConfig is the whole configuration for the proxy: the app routes, the
+// extra routes (public console) and the HTTPS settings.
+func (r *Reconciler) proxyConfig(ctx context.Context, routes []edge.Route) (edge.Config, error) {
+	cfg := edge.Config{Routes: routes, HTTPS: r.cfg.HTTPS}
+	if r.cfg.ExtraRoutes == nil {
+		return cfg, nil
+	}
+	extra, err := r.cfg.ExtraRoutes(ctx)
+	if err != nil {
+		return edge.Config{}, err
+	}
+	if len(extra) > 0 {
+		cfg.Routes = append(append([]edge.Route(nil), routes...), extra...)
+	}
+	return cfg, nil
+}
+
+// applyRoutes hands the proxy the whole configuration for routes. It waits
+// while the edge container is being (re)created or switched (edgeOpMu), so
+// nothing is sent to an entry container that is on its way out.
+func (r *Reconciler) applyRoutes(ctx context.Context, routes []edge.Route) error {
+	cfg, err := r.proxyConfig(ctx, routes)
+	if err != nil {
+		return err
+	}
+	r.edgeOpMu.Lock()
+	defer r.edgeOpMu.Unlock()
+	got, err := r.cfg.Proxy.Apply(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	// The proxy took it but serves something else: say so (the next round
+	// hands it over again).
+	if want := cfg.Version(); got != want {
+		r.setEdgeState(EdgeStateError, fmt.Sprintf("入口代理接受了设置（%s），但现在生效的是 %s（故障编号 %s）", want, got, edge.FaultNotApplied))
+	} else if st, msg := r.EdgeStatus(); st == EdgeStateError && strings.Contains(msg, edge.FaultNotApplied) {
+		r.setEdgeState(EdgeStateRunning, "")
+	} else {
+		r.clearEdgeAdminError()
+	}
+	return nil
+}
+
+// clearEdgeAdminError ends an EDGE-03 state (recreateEdgeIfTokenRefused) once
+// the management endpoint answered with the token.
+func (r *Reconciler) clearEdgeAdminError() {
+	if st, msg := r.EdgeStatus(); st == EdgeStateError && strings.Contains(msg, edge.FaultAdmin) {
+		r.setEdgeState(EdgeStateRunning, "")
+	}
+}
+
 // syncRoutes makes sure the edge container (when configured) matches routes
-// and pushes routes to Caddy. A failed push with an edge configured re-checks
-// the container once (it may have been removed or stopped) and retries.
-func (r *Reconciler) syncRoutes(ctx context.Context, routes []caddyroute.Route) error {
+// and hands the configuration to the proxy. A failed hand-over with an edge
+// configured re-checks the container once (it may have been removed or
+// stopped) and retries.
+func (r *Reconciler) syncRoutes(ctx context.Context, routes []edge.Route) error {
 	if _, err := r.ensureEdge(ctx, routes, false); err != nil {
 		return err
 	}
-	err := r.cfg.Router.Sync(ctx, routes)
+	err := r.applyRoutes(ctx, routes)
 	if err == nil || r.edgeManager() == nil {
 		return err
 	}
 	if _, eerr := r.ensureEdge(ctx, routes, true); eerr != nil {
 		return eerr
 	}
-	return r.cfg.Router.Sync(ctx, routes)
+	return r.applyRoutes(ctx, routes)
 }
 
 // observedRoutes builds routes from live containers of running apps.
-func (r *Reconciler) observedRoutes(ctx context.Context) ([]caddyroute.Route, error) {
+func (r *Reconciler) observedRoutes(ctx context.Context) ([]edge.Route, error) {
 	apps, err := r.cfg.Store.ListApps(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var routes []caddyroute.Route
+	var routes []edge.Route
 	for _, a := range apps {
 		if a.Desired == state.DesiredStopped || a.CurrentDeployment == "" {
 			continue
@@ -1407,41 +1528,6 @@ func (r *Reconciler) redactString(s string, env []state.EnvVar) string {
 		}
 	}
 	return s
-}
-
-func routesEqual(current map[string]caddyroute.Route, want []caddyroute.Route) bool {
-	if len(current) != len(want) {
-		return false
-	}
-	for _, rt := range want {
-		c, ok := current[rt.App]
-		if !ok || !routeEqual(c, rt) {
-			return false
-		}
-	}
-	return true
-}
-
-// routeEqual compares two routes on the fields the reconciler controls,
-// treating Domains as an unordered set.
-func routeEqual(a, b caddyroute.Route) bool {
-	if a.App != b.App || a.PublicPort != b.PublicPort || a.Upstream != b.Upstream || a.Listen != b.Listen || a.LANPort != b.LANPort {
-		return false
-	}
-	if len(a.Domains) != len(b.Domains) {
-		return false
-	}
-	set := make(map[string]int, len(a.Domains))
-	for _, d := range a.Domains {
-		set[d]++
-	}
-	for _, d := range b.Domains {
-		set[d]--
-		if set[d] < 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // DefaultProbe performs an HTTP GET with a 2s timeout, no redirects; any

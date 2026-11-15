@@ -86,7 +86,7 @@ func classifyNetErr(err error, domain string, port int) Diagnosis {
 		return Diagnosis{
 			Code:    CodeCertPending,
 			Message: fmt.Sprintf("%s 的 443 端口已通，但证书还没有就绪", domain),
-			Hint:    "Caddy 正在自动申请证书，通常一两分钟。",
+			Hint:    "入口代理正在自动申请证书，通常一两分钟。",
 		}
 	}
 	return Diagnosis{Code: CodeHTTPError, Message: fmt.Sprintf("访问 %s 失败：%v", domain, err)}
@@ -118,7 +118,7 @@ func CertFailedDiagnosis(domain string) Diagnosis {
 	return Diagnosis{
 		Code:    CodeCertFailed,
 		Message: fmt.Sprintf("等待后 %s 的 HTTPS 证书仍未签发", domain),
-		Hint:    "常见原因：80 端口没有放行（证书机构要通过 80 端口验证）；域名的 CAA 记录不允许 Let's Encrypt/ZeroSSL；同一域名短时间内申请次数过多。可在服务器上用 journalctl -u caddy 查看原因，稍后用 acornfox public-console status 再看。",
+		Hint:    "常见原因：80 端口没有放行（证书机构要通过 80 端口验证）；域名的 CAA 记录不允许 Let's Encrypt/ZeroSSL；同一域名短时间内申请次数过多。可在服务器上运行 acornfox doctor，按它给出的入口容器名用 docker logs 查看原因，稍后用 acornfox public-console status 再看。",
 	}
 }
 

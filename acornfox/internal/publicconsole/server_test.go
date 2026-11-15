@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -403,55 +402,30 @@ func TestLimiterBackoffAndGlobal(t *testing.T) {
 	}
 }
 
-// --- router wrapper ---
+// --- route source ---
 
-type fakeInner struct {
-	synced  []caddyroute.Route
-	current map[string]caddyroute.Route
-}
-
-func (f *fakeInner) Sync(_ context.Context, r []caddyroute.Route) error { f.synced = r; return nil }
-func (f *fakeInner) Current(context.Context) (map[string]caddyroute.Route, error) {
-	out := map[string]caddyroute.Route{}
-	for k, v := range f.current {
-		out[k] = v
-	}
-	return out, nil
-}
-
-func TestWrapRouter(t *testing.T) {
+func TestRoutes(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileStore(filepath.Join(t.TempDir(), "pc.json"))
-	inner := &fakeInner{current: map[string]caddyroute.Route{"web": {App: "web", PublicPort: 18810}}}
-	r := WrapRouter(inner, store, "127.0.0.1:18801")
+	routes := Routes(store, "127.0.0.1:18801")
 
-	// Off: no extra route, Current unchanged.
-	_ = r.Sync(ctx, []caddyroute.Route{{App: "web"}})
-	if len(inner.synced) != 1 {
-		t.Fatalf("synced = %v", inner.synced)
+	// Off: no route.
+	if rs, err := routes(ctx); err != nil || len(rs) != 0 {
+		t.Fatalf("off: %v %v", rs, err)
 	}
-	if m, _ := r.Current(ctx); len(m) != 1 {
-		t.Fatalf("current off = %v", m)
-	}
-
-	// On but missing in Caddy: Current reports a difference.
+	// On: one domain-only route to the gateway.
 	_ = store.Save(&Config{Domain: "panel.example.com"})
-	if m, _ := r.Current(ctx); len(m) != 2 {
-		t.Fatalf("missing console route not flagged: %v", m)
+	rs, err := routes(ctx)
+	if err != nil || len(rs) != 1 {
+		t.Fatalf("on: %v %v", rs, err)
 	}
-	_ = r.Sync(ctx, []caddyroute.Route{{App: "web"}})
-	if len(inner.synced) != 2 || inner.synced[1].App != RouteApp || inner.synced[1].Domains[0] != "panel.example.com" || inner.synced[1].PublicPort != 0 {
-		t.Fatalf("synced = %+v", inner.synced)
+	if r := rs[0]; r.App != RouteApp || r.PublicPort != 0 || r.Upstream != "127.0.0.1:18801" || len(r.Domains) != 1 || r.Domains[0] != "panel.example.com" {
+		t.Fatalf("route = %+v", r)
 	}
-	// Present and correct: hidden from the reconciler.
-	inner.current[RouteApp] = caddyroute.Route{App: RouteApp, Upstream: "127.0.0.1:18801", Domains: []string{"panel.example.com"}}
-	if m, _ := r.Current(ctx); len(m) != 1 || m["web"].App != "web" {
-		t.Fatalf("current on = %v", m)
-	}
-	// Disabled but still in Caddy: flagged so it gets removed.
+	// Disabled again: gone.
 	_ = store.Delete()
-	if m, _ := r.Current(ctx); len(m) != 2 {
-		t.Fatalf("stale console route not flagged: %v", m)
+	if rs, _ := routes(ctx); len(rs) != 0 {
+		t.Fatalf("after disable: %v", rs)
 	}
 }
 

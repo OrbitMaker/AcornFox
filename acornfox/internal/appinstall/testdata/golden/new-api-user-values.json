@@ -15,7 +15,11 @@
     "China": false,
     "Cloud": "",
     "TZ": "",
-    "ChatModel": ""
+    "Host": {
+      "PublicHost": "server.example",
+      "Desktop": false,
+      "HTTPSPort": 0
+    }
   },
   "apps": [
     {
@@ -55,11 +59,23 @@
           "path": "/api/setup",
           "content_type": "application/json",
           "body": "{\"DemoSiteEnabled\":false,\"SelfUseModeEnabled\":true,\"confirmPassword\":\"p\\\"a\\\\ss'w{{params.admin_username}}\\u003c\\u0026\\u003e中文\",\"password\":\"p\\\"a\\\\ss'w{{params.admin_username}}\\u003c\\u0026\\u003e中文\",\"username\":\"root_1\"}"
+        },
+        {
+          "method": "POST",
+          "path": "/api/user/login",
+          "content_type": "application/json",
+          "body": "{\"password\":\"p\\\"a\\\\ss'w{{params.admin_username}}\\u003c\\u0026\\u003e中文\",\"username\":\"root_1\"}"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/option/",
+          "content_type": "application/json",
+          "body": "{\"key\":\"RegisterEnabled\",\"value\":false}"
         }
       ],
       "first_login": {
         "app": "gateway",
-        "url": "http://server.example:8080/gateway",
+        "url": "http://server.example:18810",
         "fields": [
           {
             "label": "账号",

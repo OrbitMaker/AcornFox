@@ -29,12 +29,16 @@
     },
     "links": {
       "type": "array",
-      "description": "把 apps 里的应用连起来：to 的 uses 由 from 的 provides 满足",
+      "description": "把 apps 里的应用连起来：to 这个应用名叫 uses 的那项需要，接 from 这个应用提供的同类型服务。from 要排在 to 前面（按 apps 的顺序装，后装的接先装的）。没写连接的需要按平台的匹配规则接",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["from", "to", "uses"],
-        "properties": { "from": { "type": "string" }, "to": { "type": "string" }, "uses": { "type": "string" } }
+        "properties": {
+          "from": { "type": "string", "description": "提供服务的应用（apps 里的 app），要提供 to 那项需要的服务类型" },
+          "to": { "type": "string", "description": "需要服务的应用（apps 里的 app）" },
+          "uses": { "type": "string", "description": "to 的清单里 uses[].name，不是服务类型名" }
+        }
       }
     },
     "delivery": {

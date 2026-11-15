@@ -7,7 +7,7 @@ package apiserver
 //
 //   - the service itself (it answered, so it runs) and the runner / Docker
 //     (SETUP-SVC-01 on Linux, SETUP-RT-03 elsewhere),
-//   - the gateway (Caddy) container (SETUP-EDGE-01),
+//   - the gateway (entry proxy) container (SETUP-EDGE-01),
 //   - the runtime setup when it stopped (its own code),
 //   - Linux only: free disk space of the data directory and Docker's data
 //     root (SETUP-DISK-01), the ports AcornFox needs (SETUP-PORT-01..05) and
@@ -17,7 +17,10 @@ package apiserver
 //   - Linux only: the download gateway (SETUP-GW-01) and the app catalog's
 //     last sync (SETUP-SYNC-01, from the app center's own status; nothing is
 //     synced). The clock check and the gateway check share one HEAD request
-//     to the gateway's /v1/health (hostcheck.DefaultGatewayProbes).
+//     to the gateway's /v1/health (hostcheck.DefaultGatewayProbes),
+//   - with an app center: the services the installed apps are plugged into
+//     (CAT-SVC-08, a warning for each one that is not usable now, from the
+//     service registry; no service is contacted).
 //
 // It is read-only. It usually answers within a second; it waits longest on
 // that one HEAD request, at most 5 seconds when the gateway does not answer.
@@ -136,14 +139,14 @@ func (s *server) getRuntimeChecks(w http.ResponseWriter, r *http.Request) {
 		case reconcile.EdgeStateOff:
 		case reconcile.EdgeStateRunning:
 			edgeOK = true
-			rep.Add(true, "SETUP-EDGE-01", "网关（Caddy）：运行中")
+			rep.Add(true, "SETUP-EDGE-01", "网关：运行中")
 		case reconcile.EdgeStatePreparing:
-			rep.Warn("SETUP-EDGE-01", "网关（Caddy）：正在准备（第一次启动要下载镜像）")
+			rep.Warn("SETUP-EDGE-01", "网关：正在准备")
 		default:
 			if msg == "" {
 				msg = "没有运行"
 			}
-			rep.Add(false, "SETUP-EDGE-01", "网关（Caddy）：%s", msg)
+			rep.Add(false, "SETUP-EDGE-01", "网关：%s", msg)
 		}
 	}
 
@@ -208,6 +211,10 @@ func (s *server) getRuntimeChecks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.appCenter != nil {
+		s.runtimeAppServices(ctx, rep, apps, appsErr)
+	}
+
 	v.OK, v.Items = rep.OK, rep.Items
 	if s.sources != nil {
 		src := s.sources()
@@ -229,4 +236,38 @@ func (s *server) runtimeCatalogSync() (hostcheck.CatalogSync, bool) {
 		cs.Serial, cs.Origin = idx.Serial, origin
 	}
 	return cs, true
+}
+
+// runtimeAppServices adds the services check (hostcheck.CheckAppServices)
+// from the app center's service registry. apps are the installed apps (when
+// they could be listed): plugs of apps deleted with their data kept are not
+// reported.
+func (s *server) runtimeAppServices(ctx context.Context, rep *checkReport, apps []state.App, appsErr error) {
+	list, err := s.appCenter.Services(ctx)
+	if err != nil {
+		rep.Warn(hostcheck.CodeServiceUnusable, "应用用的服务：读不了服务登记表（%v）", err)
+		return
+	}
+	var installed func(string) bool
+	if appsErr == nil {
+		names := make(map[string]bool, len(apps))
+		for _, a := range apps {
+			names[a.Name] = true
+		}
+		installed = func(app string) bool { return names[app] }
+	}
+	svcs := make([]hostcheck.ServiceInUse, 0, len(list.Services))
+	for _, sv := range list.Services {
+		in := hostcheck.ServiceInUse{Name: sv.Name, Kind: sv.Kind, KindLabel: sv.KindLabel, Status: string(sv.Status), StatusLabel: sv.StatusLabel,
+			Missing: sv.Missing}
+		if sv.Source == state.ServiceFromApp {
+			in.Provider = sv.App
+		}
+		in.ReadySay = sv.ReadySay
+		for _, u := range sv.UsedBy {
+			in.Users = append(in.Users, hostcheck.ServiceUser{App: u.App, Use: u.Use})
+		}
+		svcs = append(svcs, in)
+	}
+	hostcheck.CheckAppServices(rep, svcs, list.Unreadable, installed)
 }

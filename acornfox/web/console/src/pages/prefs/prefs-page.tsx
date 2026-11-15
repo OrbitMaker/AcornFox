@@ -1,10 +1,11 @@
-// 设置：通用、访问、运行环境、存储、下载源、升级、开发者与 AI。没有后端支撑的项（提醒、账号）不显示。
+// 设置：通用、服务、访问、运行环境、存储、下载源、升级、开发者与 AI。没有后端支撑的项（提醒、账号）不显示。
+// “服务”分区在 services.tsx（这台机器上能给应用用的服务，旧服务端没有接口时显示还没有这项功能）。
 // 接口：GET /v1/lan-console、GET /v1/public-console（控制台入口只读；开关只能在服务器上用命令改）、
 //       GET /v1/runtime/checks（数据目录、磁盘、下载顺序）、GET /v1/metrics/host、GET /v1/status（版本）、
 //       GET /v1/catalog（目录来源，含私有目录）、POST /v1/catalog/connect（连接私有目录，这一版藏起，见 PRIVATE_CATALOG_UI）。
 // 升级只有升级命令：平台只能升级、不能回滚（升级没成功时脚本自动恢复原样）。
 import * as React from 'react'
-import { Bot, Globe, HardDrive, Link2, Lock, Server, SlidersHorizontal, ArrowUpCircle } from 'lucide-react'
+import { Bot, Globe, HardDrive, Link2, Lock, Plug, Server, SlidersHorizontal, ArrowUpCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { usePoll } from '@/lib/hooks'
@@ -24,9 +25,11 @@ import { CopyLine } from '@/components/ui/copy'
 import { Progress } from '@/components/ui/progress'
 import { useToast } from '@/components/ui/toast'
 import { ConnectCatalogDialog } from '../store/connect-dialog'
+import { Services } from './services'
 
 export const PREF_NAV = [
   ['general', '通用', SlidersHorizontal],
+  ['services', '服务', Plug],
   ['access', '访问', Lock],
   ['engine', '运行环境', Server],
   ['storage', '存储', HardDrive],
@@ -35,8 +38,8 @@ export const PREF_NAV = [
   ['dev', '开发者与 AI', Bot],
 ] as const
 
-const CLI_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash'
-const CLI_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash'
+const CLI_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli'
+const CLI_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli'
 
 function Row({ title, desc, children }: { title: React.ReactNode; desc?: React.ReactNode; children?: React.ReactNode }) {
   return (
@@ -170,7 +173,7 @@ function Engine() {
       <div className="py-1">
         <KV k="Docker">{status?.docker_version || '—'}</KV>
         <KV k="执行器">{status?.runner === 'ok' ? '正常' : status ? '没有应答' : '—'}</KV>
-        {status?.edge?.state && <KV k="网关（Caddy）">{status.edge.state === 'running' ? '运行中' : status.edge.state === 'preparing' ? '正在准备' : status.edge.message || '有问题'}</KV>}
+        {status?.edge?.state && <KV k="入口代理">{status.edge.state === 'running' ? '运行中' : status.edge.state === 'preparing' ? '正在准备' : status.edge.message || '有问题'}</KV>}
       </div>
       <div className="flex gap-1.5 py-2.5">
         <Button variant="outline" size="sm" onClick={() => go('#runtime')}>查看自检</Button>
@@ -273,7 +276,7 @@ function Dev() {
       <Block title="常用命令" desc="页面能做的事命令行都能做，加 --json 输出给程序或 AI 读">
         <CopyLine text="acornfox apps" />
         <CopyLine text="acornfox catalog list" />
-        <CopyLine text="acornfox install new-api" />
+        <CopyLine text="acornfox install 应用名 --plan" />
         <CopyLine text="sudo acornfox doctor --json" />
       </Block>
     </>
@@ -284,7 +287,7 @@ export function PrefsPage({ sec }: { sec?: string }) {
   const cur = PREF_NAV.find((x) => x[0] === sec) || PREF_NAV[0]
   const [connect, setConnect] = React.useState(false)
   const body: Record<string, React.ReactNode> = {
-    general: <General />, access: <Access />, engine: <Engine />, storage: <Storage />,
+    general: <General />, services: <Services />, access: <Access />, engine: <Engine />, storage: <Storage />,
     mirror: <Mirror onConnect={() => setConnect(true)} />, update: <Update />, dev: <Dev />,
   }
   return (

@@ -224,8 +224,18 @@ func TestMigration0013OnExistingData(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	// Put the schema back to what 0012 left, with a row in it.
+	// Put the schema back to what 0012 left, with a row in it. What later
+	// migrations added goes first: applied migrations must stay a prefix of
+	// the list.
 	for _, q := range []string{
+		`ALTER TABLE service_bindings DROP COLUMN dedicated`,
+		`DELETE FROM _schema_migrations WHERE version='0016_binding_dedicated'`,
+		`ALTER TABLE apps DROP COLUMN health_check`,
+		`ALTER TABLE apps DROP COLUMN internal`,
+		`DELETE FROM _schema_migrations WHERE version='0015_app_internal_health'`,
+		`DROP TABLE service_bindings`,
+		`DROP TABLE services`,
+		`DELETE FROM _schema_migrations WHERE version='0014_service_registry'`,
 		`DROP TABLE app_catalog_manifests`,
 		`ALTER TABLE kept_catalog_secrets DROP COLUMN manifest`,
 		`ALTER TABLE kept_catalog_secrets DROP COLUMN manifest_sha256`,

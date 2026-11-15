@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -633,6 +633,12 @@ func (f *fakeRunner) EnsureContainer(_ context.Context, req runner.EnsureContain
 		Running:      true,
 		HostPort:     40000 + len(f.containers),
 	}
+	if role == runner.RoleApp && req.Internal {
+		// Like Docker: an internal app publishes nothing; this machine
+		// reaches it at its address on the app network.
+		c.HostPort = 0
+		c.IP = fmt.Sprintf("172.30.0.%d", 2+len(f.containers))
+	}
 	if role == runner.RoleAddon {
 		c.HostPort = 0 // add-ons are never published
 		c.Health = "healthy"
@@ -764,41 +770,52 @@ func (f *fakeRunner) hasContainer(name string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// fake Router
+// fake entry proxy (edge.Proxy)
 // ---------------------------------------------------------------------------
 
 type fakeRouter struct {
 	mu      sync.Mutex
-	routes  map[string]caddyroute.Route
+	routes  map[string]edge.Route
+	https   edge.HTTPS
 	syncErr error
 	syncs   int
 }
 
-func newRouter() *fakeRouter { return &fakeRouter{routes: map[string]caddyroute.Route{}} }
+func newRouter() *fakeRouter { return &fakeRouter{routes: map[string]edge.Route{}} }
 
-func (r *fakeRouter) Sync(_ context.Context, routes []caddyroute.Route) error {
+func (r *fakeRouter) Apply(_ context.Context, cfg edge.Config) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.syncErr != nil {
-		return r.syncErr
+		return "", r.syncErr
 	}
 	r.syncs++
-	r.routes = map[string]caddyroute.Route{}
-	for _, rt := range routes {
+	r.https = cfg.HTTPS
+	r.routes = map[string]edge.Route{}
+	for _, rt := range cfg.Routes {
 		r.routes[rt.App] = rt
 	}
-	return nil
+	return cfg.Version(), nil
 }
 
-func (r *fakeRouter) Current(_ context.Context) (map[string]caddyroute.Route, error) {
+// Version reports the version of what the fake holds, so a test that edits
+// routes directly simulates a proxy that lost or changed its configuration.
+func (r *fakeRouter) Version(_ context.Context) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := map[string]caddyroute.Route{}
-	for k, v := range r.routes {
-		out[k] = v
+	cfg := edge.Config{HTTPS: r.https}
+	for _, v := range r.routes {
+		cfg.Routes = append(cfg.Routes, v)
 	}
-	return out, nil
+	return cfg.Version(), nil
 }
+
+func (r *fakeRouter) SetChallenge(context.Context, string, string, string) error { return nil }
+func (r *fakeRouter) ClearChallenge(context.Context) error                       { return nil }
+func (r *fakeRouter) Health(context.Context) edge.Health {
+	return edge.Health{State: edge.StateRunning}
+}
+
 func (r *fakeRouter) hasRoute(app string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -831,7 +848,7 @@ func newHarness(t *testing.T) *harness {
 	h.rec = New(Config{
 		Store:         h.store,
 		Runner:        h.runner,
-		Router:        h.router,
+		Proxy:         h.router,
 		Probe:         func(ctx context.Context, hp, p string) error { return h.probe(ctx, hp, p) },
 		UploadDir:     t.TempDir(),
 		PublicHost:    "192.168.0.1",

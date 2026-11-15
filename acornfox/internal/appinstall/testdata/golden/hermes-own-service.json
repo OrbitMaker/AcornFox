@@ -1,0 +1,110 @@
+{
+  "scenario": "hermes-own-service",
+  "request": {
+    "app": "hermes-agent",
+    "params": {
+      "model": "qwen-max:\"v1\""
+    }
+  },
+  "platform": {
+    "China": true,
+    "Cloud": "tencent",
+    "TZ": "Asia/Tokyo",
+    "Host": {
+      "PublicHost": "server.example",
+      "Desktop": false,
+      "HTTPSPort": 0
+    }
+  },
+  "apps": [
+    {
+      "app": "hermes-agent",
+      "catalog_id": "hermes-agent",
+      "version": "v0.23.0",
+      "settings": {
+        "port": 9119,
+        "health_path": "/api/status",
+        "exposure": "local",
+        "command": [
+          "gateway",
+          "run"
+        ],
+        "pids_limit": 512,
+        "memory_mb": 2048,
+        "links": []
+      },
+      "env": [
+        {
+          "key": "HERMES_DASHBOARD",
+          "value": "1",
+          "secret": false
+        },
+        {
+          "key": "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+          "value": "aN0CutewVmeD5iLagL5YG7rq",
+          "secret": true
+        },
+        {
+          "key": "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
+          "value": "ada4da239ea33c773ca08be3775ffb47d704f1ea422b6277136c1e53fe903ee4",
+          "secret": true
+        },
+        {
+          "key": "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
+          "value": "admin",
+          "secret": false
+        },
+        {
+          "key": "PIP_INDEX_URL",
+          "value": "https://mirrors.cloud.tencent.com/pypi/simple/",
+          "secret": false
+        },
+        {
+          "key": "TZ",
+          "value": "Asia/Tokyo",
+          "secret": false
+        },
+        {
+          "key": "UV_DEFAULT_INDEX",
+          "value": "https://mirrors.cloud.tencent.com/pypi/simple/",
+          "secret": false
+        },
+        {
+          "key": "npm_config_registry",
+          "value": "https://mirrors.cloud.tencent.com/npm/",
+          "secret": false
+        }
+      ],
+      "files": [
+        {
+          "mount_path": "/opt/data",
+          "path": "config.yaml",
+          "mode": "0600",
+          "uid": 10000,
+          "gid": 10000,
+          "overwrite": true,
+          "content": "model:\n  provider: custom\n  base_url: \"https://api.example.com/v1\"\n  api_key: \"sk-\\\"quoted\\\"\\\\back\"\n  default: \"qwen-max:\\\"v1\\\"\"\napprovals:\n  mode: manual\nterminal:\n  backend: local\n"
+        }
+      ],
+      "init": [],
+      "first_login": {
+        "app": "hermes-agent",
+        "url": "http://server.example:18810",
+        "fields": [
+          {
+            "label": "账号",
+            "value": "admin"
+          },
+          {
+            "label": "密码",
+            "value": "aN0CutewVmeD5iLagL5YG7rq",
+            "secret": true
+          }
+        ]
+      },
+      "credentials": {
+        "llm → my-upstream": []
+      }
+    }
+  ]
+}

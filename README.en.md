@@ -29,7 +29,7 @@ AcornFox is an open-source deployment platform for your own Linux server. Ask an
 - **Add-on services**: add PostgreSQL, MySQL or Redis with one command
 - **Logs and metrics**: follow logs live and see resource usage
 - **Automatic HTTPS**: certificates for your domains (in mainland China the domain needs an ICP filing)
-- **App center**: install ready-made apps such as New API and Hermes Agent from a signed catalog
+- **App center**: install ready-made apps from a signed catalog; what an app needs (a model API, a mail server and so on) is registered as a "service" and plugged in when it installs
 - **Works in mainland China**: registry mirrors, cloud-internal package sources and timeout diagnoses
 
 ## Who it is for
@@ -59,7 +59,7 @@ The AI installs the Skill first. The Skill then works out separately whether you
 | --- | --- |
 | System | Ubuntu 22.04 or 24.04, Debian 12 or 13 (x86_64; fresh install, self-check and deployment tested on all four). Ubuntu 24.04 or Debian 13 recommended. arm64 is not tested yet |
 | Size | At least 2 CPU cores and 2 GB of memory; root or sudo required |
-| Ports | 18800, 18801, 18808 (used by AcornFox itself, local only) and 18810-18899 (app ports) must be free; the installer stops otherwise and this cannot be skipped. 80 and 443 should preferably be free; if BaoTa, 1Panel or Nginx already uses them, see the note below. 18802 is the LAN console; if it is in use, the LAN console is simply not opened |
+| Ports | 18800, 18801, 18807 (used by AcornFox itself, local only) and 18810-18899 (app ports) must be free; the installer stops otherwise and this cannot be skipped. 80 and 443 should preferably be free; if BaoTa, 1Panel or Nginx already uses them, see the note below. 18802 is the LAN console; if it is in use, the LAN console is simply not opened |
 
 > **When buying a cloud server in mainland China, choose Ubuntu 24.04 (or Debian 13).** Alibaba Cloud Linux (Alibaba Cloud's default), OpenCloudOS / TencentOS (Tencent Cloud's default), veLinux (Volcano Engine's default), CentOS, Rocky and similar systems are not supported; the installer stops with fault code `INSTALL-OS-01`. Ubuntu or Debian versions outside the list above (for example Ubuntu 20.04 or Debian 11) stop with `INSTALL-OS-02`; switch to a supported version.
 
@@ -71,25 +71,25 @@ The AI installs the Skill first. The Skill then works out separately whether you
 
 ```bash
 # Outside mainland China
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash
 # Mainland China (Gitee mirror)
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash
 ```
 
 When it finishes, the installer shows an admin token (also saved in `/root/.acornfox-token`). Keep it safe.
 
 If the server is on your home or office network (a private address, not a cloud server), the first install opens the LAN console at `http://SERVER_LAN_ADDRESS:18802`; you set its password in the browser the first time you open it. To leave it closed, add `--no-lan-console`: `curl … | sudo bash -s -- --no-lan-console`. It is never opened on cloud servers.
 
-- On Alibaba Cloud, Tencent Cloud and Volcano Engine (any region), the installer uses that provider's internal package sources first (system packages and the Docker installer), so nothing goes over the public internet or counts against traffic, and falls back to the next source if they cannot be reached. Huawei Cloud and other servers in mainland China use domestic public mirrors such as Huawei's.
+- On Alibaba Cloud, Tencent Cloud and Volcano Engine (any region), the installer uses that provider's internal package sources first (system packages and the Docker installer), so nothing goes over the public internet or counts against traffic, and falls back to the next source if they cannot be reached. Huawei Cloud and other servers in mainland China measure several domestic public mirrors and use the fastest.
 - Afterwards, as the installer reminds you, allow inbound TCP 18810-18899 (app ports) in the security group, plus 80 and 443 if you bind a domain.
 
 #### 2. Install the CLI (Linux or Mac computer)
 
 ```bash
 # Outside mainland China
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 # Mainland China
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 ```
 
 There is no command-line program for Windows in this release. Do steps 2-4 over SSH on the server instead (`acornfox` is already installed there); see the [user guide](docs/user-guide.md#windows-电脑经-ssh-在服务器上操作).
@@ -120,19 +120,24 @@ Once the status is `live`, open the URL it shows.
 The App center installs ready-made apps from a signed catalog. Click Install in the web console's App center, or use the CLI:
 
 ```bash
-acornfox catalog list                              # apps and recipes in the catalog
-acornfox install new-api                           # install one app
-acornfox install --recipe hermes-with-new-api      # install Hermes Agent and New API, connected
-acornfox open new-api                              # open it from your computer through an SSH tunnel
+acornfox catalog list                # apps and recipes in the catalog
+acornfox install APP --plan          # see the plan first: which services it needs and what is missing (read-only)
+acornfox install APP                 # install one app
+acornfox install --recipe RECIPE     # install the apps of a recipe, connected
+acornfox services list               # the services on this server and which apps use them
+acornfox open APP                    # open it from your computer through an SSH tunnel
 ```
 
-- The first apps are **New API** (one OpenAI-compatible API in front of many LLM providers) and **Hermes Agent** (an always-on AI agent that can run chat bots), plus three recipes: `new-api`, `hermes-agent` and `hermes-with-new-api`. All are single-container apps that keep their data in their own volume.
+- The catalog has apps and recipes (a recipe installs several apps in order and connects them). What is in it is whatever `acornfox catalog list` and the console's App center show.
+- **From v0.6.0 only apps in the new manifest format can be installed.** The catalog has been published in the new format, and servers that are online pick it up by themselves after the upgrade (run `acornfox catalog sync` to see it right away). Apps listed in the old format can be installed again once they are listed in the new format; apps already installed are not affected and keep running. The catalog built into the program has no apps: on a server that has never synced the new catalog (for example one with no internet access), an install says the App center has no app to install yet; once it is online, `acornfox catalog sync` (or the daily sync) fixes that.
+- **Services** (from v0.6.0): some apps need something else to do their whole job, such as a model API or a mail server for notifications. Each app says which services it needs (required or optional) and which it provides once installed. Services provided by installed apps are registered by themselves; one you already have (your own mail server, a model API key from a provider) you register with `acornfox services add` (secret items are typed in, not written on the command line; secret install settings can be typed in the same way with `--set KEY=-`). An install plugs in a service of the right type; when a required one is missing it stops and says how to register one. AcornFox never installs another app to provide a service; a recipe is how several apps are installed together.
+- Apps installed by v0.5.x used the old manifest format: they keep running and can be started, stopped and deleted, but are not plugged into services (`acornfox status APP` and the console's app details say so); to use the new features, wait until the app is listed again in the new format, then delete it (keeping the data) and install it again from the catalog.
 - An install checks memory, disk space and CPU architecture, generates passwords, downloads the image, starts the app, runs the health check and does the first-time setup. If any step fails, everything it created is cleaned up.
-- New API is set up with an admin account and open sign-up turned off. Hermes Agent can use your own model API key (`--llm own`) or the New API on the same server (`--llm local`); the token it gets from New API has no limit, and you can set one on New API's Tokens page.
-- Large images (such as Hermes Agent's) come through the AcornFox download gateway, with progress shown and resumable downloads; if the gateway fails, the image is pulled from public registries.
+- When an app plugs into a service another app provides, the provider often issues it its own credential (for example a token); AcornFox does that by the steps in the app's manifest, keeps it encrypted, shows only its last 4 characters, and takes it back when the consuming app is deleted with its data.
+- Large images come through the AcornFox download gateway, with progress shown and resumable downloads; if the gateway fails, the image is pulled from public registries.
 - Installed apps listen only on the server itself by default. Open one with `acornfox open APP` on your computer, or, if the server is on your local network, switch it to LAN access in the console (this opens the port on all of the server's network interfaces; the console asks you to confirm).
 - The first-login password is masked in the output; see it in the console's app details or with `acornfox install status TASK_ID --show-secrets`.
-- `acornfox delete APP` keeps the app's data by default. `acornfox install APP --reuse-data` reinstalls it on the old data with the same accounts and passwords. Upgrading an installed app to a newer catalog version is done the same way in this release: delete, then reinstall with `--reuse-data`. From v0.5.1 the reinstall also keeps the settings you had changed, the model source and the config files in the data, so you do not have to repeat the earlier options; `acornfox apps vars APP` shows the settings an app was installed with.
+- `acornfox delete APP` keeps the app's data by default. `acornfox install APP --reuse-data` reinstalls it on the old data with the same accounts and passwords (`acornfox install --name NAME --reuse-data` works too when you do not remember which catalog app it was). Upgrading an installed app to a newer catalog version is done the same way in this release: delete, then reinstall with `--reuse-data`. The reinstall also keeps the settings you had changed, the services it was plugged into and the config files in the data, so you do not have to repeat the earlier options; `acornfox apps vars APP` shows the settings an app was installed with.
 
 ## AI coding tool integration
 
@@ -189,10 +194,13 @@ acornfox add redis --app my-app              # add Redis
 acornfox domain add example.com --app my-app # bind a domain (automatic HTTPS)
 
 # App center
-acornfox install new-api                     # install an app from the catalog
+acornfox install APP --plan                  # the plan: services it needs and what is missing (read-only)
+acornfox install APP                         # install an app from the catalog
 acornfox install status TASK_ID --wait       # wait until the install finishes (up to 90 seconds; run again if not done)
-acornfox apps vars new-api                   # the settings an app was installed with
-acornfox open new-api                        # open a local-only app through an SSH tunnel
+acornfox services add smtp --name my-mail --set host=mail.example.com --set password=-   # register a service you have (the password is typed in)
+acornfox services list                       # services on this server, their state and who uses them
+acornfox apps vars APP                       # the settings an app was installed with
+acornfox open APP                            # open a local-only app through an SSH tunnel
 
 # When something goes wrong
 acornfox faults CAT-INST-24                  # what a fault code means and what to do (read-only, works offline)
@@ -205,7 +213,7 @@ AcornFox has three simple layers:
 
 - **AcornFox**: state and coordination
 - **Docker**: container runtime
-- **Caddy**: HTTP routing and HTTPS
+- **Caddy**: HTTP routing and HTTPS (upstream Caddy, run inside the entry container `acornfox-edge`)
 
 Design principles:
 - **State separated from execution**: the server has no Docker access; the runner accepts only typed requests
@@ -225,19 +233,19 @@ Design principles:
 
 The installer reads the cloud provider's metadata to find out which cloud the server is on and whether the region is in mainland China, then configures:
 - System packages (APT) and the Docker installer: servers on Alibaba Cloud, Tencent Cloud and Volcano Engine use that provider's internal sources first (in every region, including Hong Kong and Singapore), falling back to the next source if they cannot be reached
-- Servers in mainland China (including Huawei Cloud) then try the Huawei Cloud, Tencent Cloud, Alibaba Cloud, Nanjing University and Tsinghua mirrors in turn; servers elsewhere use Docker's official repository
-- Docker registry mirrors (mainland China only): Tencent Cloud servers prefer Tencent Cloud's internal mirror; others use DaoCloud and then the 1Panel mirror. GitHub's registry (ghcr.io) uses the Nanjing University mirror
+- Servers in mainland China (including Huawei Cloud) then measure several domestic mirrors on the spot (Alibaba Cloud, Tsinghua, USTC, Nanjing University, SJTU, Huawei Cloud, Tencent Cloud) and use the fastest one that works; servers elsewhere use Docker's official repository
+- Pulling images: sources come in layers (the cloud provider's internal mirror, then public domestic mirrors, then Docker Hub or ghcr.io itself). In mainland China every source is measured before a pull: the ones that refuse or do not answer are skipped, slow ones go last, and a pull that becomes too slow moves to the next source. `acornfox sources --probe` shows how each source does right now
 - Hong Kong, Singapore, Tokyo and other regions outside the mainland are treated as overseas: downloads come from GitHub, without domestic mirrors or registry mirrors
-- Caddy is downloaded from a domestic source
+- The entry proxy image comes with the release as an entry package, downloaded from a domestic source (Gitee); no image registry is used
 - If the cloud cannot be identified, the server's IP location decides whether it is in mainland China
 
 If the guess is wrong, choose explicitly (passing options to the script through the pipe):
 ```bash
 # Force mainland China mirrors
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash -s -- --china
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- --china
 
 # Force international sources
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash -s -- --global
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- --global
 ```
 
 ## Documentation
@@ -256,14 +264,14 @@ What AcornFox connects to and what it sends is described at [acornfox.com/en/pri
 
 ```bash
 # Upgrade the server (outside mainland China)
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- upgrade
 # Upgrade the server (mainland China)
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade
 
 # Upgrade the CLI (Linux or Mac computer; outside mainland China)
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 # Upgrade the CLI (Linux or Mac computer; mainland China)
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 ```
 
 Running the script through a pipe (including when an AI coding tool runs it for you) counts as agreeing to the upgrade; the script first lists what it will do. If you are already on the latest version it exits without stopping services or reinstalling, so running it again is harmless. Add `-y` (`| sudo bash -s -- -y`) only to reinstall the same version.
@@ -273,7 +281,7 @@ What the upgrade does:
 - Stops the AcornFox service, backs up the program and database (in `/var/lib/acornfox/backups/`, keeping the latest 5), then runs the database migration
 - If the migration fails, the new version will not start, or the upgrade is interrupted, everything is restored to how it was before (program and database, as if the upgrade never happened)
 - App containers keep running throughout; the CLI and console are briefly unavailable during the upgrade
-- When the web entry point (the Caddy container) has to be recreated, app addresses are briefly unreachable, for example when upgrading from v0.3.x (the system Caddy is disabled and replaced by a Caddy container)
+- When the entry proxy container is replaced (for example on the first upgrade to v0.6.0), new requests are not affected, but open long-lived connections, requests still running after 8 seconds and WebSockets are dropped once; servers still on v0.3.x must upgrade to v0.5.1 first
 - Upgrading never opens the LAN console; one that was already open keeps working
 
 AcornFox itself only upgrades and never goes back to an older release: there is no manual rollback, and asking for an older version is refused. Rolling back your own deployed apps with `acornfox rollback` works as before. See the [user guide](docs/user-guide.md#只能升级).
@@ -283,12 +291,12 @@ AcornFox itself only upgrades and never goes back to an older release: there is 
 Download the uninstall script to the server and run it as root:
 
 ```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/uninstall.sh -o uninstall.sh
-sudo bash uninstall.sh            # keeps /var/lib/acornfox and the data volumes
-sudo bash uninstall.sh --purge    # also deletes all data; cannot be undone
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh -o get.sh
+sudo bash get.sh uninstall            # keeps /var/lib/acornfox and the data volumes
+sudo bash get.sh uninstall --purge    # also deletes all data; cannot be undone
 ```
 
-In mainland China, download it from `https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/uninstall.sh`. Docker itself is not removed.
+In mainland China, download it from `https://gitee.com/VIP13390/AcornFox/raw/main/get.sh`. Docker itself is not removed.
 
 ## Contributing
 

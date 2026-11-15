@@ -16,8 +16,16 @@ import (
 
 // Version is the AcornFox version reported by `acornfox version` (client and
 // server share one binary). Release builds set it with
-// -ldflags "-X github.com/acornfox/acornfox/internal/cli.Version=x.y.z".
-var Version = "0.2.0-dev"
+// -ldflags "-X github.com/acornfox/acornfox/internal/cli.Version=x.y.z"
+// (scripts/build-release.sh takes x.y.z from the release tag), so this
+// default never reaches a release.
+//
+// The default is what a build without that flag reports: the version under
+// development with a "-dev" suffix. The app center compares only its x.y.z
+// part with a manifest's min_platform, so such a build installs what the
+// version under development understands. Raise it when the manifest format
+// gains a version.
+var Version = "0.6.0-dev"
 
 // Connector opens a client.API for a target. It is injected so the command
 // layer stays decoupled from the concurrently implemented client.Connect. main
@@ -81,7 +89,7 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.out.usageError("%s", err.Error())
 	}
 	if len(rest) == 0 {
-		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、version、doctor、identity、faults（acornfox help 看说明）")
+		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、services、version、doctor、identity、faults、sources（acornfox help 看说明）")
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
@@ -97,6 +105,8 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdCatalog(ctx, cmdArgs)
 	case "install":
 		return a.cmdInstall(ctx, cmdArgs)
+	case "services":
+		return a.cmdServices(ctx, cmdArgs)
 	case "target":
 		return a.cmdTarget(ctx, cmdArgs)
 	case "deploy":
@@ -149,9 +159,12 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdPublicConsole(ctx, cmdArgs)
 	case "limits":
 		return a.cmdLimits(ctx, cmdArgs)
-	case "doctor", "identity", "uninstall", "faults":
+	case "doctor", "identity", "uninstall", "faults", "sources":
 		// These run in the acornfox binary itself and only look at this
 		// computer; they reach here only when written after --target or --app.
+		if cmd == "sources" {
+			return a.out.usageError("sources 只看这台机器的镜像下载源，不接受 --target、--app；直接运行 acornfox sources（要实测加 --probe，要 JSON 加 --json）")
+		}
 		if cmd == "faults" {
 			return a.out.usageError("faults 只查程序里的故障目录，不连服务器，不接受 --target、--app；直接运行 acornfox faults 编号（要 JSON 加 --json）")
 		}
@@ -178,6 +191,7 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
                                    （sudo acornfox doctor 看得更全）
   identity show                    这台机器在下载网关上的安装编号和公钥（reset --yes 重新生成）
   faults [编号]                    故障目录：一个故障编号是什么意思、怎么判定、怎么处理（只读，不连服务器）
+  sources [--probe]                这台机器拉镜像用哪些下载源、按什么先后；--probe 现在实测每个源通不通、多快（只读）
 
 服务器
   target add 名称 --ssh 用户@主机   添加服务器（list、use、remove 管理已有的）
@@ -211,12 +225,16 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
 
 应用中心
   catalog list / info 应用 / sync  看目录里的应用和配方、应用详情和参数、让服务器同步目录
-  catalog platform-vars            平台按这台机器自动填给应用的时区、下载源、默认模型等（只读）
+  catalog platform-vars            平台按这台机器自动填给应用的时区、下载源等（只读）
   apps vars 应用 [--reveal]         看一个装好的应用是用什么设置装的：每个变量的值、谁给的、能不能改（只读）
-  install 应用 [--llm local|own]    从目录装一个应用（--recipe 配方 装一组；--no-wait 只提交；acornfox install -h 看详情）
+  install 应用 [--plan] [--use …]   从目录装一个应用（--recipe 配方 装一组；--plan 只看计划；--no-wait 只提交；acornfox install -h 看详情）
   install status 任务编号 [--wait]  查安装进度、首次登录信息（--wait 等到装好或失败，默认最多 90 秒；
                                    --show-secrets 显示密码）
   装好的应用默认只本机能打开：在你自己的电脑上运行 acornfox open 应用名
+  services list / show 名字         这台机器上能给应用用的服务（应用提供的、自己登记的）：每一项、状态、谁在用（只读）
+  services kinds                   有哪些服务类型、每种有哪些项（只读）
+  services add 类型 --name 名字 --set 项=值   登记一条自己已有的服务（保密项写 项=-，从标准输入读）
+  services set 名字 项=值 / test 名字 / remove 名字 [--yes]   改几项 / 试一下通不通 / 删一条（不加 --yes 只试跑）
 
 其他
   skill install                    把 AcornFox Skill 装到 AI 工作台

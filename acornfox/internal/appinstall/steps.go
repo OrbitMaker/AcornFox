@@ -12,6 +12,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,41 +102,73 @@ type AppResult struct {
 	Created   bool   `json:"created"` // this task created it (removed again on failure)
 	URL       string `json:"url,omitempty"`
 	MemoryMB  int    `json:"memory_mb,omitempty"`
+	// Internal: the app is reached over the app network only (for other
+	// apps); it has no URL and nothing to open.
+	Internal bool `json:"internal,omitempty"`
 	// What this task made for the app, kept in the task record so a cleanup
 	// after a restart still finds it. Only these are removed on failure:
-	// never a volume or token that existed before.
-	Volumes      []string  `json:"volumes,omitempty"`       // Docker volumes this task created
-	ImageTag     string    `json:"image_tag,omitempty"`     // acornfox/<app>:<id> tag made for the image
-	GatewayToken *TokenRef `json:"gateway_token,omitempty"` // token issued in the local model gateway (id only)
+	// never a volume or a credential that existed before.
+	Volumes  []string `json:"volumes,omitempty"`   // Docker volumes this task created
+	ImageTag string   `json:"image_tag,omitempty"` // acornfox/<app>:<id> tag made for the image
 	// ReusedVolumes are old data volumes this install took over (reuse_data);
 	// they are never removed by this task.
 	ReusedVolumes []string `json:"reused_volumes,omitempty"`
 	// What an install on old data (reuse_data) carried over from the old app,
 	// see reuse.go. Carried: one line each (parameters, the platform
-	// variables the user had changed, the model source, its token; after any
-	// install also what became of tokens an old app of this name left).
-	// TakenToken: the old app's token in a local model gateway, taken over
-	// (not issued by this task: a failed install leaves it alone). KeptFiles:
-	// config files of the old data left as they were. FileBackups: config
-	// files written anew because what the platform puts in them changed, and
-	// where the old file was copied first.
-	Carried     []string            `json:"carried,omitempty"`
-	TakenToken  *TokenRef           `json:"taken_gateway_token,omitempty"`
+	// variables the user had changed, the services plugged in again; lines
+	// beginning with CAT-INST-35 are credentials not taken back, which the
+	// user must hear about). KeptFiles: config files of the old data left as
+	// they were. FileBackups: config files written anew because what the
+	// platform puts in them changed, and where the old file was copied first.
+	Carried []string `json:"carried,omitempty"`
+	// Tell: what the providers of the services this app was plugged into
+	// wrote for the user (their manifest's provides values written ask), as
+	// they are; worked out when the task starts (needs.go, tellOf). They go
+	// into the verdict's must_tell once the task has succeeded.
+	Tell        []string            `json:"tell,omitempty"`
 	KeptFiles   []string            `json:"kept_files,omitempty"`
 	FileBackups []runner.FileBackup `json:"file_backups,omitempty"`
-}
-
-// TokenRef names a token issued in a local model gateway app (never its value).
-type TokenRef struct {
-	Provider string `json:"provider"`
-	ID       int    `json:"id"`
+	// Services (connect.go): the services this task registered for the app
+	// (it provides them) and the needs of the app it plugged in. A failed
+	// install takes back the credentials it issued, then removes both.
+	Services []string     `json:"services,omitempty"`
+	Bindings []BindingRef `json:"bindings,omitempty"`
+	// Issuing: the issues this task has started for the app and that have
+	// not ended yet, each with its number, recorded before the provider's
+	// issue steps run. One still here after the task ended (the server
+	// stopped half-way) may have left something in the provider that
+	// nothing will take back: the cleanup says so (CAT-INST-35).
+	Issuing []IssuingRef `json:"issuing,omitempty"`
+	// Replaced: the bindings the app had from before (deleted with its data
+	// kept) that this task plugs into something else, moved aside until the
+	// task ends: put back on failure, taken back once it has succeeded.
+	Replaced []ReplacedRef `json:"replaced,omitempty"`
 }
 
 // FirstLogin is the first-login information of one app.
 type FirstLogin struct {
-	App    string       `json:"app"`
-	URL    string       `json:"url,omitempty"`
-	Fields []LoginField `json:"fields"`
+	App string `json:"app"`
+	URL string `json:"url,omitempty"`
+	// URLNote is set when URL only opens on the server itself (a loopback
+	// address): whoever passes the login on says it to the user as it is
+	// (it names no field) and opens the app the way its open_hint says.
+	URLNote string       `json:"url_note,omitempty"`
+	Fields  []LoginField `json:"fields"`
+}
+
+// LoopbackURLNote is FirstLogin.URLNote.
+const LoopbackURLNote = "这个地址只有服务器本机能打开；从你自己电脑打开的办法见“怎么打开”"
+
+// loopbackURL reports whether u is an address only the machine itself
+// opens: 127.0.0.0/8 or ::1. localhost is left out: a desktop install
+// gives it, and there the user sits at that very machine.
+func loopbackURL(u string) bool {
+	p, err := neturl.Parse(u)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(p.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 // LoginField is one line of first-login information.
@@ -159,14 +192,12 @@ func withTiming(v TaskView, now time.Time) TaskView {
 			StartedAt: s.StartedAt, FinishedAt: s.FinishedAt, Progress: s.Progress})
 	}
 	for _, a := range v.Apps {
-		x := installtiming.App{Name: a.App, Carried: a.Carried}
-		switch {
-		case a.GatewayToken != nil:
-			x.TokenProvider = a.GatewayToken.Provider
-		case a.TakenToken != nil:
-			x.TokenProvider = a.TakenToken.Provider
+		t.Apps = append(t.Apps, installtiming.App{Name: a.App, Carried: a.Carried, Tell: a.Tell})
+	}
+	for _, fl := range v.FirstLogin {
+		for _, f := range fl.Fields {
+			t.HasSecrets = t.HasSecrets || f.Secret
 		}
-		t.Apps = append(t.Apps, x)
 	}
 	vd := installtiming.Assess(t, now, "server")
 	v.Timing = &vd
@@ -185,7 +216,8 @@ func stepsFor(p *planned) []StepView {
 }
 
 // taskRun is one running task. What it created is recorded in view.Apps
-// (Created, Volumes, ImageTag, GatewayToken) and saved with every step.
+// (Created, Volumes, ImageTag, Services, Bindings, Issuing) and saved with
+// every step.
 type taskRun struct {
 	e    *Engine
 	id   string
@@ -205,14 +237,9 @@ func (t *taskRun) snapshot() TaskView {
 		a.Carried = append([]string(nil), a.Carried...)
 		a.KeptFiles = append([]string(nil), a.KeptFiles...)
 		a.FileBackups = append([]runner.FileBackup(nil), a.FileBackups...)
-		if a.GatewayToken != nil {
-			tok := *a.GatewayToken
-			a.GatewayToken = &tok
-		}
-		if a.TakenToken != nil {
-			tok := *a.TakenToken
-			a.TakenToken = &tok
-		}
+		a.Services = append([]string(nil), a.Services...)
+		a.Bindings = append([]BindingRef(nil), a.Bindings...)
+		a.Issuing = append([]IssuingRef(nil), a.Issuing...)
 		v.Apps[i] = a
 	}
 	return v
@@ -343,6 +370,24 @@ func (t *taskRun) run(ctx context.Context, plan []*planned, keepVolumes bool) {
 	}
 	if failed != nil {
 		t.cleanup(ctx, keepVolumes)
+	} else {
+		// What the apps had from before and do not use any more goes only
+		// now: a rollback leaves it as it was. Bindings replaced by this
+		// install first, then kept bindings of needs not plugged in.
+		for _, p := range plan {
+			if !p.reuse {
+				t.finishReplaced(ctx, p)
+				t.dropStaleBindings(ctx, p)
+			}
+		}
+		// The services the apps were plugged into that are not ready now
+		// (their provider's readiness check, ready.go): the user hears it
+		// (must_tell); nothing is undone for it.
+		for _, p := range plan {
+			if !p.reuse {
+				t.tellNotReady(ctx, p)
+			}
+		}
 	}
 	t.finish(ctx, failed)
 }
@@ -373,12 +418,19 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 	// create
 	t.step(ctx, p.name, "create", StepRunning, "")
 	if err := t.create(ctx, p); err != nil {
+		// A credential that could not be taken back on the way is for the
+		// user to remove: it stays in the task record.
+		for _, line := range p.carried {
+			if strings.HasPrefix(line, CodeRevoke+" ") {
+				t.warnApp(ctx, p.name, line)
+			}
+		}
 		return t.fail(ctx, p.name, "create", AsFault(err))
 	}
 	if len(p.reusedVolumes) > 0 {
 		lines := []string{"接上了旧数据（" + strings.Join(p.reusedVolumes, "、") + "）"}
 		if p.kept == nil {
-			lines = append(lines, "没有找到删除时保留的设置（不是这台的应用中心删的，或记录丢了）：配置文件沿用旧数据里的，平台变量和大模型按这次的")
+			lines = append(lines, "没有找到删除时保留的设置（不是这台的应用中心删的，或记录丢了）：配置文件沿用旧数据里的，平台变量和服务按这次的")
 		}
 		p.carried = append(lines, p.carried...)
 	}
@@ -432,11 +484,15 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 		return t.fail(ctx, p.name, "start", AsFault(err))
 	}
 	url := ""
-	if hooks.URL != nil {
-		url = hooks.URL(ctx, app)
+	if !app.Internal {
+		url = e.address(ctx, app)
 	}
-	t.setApp(p.name, func(r *AppResult) { r.URL = url })
-	t.step(ctx, p.name, "start", StepDone, "已上线")
+	t.setApp(p.name, func(r *AppResult) { r.URL = url; r.Internal = app.Internal })
+	if app.Internal {
+		t.step(ctx, p.name, "start", StepDone, "已上线（只在内部网络，给别的应用用）")
+	} else {
+		t.step(ctx, p.name, "start", StepDone, "已上线")
+	}
 
 	t.step(ctx, p.name, "health", StepRunning, "")
 	base, err := t.healthy(ctx, p, app)
@@ -450,18 +506,14 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 		t.step(ctx, p.name, "init", StepSkipped, "不需要初始化")
 	} else if len(p.reusedVolumes) > 0 && p.restored {
 		// The old data was initialized with exactly these (restored)
-		// parameters; doing it again fails (New API: "already initialized").
+		// parameters; doing it again fails (a set-up wizard that runs once).
 		t.step(ctx, p.name, "init", StepSkipped, "接上了旧数据，不再初始化（账号密码和以前一样）")
 	} else {
-		err := t.runInit(ctx, p, base)
+		err := t.runInit(ctx, p, dep.ID, base)
 		var f *Fault
 		switch {
 		case err == nil:
-			msg := fmt.Sprintf("%d 步", len(m.Init))
-			if note := t.closeSignUp(ctx, p, base); note != "" {
-				msg += "；" + note
-			}
-			t.step(ctx, p.name, "init", StepDone, msg)
+			t.step(ctx, p.name, "init", StepDone, fmt.Sprintf("%d 步", len(m.Init)))
 		case len(p.reusedVolumes) > 0 && errors.As(err, &f) && f.answered:
 			// Old data without a kept record (deleted by an older version):
 			// the app says no because it was initialized before. Its
@@ -475,23 +527,16 @@ func (t *taskRun) installApp(ctx context.Context, p *planned) error {
 	if err := t.saveSecrets(ctx, p, url); err != nil {
 		return fault(CodeInternal, err, "保存首次登录信息失败")
 	}
-	// The app has its own saved parameters (and tokens) again: the kept
-	// record goes, with the tokens of it this install did not take over. A
+	// What the app provides to other apps (the new way) is registered once
+	// it is up and initialized.
+	if err := t.registerProvides(ctx, p); err != nil {
+		return t.fail(ctx, p.name, "init", AsFault(err))
+	}
+	// The app has its own saved parameters again: the kept record goes. A
 	// fresh install with data volumes passed the old-volumes check, so a
 	// kept record of its name is stale (its data is gone).
 	if p.reuseData || len(m.Volumes) > 0 {
-		var issued []TokenRef
-		t.setApp(p.name, func(r *AppResult) {
-			if r.GatewayToken != nil {
-				issued = append(issued, *r.GatewayToken)
-			}
-		})
-		if notes := e.dropKept(ctx, p.name, p.taken, issued); len(notes) > 0 {
-			t.setApp(p.name, func(r *AppResult) { r.Carried = append(r.Carried, notes...) })
-			// Also in the progress the page shows (it does not show
-			// carried): a token not revoked is for the user to remove.
-			t.noteStep(ctx, p.name, "init", strings.Join(notes, "；"))
-		}
+		e.dropKept(ctx, p.name)
 	}
 	t.addFirstLogin(ctx, p.name)
 	return nil
@@ -504,8 +549,8 @@ func (h Hooks) withApp(ctx context.Context, app string, fn func() error) error {
 	return h.WithApp(ctx, app, fn)
 }
 
-// create reserves memory and creates the app record, then env, volumes and
-// the model gateway link.
+// create reserves memory and creates the app record, then plugs the app's
+// needs into their services, and writes env and volumes.
 func (t *taskRun) create(ctx context.Context, p *planned) error {
 	e, m := t.e, p.app.Manifest
 	hooks := e.h()
@@ -541,22 +586,11 @@ func (t *taskRun) create(ctx context.Context, p *planned) error {
 	t.setApp(p.name, func(r *AppResult) { r.Created = true; r.MemoryMB = mem })
 	t.save(ctx)
 
-	// model gateway link: a token in the provider (the old app's, when an
-	// install on its data may take it over and the gateway still has it),
-	// the provider's network
-	var links []string
-	for _, prm := range m.Params {
-		c, ok := p.vals[prm.Key].(*LLMChoice)
-		if !ok || c.Source != LLMLocalGateway {
-			continue
-		}
-		links = append(links, c.App)
-		if tk, ok := p.takeover[prm.Key]; ok && tk.choice.App == c.App && t.takeOverToken(ctx, p, c, tk) {
-			continue
-		}
-		if err := t.linkGateway(ctx, p, c); err != nil {
-			return err
-		}
+	// The services the app's needs were matched with: plugged in, the
+	// providers' networks joined.
+	links, err := t.connectNeeds(ctx, p)
+	if err != nil {
+		return err
 	}
 
 	ep := primaryEndpoint(m)
@@ -564,14 +598,26 @@ func (t *taskRun) create(ctx context.Context, p *planned) error {
 	if exposure == "" {
 		exposure = catalog.DefaultExposure
 	}
+	if p.expose != "" {
+		// Chosen in the request (expose.go; never for an internal app).
+		exposure = p.expose
+	}
 	health := "/"
 	if ep.Health != nil && ep.Health.Path != "" {
 		health = ep.Health.Path
+	}
+	internal := internalManifest(m)
+	if internal {
+		// Reached over the app network only: no exposure of its own (see
+		// internalnet.go).
+		exposure = ""
 	}
 	saved, err := e.cfg.Store.UpdateApp(ctx, p.name, func(a *state.App) error {
 		a.Port = ep.Port
 		a.HealthPath = health
 		a.Exposure = exposure
+		a.Internal = internal
+		a.HealthCheck = stateHealthCheck(ep)
 		a.Command = m.Container.Command
 		a.PidsLimit = m.Container.PidsLimit
 		a.Links = links
@@ -584,23 +630,25 @@ func (t *taskRun) create(ctx context.Context, p *planned) error {
 	if err != nil {
 		return fault(CodeInternal, err, "保存应用设置失败")
 	}
-	// platform.app.url: the address the app is opened at, by its exposure
-	// at install time.
-	appURL := ""
-	if hooks.URL != nil {
-		appURL = hooks.URL(ctx, saved)
+	// The platform variables now that the app exists, from the provider
+	// again: the user's changes (with those restored from old data) go over
+	// them, and the variables about the app itself come in (app.url,
+	// app.scheme, app.host: the address the app opens at, by its exposure
+	// and domains at install time).
+	pvals, err := e.platformValues(ctx, e.appContext(ctx, saved, p.vals.platformUser()))
+	if err != nil {
+		return err
 	}
-	p.vals.setPlatform(catalog.PVAppURL, appURL)
-	for _, ev := range m.Env {
-		val := ev.Value
-		if ev.From != "" {
-			v, err := p.vals.lookup(ev.From)
-			if err != nil {
-				return fault(CodeBadParams, err, "环境变量 %s：%v", ev.Key, err)
-			}
-			val = v
-		}
-		if err := e.cfg.Store.SetEnv(ctx, state.EnvVar{App: p.name, Key: ev.Key, Value: val, Secret: ev.Secret}); err != nil {
+	p.vals[platformKey] = pvals
+	if err := t.renderCommand(ctx, p, saved); err != nil {
+		return err
+	}
+	envVals, err := renderEnv(m, p.vals, p.secretRefs())
+	if err != nil {
+		return err
+	}
+	for _, ev := range envVals {
+		if err := e.cfg.Store.SetEnv(ctx, state.EnvVar{App: p.name, Key: ev.Key, Value: ev.Value, Secret: ev.Secret}); err != nil {
 			return fault(CodeInternal, err, "写环境变量 %s 失败", ev.Key)
 		}
 	}
@@ -662,91 +710,6 @@ func (e *Engine) checkOldVolumes(ctx context.Context, app string) error {
 		names = append(names, v.Name)
 	}
 	return fault(CodeOldVolumes, nil, "这台机器上还留着以前叫 %s 的应用的数据卷（%s）", app, strings.Join(names, "、"))
-}
-
-// gatewayConn is how to reach a local model gateway app: inURL is the
-// address apps use inside Docker, base its management address from this
-// server, user and pass its admin account.
-type gatewayConn struct {
-	prov       state.App
-	inURL      string
-	base       string
-	user, pass string
-}
-
-// gateway looks up the running local model gateway app name.
-func (e *Engine) gateway(ctx context.Context, name string) (gatewayConn, error) {
-	prov, err := e.cfg.Store.GetApp(ctx, name)
-	if err != nil || prov.CurrentDeployment == "" {
-		return gatewayConn{}, fault(CodeNoGateway, err, "本机的模型网关 %s 没在运行", name)
-	}
-	if prov.Desired == state.DesiredStopped {
-		return gatewayConn{}, stoppedGateway(name, "")
-	}
-	pa, err := e.cfg.Catalog.App(ctx, prov.CatalogID)
-	if err != nil {
-		return gatewayConn{}, err
-	}
-	var pv *catalog.Provide
-	for i := range pa.Manifest.Provides {
-		if pa.Manifest.Provides[i].Kind == "llm_gateway" {
-			pv = &pa.Manifest.Provides[i]
-		}
-	}
-	if pv == nil || pv.Adapter != "new-api" {
-		return gatewayConn{}, fault(CodeNoGateway, nil, "%s 不能当模型网关用", name)
-	}
-	user, pass, err := e.gatewayAdmin(ctx, prov.Name)
-	if err != nil {
-		return gatewayConn{}, fault(CodeGatewayToken, err, "读不到 %s 的管理员账号", prov.Name)
-	}
-	base, err := e.hostBase(ctx, prov)
-	if err != nil {
-		return gatewayConn{}, fault(CodeNoGateway, err, "本机的模型网关 %s 没在运行（应该在运行，容器却没起来）：acornfox status %s 看它怎么了", prov.Name, prov.Name)
-	}
-	port := prov.Port
-	for _, ep := range pa.Manifest.Endpoints {
-		if ep.Name == pv.Endpoint {
-			port = ep.Port
-		}
-	}
-	return gatewayConn{prov: prov, inURL: fmt.Sprintf("http://%s:%d%s", prov.Name, port, pv.BasePath), base: base, user: user, pass: pass}, nil
-}
-
-// linkGateway issues a token in the provider app for p and points c at the
-// provider's address inside Docker.
-func (t *taskRun) linkGateway(ctx context.Context, p *planned, c *LLMChoice) error {
-	e := t.e
-	g, err := e.gateway(ctx, c.App)
-	if err != nil {
-		return err
-	}
-	key, id, err := e.adapter.IssueToken(ctx, g.base, g.user, g.pass, "acornfox-"+p.name)
-	if id > 0 {
-		t.setApp(p.name, func(r *AppResult) { r.GatewayToken = &TokenRef{Provider: g.prov.Name, ID: id} })
-		t.save(ctx)
-	}
-	if err != nil {
-		return fault(CodeGatewayToken, err, "在 %s 里建令牌失败：%v", g.prov.Name, err)
-	}
-	c.BaseURL = g.inURL
-	c.APIKey = key
-	return nil
-}
-
-// gatewayAdmin reads the new-api admin account saved when it was installed
-// (its parameters admin_username and admin_password).
-func (e *Engine) gatewayAdmin(ctx context.Context, app string) (string, string, error) {
-	vals, err := e.savedParams(ctx, app)
-	if err != nil {
-		return "", "", err
-	}
-	u, _ := vals["admin_username"].(string)
-	pw, _ := vals["admin_password"].(string)
-	if u == "" || pw == "" {
-		return "", "", errors.New("保存的参数里没有管理员账号")
-	}
-	return u, pw, nil
 }
 
 func (e *Engine) savedParams(ctx context.Context, app string) (map[string]any, error) {
@@ -880,8 +843,30 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 		// sources are tried.
 		t.progress(ctx, p.name, "image", "下载网关没成功，改从公共源拉取", nil)
 	}
-	resp, err := e.cfg.Runner.PullImage(ctx, p.name, tagID, img.Repository+"@"+img.Digest)
+	// The pull does not count toward the task's 60 minutes: it has its own
+	// limit (the runner's, and pullStepLimit for its answer; clock.go).
+	// Meanwhile the step shows the runner's live status of it.
+	resume := pauseClock(ctx)
+	pctx, pcancel := context.WithTimeout(ctx, pullStepLimit)
+	stopWatch := t.watchPull(pctx, p.name, tagID, imageLabel(img.Repository, img.Tag, img.Digest))
+	resp, err := e.cfg.Runner.PullImage(pctx, p.name, tagID, img.Repository+"@"+img.Digest)
+	stopWatch()
+	pullCtxErr := pctx.Err()
+	pcancel()
+	resume()
 	if err != nil {
+		switch {
+		case ctx.Err() != nil:
+			// The task itself ended (the server is stopping).
+			return "", "", fault(CodePull, err, "拉镜像时安装被取消（%s@%s）", img.Repository, shortDigest(img.Digest))
+		case pullCtxErr != nil:
+			// The runner did not answer within its own limit and the time
+			// for the answer (it normally stops the pull at its limit).
+			f := fault(CodePull, err, "拉镜像这一步过了 %s 还没结束，运行器也没有回话（一个镜像本来最多拉 %d 分钟）（%s@%s）",
+				minutesText(pullStepLimit), int(runner.PullMaxTotal/time.Minute), img.Repository, shortDigest(img.Digest))
+			f.Hint = pullNoAnswerHint
+			return "", "", f
+		}
 		return "", "", fault(CodePull, err, "拉镜像失败：%v", err)
 	}
 	if !resp.OK || resp.Image == nil {
@@ -893,9 +878,20 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 		if len(notes) > 0 {
 			f.Message += "；" + strings.Join(notes, "；")
 		}
+		if resp.Failure != nil {
+			for _, src := range resp.Failure.Sources {
+				f.Attempts = append(f.Attempts, catalog.Attempt{Source: src.Host, Code: src.Outcome, Message: src.Message})
+			}
+			if h := resp.Failure.Hint; h != "" && !strings.Contains(f.Hint, h) {
+				f.Hint += "。" + h
+			}
+		}
 		return "", "", f
 	}
 	msg := "从公共源拉取"
+	if resp.Source != "" {
+		msg += fmt.Sprintf("（%s，用了 %d 秒）", resp.Source, resp.Seconds)
+	}
 	if len(notes) > 0 {
 		// Say why the gateway was not used: a silent fallback looks like
 		// "the gateway is not configured" when it was only unreachable.
@@ -908,9 +904,136 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 	return resp.Image.ID, msg, nil
 }
 
-// publicPullNote is the image step's message while pulling from the public
-// sources, which report no progress.
-const publicPullNote = "从公共源拉取（拉取时看不到进度，要看网速）…"
+// pullNoAnswerHint is the advice when the runner did not answer a pull in
+// time (it stops a pull at its own limit and answers).
+const pullNoAnswerHint = "运行器可能卡住或重启过：sudo systemctl status acornfox-runner、journalctl -u acornfox-runner -n 200 看它；好了以后重装。acornfox sources --probe 看每个镜像源现在多快"
+
+// minutesText is a duration in words: "48 秒", "31.5 分钟".
+func minutesText(d time.Duration) string {
+	sec := d.Seconds()
+	if sec < 90 {
+		return fmt.Sprintf("%.0f 秒", sec)
+	}
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", sec/60), ".0") + " 分钟"
+}
+
+// publicPullNote is the image step's message when a pull from the public
+// sources begins (and the whole time when the runner is too old to say how
+// far it is): the runner's live status replaces it (watchPull).
+var publicPullNote = fmt.Sprintf("从公共源拉取（一个镜像最多拉 %d 分钟，这段时间不算进整次安装的 %d 分钟）…", int(runner.PullMaxTotal/time.Minute), int(installTaskLimit/time.Minute))
+
+// pullStatusEvery is how often the image step asks the runner how far a pull
+// from the public sources is (a variable for tests).
+var pullStatusEvery = 3 * time.Second
+
+// watchPull shows the runner's live status of the pull of app's image
+// (deployment depID) in the image step until the returned stop is called.
+// A runner without the status, or no status yet, leaves the step's message
+// as it is.
+func (t *taskRun) watchPull(ctx context.Context, app, depID, image string) (stop func()) {
+	ps, ok := t.e.cfg.Runner.(runner.PullStatusAPI)
+	if !ok {
+		return func() {}
+	}
+	quit, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		tick := time.NewTicker(pullStatusEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				st, err := ps.PullStatus(cctx, app, depID)
+				cancel()
+				if err != nil {
+					continue
+				}
+				msg, pr := pullStatusText(image, st)
+				select {
+				case <-quit:
+					return
+				default:
+				}
+				t.progress(ctx, app, "image", msg, pr)
+			}
+		}
+	}()
+	return func() { close(quit); <-finished }
+}
+
+// imageLabel is an image's short name for the user: repository:tag, or the
+// repository and the digest's start.
+func imageLabel(repo, tag, digest string) string {
+	if tag != "" {
+		return repo + ":" + tag
+	}
+	return repo + "@" + shortDigest(digest)
+}
+
+// pullStatusText is the image step's message and progress for the runner's
+// status st of the pull of image, e.g. "从 docker.m.daocloud.io 拉 demo/app:1.0
+// （第 1 个源，共 4 个）：已下 120 MB / 304 MB（39%，最近 2 MB/s），这个镜像已拉 3 分 5 秒".
+// It says only what Docker reported: when Docker sends no progress it says
+// that how far the pull is cannot be seen.
+func pullStatusText(image string, st runner.PullStatus) (string, *StepProgress) {
+	el := etaText(int64(st.Seconds))
+	if st.Phase == "probe" || st.Source == "" {
+		return fmt.Sprintf("从公共源拉 %s：先实测各个镜像源（一般几秒到十几秒），这个镜像已拉 %s", image, el),
+			&StepProgress{Phase: "pull", PullSeconds: int64(st.Seconds)}
+	}
+	pr := &StepProgress{Phase: "pull", DoneBytes: st.Bytes, TotalBytes: st.Total, BytesPerSec: st.BytesPerSec,
+		Source: st.Source, Blind: st.Blind, PullSeconds: int64(st.Seconds)}
+	where := ""
+	if st.Sources > 1 {
+		where = fmt.Sprintf("（第 %d 个源，共 %d 个）", st.SourceIndex, st.Sources)
+	}
+	var how string
+	switch {
+	case st.Blind:
+		pr.BytesPerSec = 0
+		how = "Docker 这会儿没报进度，看不到拉到多少"
+		if st.Total > 0 {
+			how += fmt.Sprintf("（最后报的是 %s / %s）", mbText(st.Bytes), mbText(st.Total))
+		}
+		how += "；这台机器的网络和磁盘还在动，按还在下处理"
+	case st.Total > 0:
+		how = fmt.Sprintf("已下 %s / %s（%d%%", mbText(st.Bytes), mbText(st.Total), st.Bytes*100/st.Total)
+		if st.BytesPerSec > 0 {
+			how += "，最近 " + rateText(st.BytesPerSec)
+		} else if st.QuietSeconds >= 10 {
+			how += fmt.Sprintf("，%d 秒没有新进度", st.QuietSeconds)
+		}
+		how += "）"
+	default:
+		how = "已连上，还没收到进度"
+	}
+	msg := fmt.Sprintf("从 %s 拉 %s%s：%s，这个镜像已拉 %s", st.Source, image, where, how, el)
+	if n := len(st.Earlier); n > 0 {
+		before := st.Earlier[n-1]
+		if r := []rune(before); len(r) > 120 {
+			before = string(r[:120]) + "…"
+		}
+		if n == 1 {
+			msg += "。前一个源：" + before
+		} else {
+			msg += fmt.Sprintf("。之前换过 %d 个源，上一个：%s", n, before)
+		}
+	}
+	return msg, pr
+}
+
+// rateText is a speed: "850 KB/s", "2.3 MB/s".
+func rateText(bps int64) string {
+	if bps < 1<<20 {
+		return fmt.Sprintf("%d KB/s", (bps+512)>>10)
+	}
+	return fmt.Sprintf("%.1f MB/s", float64(bps)/float64(1<<20))
+}
 
 func shortDigest(d string) string {
 	if len(d) > 19 {
@@ -1158,13 +1281,22 @@ func (t *taskRun) files(ctx context.Context, p *planned, cat runner.CatalogAPI, 
 	groups := map[target][]runner.VolumeFile{}
 	var order []target
 	for _, f := range m.Files {
+		if f.If != "" {
+			ok, err := p.vals.holds(f.If)
+			if err != nil {
+				return "", renderFault(CodeFiles, err, "配置文件 %s 的 if", f.Path)
+			}
+			if !ok {
+				continue // its condition does not hold: not written
+			}
+		}
 		tg, ok := byName[f.Volume]
 		if !ok {
 			return "", fault(CodeFiles, nil, "配置文件 %s 指向的数据卷 %s 不存在", f.Path, f.Volume)
 		}
 		content, err := p.vals.render(f.Template, fileEscape(f.Path))
 		if err != nil {
-			return "", fault(CodeFiles, err, "配置文件 %s 的模板：%v", f.Path, err)
+			return "", renderFault(CodeFiles, err, "配置文件 %s 的模板", f.Path)
 		}
 		vf, err := volumeFile(f, content)
 		if err != nil {
@@ -1266,12 +1398,21 @@ func (t *taskRun) waitLive(ctx context.Context, app, depID string) (state.App, e
 	for {
 		d, err := e.cfg.Store.GetDeployment(ctx, depID)
 		if err != nil {
+			// The task's limit (or a shutdown) can end the context in the
+			// middle of this read: that is the wait being cancelled, not
+			// the store failing.
+			if ctx.Err() != nil {
+				return state.App{}, fault(CodeStart, ctx.Err(), "等 %s 上线时被取消", app)
+			}
 			return state.App{}, fault(CodeInternal, err, "读部署失败")
 		}
 		switch d.Status {
 		case state.StatusLive:
 			a, err := e.cfg.Store.GetApp(ctx, app)
 			if err != nil {
+				if ctx.Err() != nil {
+					return state.App{}, fault(CodeStart, ctx.Err(), "等 %s 上线时被取消", app)
+				}
 				return state.App{}, fault(CodeInternal, err, "读应用失败")
 			}
 			return a, nil
@@ -1294,13 +1435,16 @@ func (t *taskRun) waitLive(ctx context.Context, app, depID string) (state.App, e
 	}
 }
 
-// healthy checks the primary endpoint's health (path, expect_json,
-// timeout_s) on the live container and returns its base address.
+// healthy checks the primary endpoint's health on the live container, as
+// its manifest says (path with expect_json, exec or tcp; see internalnet.go),
+// until it passes or timeout_s runs out. It returns the app's base address
+// for the init steps sent over HTTP: http://127.0.0.1:<published port>, or
+// "" for an app that publishes no port (an internal app).
 func (t *taskRun) healthy(ctx context.Context, p *planned, app state.App) (string, error) {
 	e := t.e
 	ep := primaryEndpoint(p.app.Manifest)
 	h := catalog.Health{Path: "/"}
-	if ep.Health != nil {
+	if ep != nil && ep.Health != nil {
 		h = *ep.Health
 	}
 	timeout := time.Duration(h.TimeoutS) * time.Second
@@ -1310,24 +1454,24 @@ func (t *taskRun) healthy(ctx context.Context, p *planned, app state.App) (strin
 	deadline := time.Now().Add(timeout)
 	last := "还没有应答"
 	for {
-		base, err := e.hostBase(ctx, app)
+		err := e.checkHealthOnce(ctx, app, ep, h)
 		if err == nil {
-			code, body, err := e.httpJSON(ctx, http.MethodGet, base+h.Path, nil)
-			switch {
-			case err != nil:
-				last = err.Error()
-			case code < 200 || code >= 300:
-				last = fmt.Sprintf("HTTP %d", code)
-			case len(h.ExpectJSON) > 0 && !matchJSON(h.ExpectJSON, body):
-				last = "应答内容和预期不符"
-			default:
+			if app.Internal {
+				return "", nil
+			}
+			base, err := e.hostBase(ctx, app)
+			if err == nil {
 				return base, nil
 			}
+			last = err.Error()
 		} else {
 			last = err.Error()
+			if errors.Is(err, runner.ErrNoExec) {
+				return "", fault(CodeInternal, err, "%s 的健康检查要在容器里执行命令：%v，请升级 AcornFox", app.Name, err)
+			}
 		}
 		if time.Now().After(deadline) {
-			return "", fault(CodeHealth, nil, "%s 的健康检查 %s 在 %s 内没通过：%s", app.Name, h.Path, timeout, last)
+			return "", fault(CodeHealth, nil, "%s 的健康检查 %s 在 %s 内没通过：%s", app.Name, healthWhat(h), timeout, last)
 		}
 		select {
 		case <-ctx.Done():
@@ -1370,91 +1514,35 @@ func (e *Engine) httpJSON(ctx context.Context, method, url string, body any) (in
 	return resp.StatusCode, v, nil
 }
 
-// closeSignUp turns off self-service sign-up in a model gateway app set up
-// just now (New API allows anyone who opens its page to register by default).
-// Best effort: the install goes on when it fails, and the returned note says
-// so in the init step and tells the user where to turn it off by hand.
-func (t *taskRun) closeSignUp(ctx context.Context, p *planned, base string) string {
-	newAPI := false
-	for _, pv := range p.app.Manifest.Provides {
-		if pv.Kind == "llm_gateway" && pv.Adapter == "new-api" {
-			newAPI = true
+// runInit runs the after_healthy steps: HTTP calls to the app, commands in
+// its own container (the one of its current deployment). Only a call that
+// never reached the app (the connection was refused or could not be made;
+// a command the runner never took) is retried: an init call such as a
+// set-up wizard succeeds only once, so after a timeout or any answer,
+// sending it again could turn a done setup into a failure. Any step that
+// does not pass fails the install (it is rolled back): an app is never left
+// half set up. depID is the deployment that just went live and passed the
+// health check: commands run in its container, and only while it is still
+// the app's current deployment (otherwise nothing is run).
+func (t *taskRun) runInit(ctx context.Context, p *planned, depID, base string) error {
+	m := p.app.Manifest
+	steps := initActionSteps(m)
+	env := ActionEnv{Lookup: p.vals.lookup, SecretRef: p.secretRefs(), Group: GroupInit}
+	if stepsRunCommands(steps) {
+		a, err := t.e.cfg.Store.GetApp(ctx, p.name)
+		if err != nil {
+			return fault(CodeInternal, err, "读 %s 的部署失败", p.name)
 		}
+		if a.CurrentDeployment != depID {
+			ae := &ActionError{Kind: ActionNotRunning, Exec: true,
+				Detail: "刚通过健康检查的那个部署已经不是这个应用的当前部署了"}
+			return fault(CodeInit, nil, "初始化 %s：%s", p.name, ae.account())
+		}
+		env.Exec = ExecTarget{App: a.Name, Container: runner.ContainerName(a.Name, depID)}
 	}
-	if !newAPI {
-		return ""
-	}
-	user, _ := p.vals["admin_username"].(string)
-	pass, _ := p.vals["admin_password"].(string)
-	err := errors.New("没有管理员账号")
-	if user != "" && pass != "" {
-		err = t.e.adapter.DisableRegistration(ctx, base, user, pass)
-	}
+	_, err := t.e.actions().run(ctx, base, steps, env)
 	if err != nil {
-		t.e.cfg.Log.Warn("close sign-up", "app", p.name, "err", scrubURL(err))
-		return "没能关闭自助注册（" + scrubURL(err).Error() + "），请登录后在“系统设置”里关掉“允许新用户注册”"
-	}
-	return "已关闭自助注册，只有管理员账号能登录"
-}
-
-// runInit runs the after_healthy HTTP calls. Only a call that never reached
-// the app (the connection was refused or could not be made) is retried: an
-// init call such as New API's setup succeeds only once, so after a timeout or
-// any answer, sending it again could turn a done setup into a failure.
-func (t *taskRun) runInit(ctx context.Context, p *planned, base string) error {
-	for _, st := range p.app.Manifest.Init {
-		if st.When != "" && st.When != "after_healthy" {
-			continue
-		}
-		var body any
-		if st.HTTP.JSON != nil {
-			b, err := p.vals.renderJSON(map[string]any(st.HTTP.JSON))
-			if err != nil {
-				return fault(CodeInit, err, "初始化 %s 的模板：%v", st.Name, err)
-			}
-			body = b
-		}
-		method := st.HTTP.Method
-		if method == "" {
-			method = http.MethodPost
-		}
-		var lastErr string
-		ok := false
-		for attempt := 0; attempt < 5 && !ok; attempt++ {
-			if attempt > 0 {
-				select {
-				case <-ctx.Done():
-					return fault(CodeInit, ctx.Err(), "初始化被取消")
-				case <-time.After(2 * time.Second):
-				}
-			}
-			code, got, err := t.e.httpJSON(ctx, method, base+st.HTTP.Path, body)
-			if err != nil {
-				if notSent(err) {
-					lastErr = scrubURL(err).Error()
-					continue
-				}
-				return fault(CodeInit, nil, "初始化 %s 没有收到应答（%v），不再重发：它可能已经生效", st.Name, scrubURL(err))
-			}
-			if code < 200 || code >= 300 {
-				f := fault(CodeInit, nil, "初始化 %s 返回 HTTP %d", st.Name, code)
-				f.answered = true
-				return f
-			}
-			if len(st.HTTP.ExpectJSON) > 0 && !matchJSON(st.HTTP.ExpectJSON, got) {
-				msg := ""
-				if m, ok := got.(map[string]any); ok {
-					msg, _ = m["message"].(string)
-				}
-				f := fault(CodeInit, nil, "初始化 %s 的应答和预期不符：%s", st.Name, msg)
-				f.answered = true
-				return f
-			}
-			ok = true
-		}
-		if !ok {
-			return fault(CodeInit, nil, "初始化 %s 失败：%s", st.Name, lastErr)
-		}
+		return initFault(err)
 	}
 	return nil
 }
@@ -1464,10 +1552,6 @@ func notSent(err error) bool {
 	var op *net.OpError
 	return errors.As(err, &op) && op.Op == "dial"
 }
-
-// savedTokensKey holds, next to the parameters, the gateway tokens issued for
-// the app (ids only), so deleting the app revokes them.
-const savedTokensKey = "_acornfox_gateway_tokens"
 
 // saveSecrets keeps the parameters and the first-login fields, encrypted,
 // and, in the same step, the manifest the app was installed with (in clear:
@@ -1492,10 +1576,13 @@ func (t *taskRun) saveSecrets(ctx context.Context, p *planned, url string) error
 	for k, v := range p.vals {
 		saved[k] = v
 	}
+	// What the services hand the app is in their bindings, not here.
+	delete(saved, usesKey)
+	delete(saved, usesSecretKey)
 	if p.initStale {
-		// Init was skipped: what it would have written (New API's admin
-		// password) is still the old value in the old data. Do not hand out
-		// or keep the new one, which would not work.
+		// Init was skipped: what it would have written (an admin password,
+		// say) is still the old value in the old data. Do not hand out or
+		// keep the new one, which would not work.
 		stale := initParams(p.app.Manifest)
 		for i, lf := range p.app.Manifest.FirstLogin {
 			if name, ok := strings.CutPrefix(lf.From, "params."); ok && stale[strings.SplitN(name, ".", 2)[0]] {
@@ -1511,20 +1598,6 @@ func (t *taskRun) saveSecrets(ctx context.Context, p *planned, url string) error
 			origins[k] = OriginOldData
 		}
 		saved[originsKey] = origins
-	}
-	// The tokens issued for it and those taken over from the old app it was
-	// installed on: deleting it with its data revokes them.
-	var toks []TokenRef
-	t.mu.Lock()
-	for _, a := range t.view.Apps {
-		if a.App == p.name && a.GatewayToken != nil {
-			toks = append(toks, *a.GatewayToken)
-		}
-	}
-	t.mu.Unlock()
-	toks = append(toks, p.taken...)
-	if len(toks) > 0 {
-		saved[savedTokensKey] = toks
 	}
 	pb, err := json.Marshal(saved)
 	if err != nil {
@@ -1554,7 +1627,13 @@ const ReusedLoginValue = "沿用旧数据里的（重装前的那个）"
 func initParams(m *catalog.Manifest) map[string]bool {
 	out := map[string]bool{}
 	for _, st := range m.Init {
-		b, _ := json.Marshal(st.HTTP.JSON)
+		// What a request sends is its body; what a command is given, all of
+		// it (its arguments, env and stdin).
+		var sent any = st.HTTP.JSON
+		if st.IsExec() {
+			sent = stepTexts(st)
+		}
+		b, _ := json.Marshal(sent)
 		for _, r := range catalog.TemplateRefs(string(b)) {
 			if name, ok := strings.CutPrefix(r, "params."); ok {
 				out[strings.SplitN(name, ".", 2)[0]] = true
@@ -1567,11 +1646,17 @@ func initParams(m *catalog.Manifest) map[string]bool {
 func loginFields(m *catalog.Manifest, vals Values) ([]LoginField, error) {
 	var out []LoginField
 	for _, lf := range m.FirstLogin {
-		v := lf.Value
+		var v string
 		if lf.From != "" {
 			s, err := vals.lookup(lf.From)
 			if err != nil {
 				return nil, err
+			}
+			v = s
+		} else {
+			s, err := vals.render(lf.Value, nil)
+			if err != nil {
+				return nil, renderFault(CodeBadParams, err, "首次登录信息 %s", lf.Label)
 			}
 			v = s
 		}
@@ -1621,16 +1706,24 @@ func (e *Engine) FirstLogin(ctx context.Context, app string, reveal bool) (First
 		}
 	}
 	if a, err := e.cfg.Store.GetApp(ctx, app); err == nil {
-		if h := e.h(); h.URL != nil {
-			fl.URL = h.URL(ctx, a)
-		}
+		fl.URL = e.address(ctx, a)
+	}
+	fl.URLNote = ""
+	if loopbackURL(fl.URL) {
+		fl.URLNote = LoopbackURLNote
+	}
+	// An app without login fields (no web page, e.g. an internal database)
+	// answers an empty list, never null: clients walk it without checking.
+	if fl.Fields == nil {
+		fl.Fields = []LoginField{}
 	}
 	return fl, nil
 }
 
-// cleanup removes what this task created, newest first: the gateway token it
-// issued, the app (containers, network, record; never by volume label), the
-// volumes it created unless keepVolumes, and the image tag it made.
+// cleanup removes what this task created, newest first: the credentials it
+// had issued and the services it registered (connect.go), the app
+// (containers, network, record; never by volume label), the volumes it
+// created unless keepVolumes, and the image tag it made.
 func (t *taskRun) cleanup(ctx context.Context, keepVolumes bool) {
 	e := t.e
 	ctx = context.WithoutCancel(ctx)
@@ -1641,11 +1734,7 @@ func (t *taskRun) cleanup(ctx context.Context, keepVolumes bool) {
 		if !c.Created {
 			continue
 		}
-		if c.GatewayToken != nil {
-			if err := e.revokeToken(ctx, *c.GatewayToken); err != nil {
-				e.cfg.Log.Warn("delete gateway token", "app", c.App, "provider", c.GatewayToken.Provider, "err", err)
-			}
-		}
+		t.releaseCreated(ctx, c)
 		if hooks.Delete != nil {
 			if err := hooks.Delete(ctx, c.App, false); err != nil && !errors.Is(err, state.ErrNotFound) {
 				e.cfg.Log.Error("clean up failed install", "app", c.App, "err", err)
@@ -1670,60 +1759,111 @@ func (t *taskRun) cleanup(ctx context.Context, keepVolumes bool) {
 	}
 }
 
-// revokeToken deletes a token issued in a local model gateway app.
-func (e *Engine) revokeToken(ctx context.Context, tok TokenRef) error {
-	prov, err := e.cfg.Store.GetApp(ctx, tok.Provider)
-	if err != nil {
-		return fmt.Errorf("模型网关 %s 不在了：%w", tok.Provider, err)
+// renderFault is the fault of a value that could not be worked out:
+// CAT-INST-39 when the template, a transform or a condition is what failed
+// (catalog.IsRenderError), else code (a reference with no value: the code
+// the place always had). what says where; the message never holds a value.
+func renderFault(code string, err error, format string, a ...any) *Fault {
+	if catalog.IsRenderError(err) {
+		code = CodeRender
 	}
-	base, err := e.hostBase(ctx, prov)
-	if err != nil {
-		return fmt.Errorf("模型网关 %s 没在运行：%w", tok.Provider, err)
+	return fault(code, err, "%s：%v", fmt.Sprintf(format, a...), err)
+}
+
+// renderEnv works out the app's environment variables: each entry whose if
+// holds, its from (one reference) or its value (a template, written as it
+// renders: no escaping), left out when optional and without a value. Two
+// entries of one key that both hold are an error (CAT-INST-39; lint refuses
+// what cannot be shown exclusive, CAT-LINT-49). secret says which
+// references are secret: an entry made from one is kept secret.
+func renderEnv(m *catalog.Manifest, vals Values, secret func(ref string) bool) ([]state.EnvVar, error) {
+	var out []state.EnvVar
+	seen := map[string]bool{}
+	for _, ev := range m.Env {
+		if ev.If != "" {
+			ok, err := vals.holds(ev.If)
+			if err != nil {
+				return nil, renderFault(CodeBadParams, err, "环境变量 %s 的 if", ev.Key)
+			}
+			if !ok {
+				continue
+			}
+		}
+		var val string
+		isSecret := ev.Secret
+		if ev.From != "" {
+			v, err := vals.lookup(ev.From)
+			if ev.Optional && (errors.Is(err, errNotConnected) || (err == nil && v == "")) {
+				continue // no value: the variable is left out
+			}
+			if err != nil {
+				return nil, fault(CodeBadParams, err, "环境变量 %s：%v", ev.Key, err)
+			}
+			val = v
+			isSecret = isSecret || vals.useSecret(ev.From)
+		} else {
+			v, err := vals.render(ev.Value, nil)
+			if ev.Optional && (errors.Is(err, errNotConnected) || (err == nil && v == "")) {
+				continue
+			}
+			if err != nil {
+				return nil, renderFault(CodeBadParams, err, "环境变量 %s", ev.Key)
+			}
+			val = v
+			for _, r := range catalog.TemplateRefs(ev.Value) {
+				if secret != nil && secret(r) {
+					isSecret = true
+				}
+			}
+		}
+		if seen[ev.Key] {
+			return nil, fault(CodeRender, nil, "环境变量 %s 有两条的 if 同时成立，不知道用哪一条", ev.Key)
+		}
+		seen[ev.Key] = true
+		out = append(out, state.EnvVar{Key: ev.Key, Value: val, Secret: isSecret})
 	}
-	u, pw, err := e.gatewayAdmin(ctx, prov.Name)
+	return out, nil
+}
+
+// renderCommand renders the start command, one argument per item, into
+// the app's settings (saved holds them as written). No secret may be in it:
+// the arguments of a container are visible to every user of the host.
+func (t *taskRun) renderCommand(ctx context.Context, p *planned, saved state.App) error {
+	m := p.app.Manifest
+	cmd, err := renderArgs(m.Container.Command, p.vals, p.secretRefs())
 	if err != nil {
 		return err
 	}
-	return e.adapter.DeleteToken(ctx, base, u, pw, tok.ID)
-}
-
-// GatewayTokens lists the tokens issued in local model gateways for app when
-// it was installed (ids only). An app not installed from the catalog, or
-// without such tokens, has none. The API server reads them before deleting
-// app and revokes them with RevokeGatewayTokens once it is gone.
-func (e *Engine) GatewayTokens(ctx context.Context, app string) ([]TokenRef, error) {
-	vals, err := e.savedParams(ctx, app)
-	if errors.Is(err, state.ErrNotFound) {
-		return nil, nil
+	if slices.Equal(cmd, saved.Command) {
+		return nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("读 %s 保存的参数失败：%w", app, err)
-	}
-	raw, ok := vals[savedTokensKey]
-	if !ok {
-		return nil, nil
-	}
-	b, _ := json.Marshal(raw)
-	var toks []TokenRef
-	if err := json.Unmarshal(b, &toks); err != nil {
-		return nil, fmt.Errorf("%s 保存的令牌记录格式不对：%w", app, err)
-	}
-	return toks, nil
-}
-
-// RevokeGatewayTokens deletes app's gateway tokens. The error names those
-// that could not be revoked (the gateway is stopped, say): they keep working
-// until removed in the gateway by hand.
-func (e *Engine) RevokeGatewayTokens(ctx context.Context, app string, toks []TokenRef) error {
-	var failed []string
-	for _, tok := range toks {
-		if err := e.revokeToken(ctx, tok); err != nil {
-			e.cfg.Log.Warn("revoke gateway token", "app", app, "provider", tok.Provider, "id", tok.ID, "err", err)
-			failed = append(failed, fmt.Sprintf("%s 里的令牌 acornfox-%s（编号 %d）", tok.Provider, app, tok.ID))
-		}
-	}
-	if len(failed) > 0 {
-		return fmt.Errorf("没能吊销 %s，请在模型网关的“令牌”页手动删掉", strings.Join(failed, "、"))
+	if _, err := t.e.cfg.Store.UpdateApp(ctx, p.name, func(a *state.App) error {
+		a.Command = cmd
+		return nil
+	}); err != nil {
+		return fault(CodeInternal, err, "保存应用设置失败")
 	}
 	return nil
+}
+
+// renderArgs renders a command, one argument per item (CAT-LINT-50 refuses
+// a secret in it; so does this).
+func renderArgs(args []string, vals Values, secret func(ref string) bool) ([]string, error) {
+	if len(args) == 0 {
+		return args, nil
+	}
+	out := make([]string, len(args))
+	for i, a := range args {
+		for _, r := range catalog.TemplateRefs(a) {
+			if secret != nil && secret(r) {
+				return nil, fault(CodeRender, nil, "启动命令的第 %d 项引用了保密的值 %s：容器的启动参数谁都能看到，保密值要经环境变量给应用", i+1, r)
+			}
+		}
+		v, err := vals.render(a, nil)
+		if err != nil {
+			return nil, renderFault(CodeBadParams, err, "启动命令的第 %d 项", i+1)
+		}
+		out[i] = v
+	}
+	return out, nil
 }

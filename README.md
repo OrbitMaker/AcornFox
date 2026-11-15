@@ -23,7 +23,7 @@ AcornFox 服务装在 Mac、Windows 电脑本机运行，这一版不提供。�
 ## 能做什么
 
 - **部署**：本地目录（带 Dockerfile）、公开 Git 仓库或现成的 Docker 镜像
-- **应用中心**：从预先配好的目录装应用，这一版有 New API 和 Hermes 智能体，见下面“应用中心”
+- **应用中心**：从预先配好的目录装应用；应用要用的东西（大模型接口、邮箱等）登记成“服务”，装的时候自动接上，见下面“应用中心”
 - **AI 工作台**：Claude Code、Codex 等照着 AcornFox Skill 完成安装、部署和排错
 - **诊断**：部署失败时返回带编号的诊断和日志片段；任何故障编号都能用 `acornfox faults 编号` 查原因和处理办法
 - **数据库**：一条命令加 PostgreSQL、MySQL 或 Redis
@@ -51,7 +51,7 @@ AI 会先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国�
 | --- | --- |
 | 系统 | Ubuntu 22.04、24.04，Debian 12、13（x86_64），推荐 Ubuntu 24.04 或 Debian 13。这四个版本都实测过全新安装、自检和部署。arm64 还没测过 |
 | 配置 | 建议 2 核 2 GB 以上，需要 root 或 sudo |
-| 端口 | 18800、18801、18808（AcornFox 自己用，只听本机）和 18810-18899（应用端口）必须空着，被占时安装脚本会停下，不能跳过。80、443 最好空着；已被宝塔、1Panel、Nginx 占用时可以共存，见下面的说明。18802 是局域网控制台，被占时只是不开 |
+| 端口 | 18800、18801、18807（AcornFox 自己用，只听本机）和 18810-18899（应用端口）必须空着，被占时安装脚本会停下，不能跳过。80、443 最好空着；已被宝塔、1Panel、Nginx 占用时可以共存，见下面的说明。18802 是局域网控制台，被占时只是不开 |
 
 > **买国内云服务器时，系统请选 Ubuntu 24.04（或 Debian 13）。** 阿里云默认的 Alibaba Cloud Linux、腾讯云默认的 OpenCloudOS / TencentOS、火山引擎默认的 veLinux，以及 CentOS、Rocky 等系统装不上 AcornFox，安装脚本会停下并提示“……不能安装 AcornFox”（故障编号 `INSTALL-OS-01`）。Ubuntu、Debian 的版本不在上面列表里（例如 Ubuntu 20.04、Debian 11）时提示“……不在支持列表”（故障编号 `INSTALL-OS-02`），请换成支持的版本。
 
@@ -63,9 +63,9 @@ AI 会先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国�
 
 ```bash
 # 中国大陆服务器（Gitee 镜像）
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash
 # 其他地区
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash
 ```
 
 安装完成后会显示管理员令牌（也保存在 `/root/.acornfox-token`），请妥善保存。
@@ -79,9 +79,9 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 
 ```bash
 # 中国大陆
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 # 其他地区
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 ```
 
 Windows 电脑本版本没有命令行程序，第 2～4 步改为用 SSH 在服务器上运行（服务器上已经装好了 `acornfox`），见 [使用手册](docs/user-guide.md#windows-电脑经-ssh-在服务器上操作)。
@@ -111,13 +111,11 @@ acornfox status
 
 应用中心是一份预先配好的应用目录。装的时候不用写 Dockerfile，也不用自己想密码：AcornFox 生成密码，下载镜像、启动、检查、初始化，装好后给出首次登录信息。
 
-这一版的目录：
+目录里有两种东西：**应用**，一个一个单独装；**配方**（套装），几个应用一起装好并接上。目录里有什么以控制台“应用中心”和 `acornfox catalog list` 为准。
 
-| 应用或配方 | 是什么 |
-| --- | --- |
-| `new-api` | New API 大模型接口网关：把多家大模型合成一个 OpenAI 兼容的接口，统一管理上游 Key、令牌和额度 |
-| `hermes-agent` | Hermes 智能体：常驻的 AI 智能体，可以接飞书、钉钉、企业微信等做机器人 |
-| 配方 `hermes-with-new-api` | 两个一起装并连起来，Hermes 经本机 New API 用大模型 |
+**v0.6.0 起只装新格式的应用清单。** 应用目录已按新格式发布，联网的服务器升级后会自动取到（想马上看到就运行 `acornfox catalog sync`）。以前按旧格式上架的应用，要等按新格式重新上架后才能再装；已经装好的应用不受影响，照常运行。程序自带的目录里没有应用：一次都没同步到新目录的服务器（例如连不上外网），装应用时会说“应用中心现在还没有可以安装的应用，要等应用按新格式重新上架”，能联网后运行 `acornfox catalog sync`（或者等每天的自动同步）就好。
+
+**服务**（v0.6.0 起）：有的应用要用到别的东西，例如要调大模型的应用需要一个“大模型接口”，要发通知的应用需要一个“邮箱（发信）”。应用写明了它需要哪些服务、装好后能提供哪些服务；这台机器上装好的应用提供的服务会自动登记，你自己已有的（例如自己的邮箱、别家的大模型 Key）用 `acornfox services add` 登记。装应用时按服务类型自动接上；必须的服务没有时停下，告诉你缺什么、怎么登记。AcornFox 不会替你装别的应用来提供服务，几个应用一起装靠配方。
 
 两种装法：
 
@@ -125,9 +123,11 @@ acornfox status
 - **命令行**：
 
   ```bash
-  acornfox catalog list                            # 看目录
-  acornfox install new-api                         # 装一个应用
-  acornfox install --recipe hermes-with-new-api    # 装一个配方
+  acornfox catalog list                  # 看目录
+  acornfox install 应用 --plan           # 先看计划：需要的服务接哪条、还缺什么（只读）
+  acornfox install 应用                  # 装一个应用
+  acornfox install --recipe 配方         # 装一个配方
+  acornfox services list                 # 这台机器上的服务、谁在用
   ```
 
 **默认只本机能打开。** 从应用中心装的应用只听服务器本机地址（`http://127.0.0.1:端口`），不用去安全组放行端口。从自己电脑打开：
@@ -135,9 +135,11 @@ acornfox status
 - 公网服务器：在你自己的电脑上运行 `acornfox open 应用名`，它像打开控制台一样开一条 SSH 隧道，看完按 Ctrl+C 关闭。
 - 服务器在你的局域网里：页面上点“让局域网里的电脑能打开”，确认后用局域网地址打开（会在服务器所有网卡上开放这个端口）。
 
-**要升级应用怎么办。** 这一版没有应用的原地升级。目录里有新版本时，先 `acornfox delete 应用名`（默认保留数据），再用原来的安装命令加 `--reuse-data` 重装，接上旧数据。v0.5.1 起，账号密码、以前改过的设置、大模型来源和数据里的配置文件都照原来的接上，不用再把以前的参数写一遍；`acornfox apps vars 应用名` 可以看一个应用是用什么设置装的。
+**以前装的应用。** v0.5.x 时从应用中心装的应用用的是旧格式的清单，照常运行、能启停和删除，但不接服务（`acornfox status 应用名` 和控制台应用详情里有一句说明）；要用新功能就等它按新格式重新上架后，删掉（保留数据）再从目录装回来。
 
-详细说明（大模型来源、令牌额度、平台变量、故障编号）见 [使用手册的“应用中心”](docs/user-guide.md#应用中心)。
+**要升级应用怎么办。** 这一版没有应用的原地升级。目录里有新版本时，先 `acornfox delete 应用名`（默认保留数据），再用原来的安装命令加 `--reuse-data` 重装，接上旧数据（不记得它是目录里哪个应用时，`acornfox install --name 应用名 --reuse-data` 也行）。账号密码、以前改过的设置、接的服务和数据里的配置文件都照原来的接上，不用再把以前的参数写一遍；`acornfox apps vars 应用名` 可以看一个应用是用什么设置装的。
+
+详细说明（服务怎么登记、配方、平台变量、故障编号）见 [使用手册的“应用中心”](docs/user-guide.md#应用中心)。
 
 ## AI 工作台
 
@@ -195,10 +197,13 @@ acornfox domain add example.com --app my-app # 绑定域名（自动 HTTPS）
 
 # 应用中心
 acornfox catalog list                       # 看目录里的应用和配方
-acornfox install hermes-agent --llm local   # 装 Hermes，接本机 New API
+acornfox install 应用 --plan                # 先看计划：需要的服务接哪条、还缺什么（只读）
+acornfox install 应用                       # 从目录装一个应用
 acornfox install status 任务编号 --wait      # 等到装好或失败再返回（最多等 90 秒，没装完再运行一次）
-acornfox apps vars new-api                  # 看一个应用是用什么设置装的
-acornfox open new-api                       # 在自己电脑上打开只本机的应用
+acornfox services add smtp --name 我的邮箱 --set host=mail.example.com --set password=-   # 登记一条你已有的服务（密码从键盘输入）
+acornfox services list                      # 这台机器上的服务、状态、谁在用
+acornfox apps vars 应用                     # 看一个应用是用什么设置装的
+acornfox open 应用                          # 在自己电脑上打开只本机的应用
 
 # 出了问题
 acornfox faults CAT-INST-24                 # 一个故障编号是什么意思、怎么处理（只读，不连服务器）
@@ -211,7 +216,7 @@ AcornFox 由三部分组成：
 
 - **AcornFox** - 状态管理和协调
 - **Docker** - 容器运行时
-- **Caddy** - HTTP 路由和 HTTPS
+- **Caddy** - HTTP 路由和 HTTPS（跑在入口容器 `acornfox-edge` 里，用上游原版）
 
 设计原则：
 - **状态与执行分离** - server 无 Docker 权限，runner 只接受类型化请求
@@ -231,19 +236,19 @@ AcornFox 由三部分组成：
 
 安装脚本读云厂商的元数据，判断服务器在哪家云、是不是中国大陆地域，然后配置：
 - 系统软件源（APT）和 Docker 安装包：阿里云、腾讯云、火山引擎的服务器先用所在云的内网源（不论哪个地域，香港、新加坡等境外地域也用），连不上再换下一个
-- 中国大陆服务器（包括华为云）接着依次尝试华为云、腾讯云、阿里云、南京大学、清华镜像站；境外服务器用 Docker 官方源
-- Docker 镜像加速（只在中国大陆配置）：腾讯云服务器优先用腾讯云内网加速，其余依次用 DaoCloud、1Panel 镜像；GitHub 容器镜像（ghcr.io）用南京大学镜像
+- 中国大陆服务器（包括华为云）接着对几家国内镜像站（阿里云、清华、中科大、南大、上海交大、华为云、腾讯云）当场测快慢，用能用而且最快的；境外服务器用 Docker 官方源
+- 拉镜像：下载源分层（所在云的内网加速 → 别人公开的国内副本 → Docker Hub、ghcr.io 本身），国内拉之前先实测，不能用的跳过、慢的排后，拉的过程中太慢会换下一个源。`acornfox sources --probe` 看每个源现在怎样
 - 香港、新加坡、东京等境外地域按海外处理：从 GitHub 下载，不配国内公共镜像站和 Docker 镜像加速
-- Caddy 通过国内下载源获取
+- 入口代理的镜像随发行版的入口包从国内下载源（Gitee）获取，不访问镜像仓库
 - 判断不出是哪家云时，按 IP 归属地判断是否在中国大陆
 
 判断错了可以手动指定（通过管道给脚本传参数）：
 ```bash
 # 强制使用中国镜像源
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash -s -- --china
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- --china
 
 # 强制使用国际源
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash -s -- --global
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- --global
 ```
 
 ## 文档
@@ -262,14 +267,14 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 
 ```bash
 # 服务器端升级（中国大陆）
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade
 # 服务器端升级（其他地区）
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- upgrade
 
 # 客户端升级（Linux、Mac 电脑；中国大陆）
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 # 客户端升级（Linux、Mac 电脑；其他地区）
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 ```
 
 通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）。
@@ -279,7 +284,7 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/insta
 - 停止 AcornFox 服务，备份程序和数据库（放在 `/var/lib/acornfox/backups/`，保留最近 5 份），再执行数据库迁移
 - 数据库迁移失败、新版本服务起不来、或升级中途出错时，自动恢复到升级前（程序和数据库都换回原来的，等于没升上）
 - 应用容器在升级过程中一直运行；升级期间命令行和控制台会暂时连不上
-- 网址入口（Caddy 容器）需要重建时，应用网址会短暂打不开，例如从 v0.3.x 升级（系统里的 Caddy 会被停用，换成 Caddy 容器）
+- 换入口代理容器时（例如第一次升到 v0.6.0），新建的访问不受影响，但已经连着的长连接、超过 8 秒还没做完的请求和 WebSocket 会断一次；现在装的是 v0.3.x 的要先升到 v0.5.1
 - 从 v0.4.x 升级到 v0.5.0 后，控制台换成新版，旧控制台已经去掉
 - 升级不会打开局域网控制台；原来开着的照常能用
 

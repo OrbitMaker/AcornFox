@@ -7,12 +7,12 @@ apps:
   - app: new-api
   - app: hermes-agent
 links:
-  - { from: new-api, to: hermes-agent, uses: llm_gateway }
+  - { from: new-api, to: hermes-agent, uses: llm }
 delivery:
-  tier: auto
+  tier: steps
   minutes: 4
   memory_mb: 2560
   user_steps:
-    - 在 New API 里新建一个渠道，填上游的 Key 和模型（上下文要不少于 64K）
-    - 打开 Hermes 控制台，用应用详情里的密码登录
-    - 要接飞书、企业微信等机器人时，在 Hermes 控制台里填机器人凭据
+    - 确认给 Hermes 填的模型上下文不少于 64K，否则 Hermes 启动不了
+    - 在 New API 里新建一个渠道，填上游的 Key 和这个模型
+    - 打开 Hermes 的页面，用 AcornFox 控制台应用详情里的密码登录

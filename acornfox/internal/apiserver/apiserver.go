@@ -23,6 +23,7 @@ import (
 	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/hostcheck"
+	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -153,7 +154,7 @@ type Config struct {
 	ServerLAN func() string
 	// LANConsole manages opening the console on the LAN; nil => 404.
 	LANConsole LANConsole
-	// EdgeStatus reports the Caddy container ("preparing" / "running" /
+	// EdgeStatus reports the entry proxy container ("preparing" / "running" /
 	// "error" + message); nil or "" state => not reported.
 	EdgeStatus func() (state, message string)
 	// Setup is the runtime setup (find or install Docker, gateway, checks);
@@ -168,6 +169,11 @@ type Config struct {
 	// AppCenter installs apps from the catalog; nil => the /v1/catalog
 	// routes answer app_center_unavailable.
 	AppCenter *appinstall.Engine
+	// PlatformVars works out every app's address (the one the views show,
+	// the same as app.url); the server's wiring gives the app center's own
+	// provider. nil => the standalone edition's algorithm with PublicHost
+	// (see address.go).
+	PlatformVars platformvar.Addresser
 
 	// Console pages (runtime page, home dashboard, settings):
 	// HostHistory keeps the last 24 hours of host CPU, memory and disk in
@@ -223,6 +229,7 @@ type server struct {
 	setup           Setup
 	deployLogs      *deploylog.Store
 	appCenter       *appinstall.Engine
+	addresser       platformvar.Addresser
 	hostHistory     *HostHistory
 	appHistory      *AppHistory
 	checkPorts      hostcheck.Ports
@@ -287,6 +294,7 @@ func newServer(cfg Config) *server {
 		setup:           cfg.Setup,
 		deployLogs:      cfg.DeployLogs,
 		appCenter:       cfg.AppCenter,
+		addresser:       addresserFor(cfg),
 		hostHistory:     cfg.HostHistory,
 		appHistory:      cfg.AppHistory,
 		checkPorts:      cfg.CheckPorts,
@@ -297,6 +305,9 @@ func newServer(cfg Config) *server {
 
 // effectiveExposure resolves "" to the platform default.
 func (s *server) effectiveExposure(a state.App) string {
+	if a.Internal {
+		return state.ExposureInternal
+	}
 	if a.Exposure != "" {
 		return a.Exposure
 	}
@@ -351,6 +362,7 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/metrics/apps/{app}/history", s.getAppHistory)
 	mux.HandleFunc("GET /v1/runtime/checks", s.getRuntimeChecks)
 	s.registerCatalog(mux)
+	s.registerServices(mux)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the

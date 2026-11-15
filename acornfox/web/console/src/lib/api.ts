@@ -1,6 +1,7 @@
 // 控制台调接口的唯一入口：带 Cookie 会话，非 GET 请求带 CSRF 头（和旧控制台一样）。
 // 错误统一成 ApiError：HTTP 状态、错误编号、说明，应用中心的错误还带建议和任务编号；
 // 原因是“AcornFox 版本不够”的带 needsPlatform（要升到的版本，服务端的 needs_platform）。
+// raw 是服务端错误对象原样（例如删服务被拒时带的 used_by），给需要额外字段的页面读。
 import type { Session } from './types'
 
 export class ApiError extends Error {
@@ -10,7 +11,8 @@ export class ApiError extends Error {
   taskId?: string
   diagnosis?: unknown
   needsPlatform: string
-  constructor(status: number, code: string, message: string, extra?: { hint?: string; task_id?: string; diagnosis?: unknown; needs_platform?: unknown }) {
+  raw?: Record<string, unknown>
+  constructor(status: number, code: string, message: string, extra?: { hint?: string; task_id?: string; diagnosis?: unknown; needs_platform?: unknown; raw?: Record<string, unknown> }) {
     super(message)
     this.status = status
     this.code = code
@@ -18,20 +20,23 @@ export class ApiError extends Error {
     this.taskId = extra?.task_id
     this.diagnosis = extra?.diagnosis
     this.needsPlatform = typeof extra?.needs_platform === 'string' ? extra.needs_platform.trim() : ''
+    this.raw = extra?.raw
   }
 }
 
 export async function toApiError(r: Response): Promise<ApiError> {
   let code = 'server_error'
   let message = '服务器出错（HTTP ' + r.status + '）'
-  let extra: { hint?: string; task_id?: string; diagnosis?: unknown; needs_platform?: unknown } | undefined
+  let extra: { hint?: string; task_id?: string; diagnosis?: unknown; needs_platform?: unknown; raw?: Record<string, unknown> } | undefined
   try {
     const body = await r.json()
     const e = body && (body.error || body)
     if (e && typeof e === 'object') {
       if (typeof e.code === 'string') code = e.code
       if (typeof e.message === 'string') message = e.message
-      extra = { hint: e.hint, task_id: e.task_id, diagnosis: e.diagnosis, needs_platform: e.needs_platform }
+      // 外层和 error 里的字段都留着（有的字段放在外层，例如 used_by）。
+      const raw = body.error && typeof body === 'object' ? { ...body, ...e } : e
+      extra = { hint: e.hint, task_id: e.task_id, diagnosis: e.diagnosis, needs_platform: e.needs_platform, raw }
     }
   } catch {
     /* 不是 JSON */

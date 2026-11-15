@@ -7,19 +7,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
 // EdgeConfig turns on the edge container (three-platform architecture): the
-// reconciler keeps one Caddy container running through the runner and routes
-// apps through it. Nil keeps the v0.3 behaviour (a Caddy the installer runs
-// on the host).
+// reconciler keeps the entry proxy's container running through the runner
+// and routes apps through it (Config.Proxy). Nil manages no container (the
+// tests that only look at routes).
 type EdgeConfig struct {
 	Mode       string // runner.EdgeModeHost (Linux) | runner.EdgeModeBridge (macOS, Windows)
 	AdminPort  int
 	AdminToken string
+
+	// UseAdminPort is called when the runner reports the entry container's
+	// management endpoint on another port than the one in use (after a
+	// switch between two entry containers): point Config.Proxy there.
+	UseAdminPort func(port int)
+	// OnSwitch is called once the runner switched from an old entry
+	// container to a new one (info.Replaced is the old one's ID): write the
+	// switch record. Nil writes none.
+	OnSwitch func(info runner.EdgeInfo)
 
 	// Bridge mode only: the reserved app port range published once
 	// and the LAN address the second copy is
@@ -34,7 +43,7 @@ const LANPortOffset = 10000
 
 // Edge states reported by EdgeStatus (GET /v1/status, console banner).
 const (
-	EdgeStateOff       = ""          // no edge configured (v0.3 host Caddy)
+	EdgeStateOff       = ""          // no edge container managed
 	EdgeStatePreparing = "preparing" // creating the container, maybe downloading the image
 	EdgeStateRunning   = "running"
 	EdgeStateError     = "error"
@@ -59,9 +68,9 @@ func (r *Reconciler) EdgeStatus() (state, message string) {
 	return r.edgeState, r.edgeMsg
 }
 
-// edgeReadyTimeout bounds the wait for a (re)created Caddy to accept admin
-// requests before routes are pushed.
-const edgeReadyTimeout = 20 * time.Second
+// edgeReadyTimeout bounds the wait for a (re)created proxy to answer before
+// the configuration is handed over. Tests shorten it.
+var edgeReadyTimeout = 20 * time.Second
 
 func (r *Reconciler) edgeManager() runner.EdgeManager {
 	if r.cfg.Edge == nil {
@@ -87,14 +96,15 @@ func (r *Reconciler) exposureOf(a state.App) string {
 }
 
 // appRoute builds the route of one app from its live container. In bridge
-// mode Caddy reaches the container by name on the app network; otherwise it
-// uses the container's loopback port. Exposure "local" binds Caddy to
-// 127.0.0.1 in host mode; in bridge mode the edge's port publishing decides.
-func (r *Reconciler) appRoute(a state.App, ci runner.ContainerInfo) (caddyroute.Route, bool) {
+// mode the proxy reaches the container by name on the app network; otherwise
+// it uses the container's loopback port. Exposure "local" binds the app's
+// port to 127.0.0.1 in host mode; in bridge mode the edge's port publishing
+// decides.
+func (r *Reconciler) appRoute(a state.App, ci runner.ContainerInfo) (edge.Route, bool) {
 	if ci.HostPort == 0 {
-		return caddyroute.Route{}, false
+		return edge.Route{}, false
 	}
-	rt := caddyroute.Route{App: a.Name, PublicPort: a.PublicPort, Upstream: fmt.Sprintf("127.0.0.1:%d", ci.HostPort)}
+	rt := edge.Route{App: a.Name, PublicPort: a.PublicPort, Upstream: fmt.Sprintf("127.0.0.1:%d", ci.HostPort)}
 	if r.bridgeMode() && ci.Port > 0 {
 		rt.Upstream = fmt.Sprintf("%s:%d", ci.Name, ci.Port)
 	}
@@ -111,7 +121,7 @@ func (r *Reconciler) appRoute(a state.App, ci runner.ContainerInfo) (caddyroute.
 // whole reserved range on 127.0.0.1 and again on the LAN address (to
 // P+LANPortOffset), plus 80/443 once any app has a domain; it does not depend
 // on which apps exist or their exposure, so those changes never recreate it.
-func (r *Reconciler) edgeSpec(_ context.Context, routes []caddyroute.Route) runner.EdgeSpec {
+func (r *Reconciler) edgeSpec(_ context.Context, routes []edge.Route) runner.EdgeSpec {
 	e := r.cfg.Edge
 	spec := runner.EdgeSpec{Mode: e.Mode, AdminPort: e.AdminPort, AdminToken: e.AdminToken}
 	if spec.Mode != runner.EdgeModeBridge || e.PortMin <= 0 || e.PortMax < e.PortMin {
@@ -182,27 +192,45 @@ func specKey(s runner.EdgeSpec) string {
 }
 
 // ensureEdge makes the edge container match routes. It returns true when the
-// container was (re)created, in which case Caddy has no routes yet and the
-// caller must push them. A no-op without EdgeConfig.
-func (r *Reconciler) ensureEdge(ctx context.Context, routes []caddyroute.Route, force bool) (bool, error) {
+// container was (re)created, in which case the proxy has no configuration yet
+// and the caller must hand it over. A no-op without EdgeConfig.
+func (r *Reconciler) ensureEdge(ctx context.Context, routes []edge.Route, force bool) (bool, error) {
+	return r.ensureEdgeWith(ctx, routes, force, false)
+}
+
+// ensureEdgeWith is ensureEdge; recreate asks the runner to rebuild the
+// container in place even when it matches the spec (runner.EdgeSpec.Recreate).
+func (r *Reconciler) ensureEdgeWith(ctx context.Context, routes []edge.Route, force, recreate bool) (bool, error) {
 	m := r.edgeManager()
 	if m == nil {
 		return false, nil
 	}
 	spec := r.edgeSpec(ctx, routes)
+	spec.Recreate = recreate
 	key := specKey(spec)
+	// A new container gets the whole configuration in its settings volume
+	// before it starts (it serves every route at once), and a switch from
+	// an old container needs it.
+	if cfg, err := r.proxyConfig(ctx, routes); err == nil {
+		spec.Config = &cfg
+	} else {
+		cfg := edge.Config{Routes: routes, HTTPS: r.cfg.HTTPS}
+		spec.Config = &cfg
+	}
 	// One caller at a time: app rounds and the startup check run
 	// concurrently, and two creates of the same container would collide.
+	// Hand-overs (applyRoutes) take the same lock, so while the runner
+	// switches entry containers nothing is sent to either one.
 	r.edgeOpMu.Lock()
 	defer r.edgeOpMu.Unlock()
 	r.edgeMu.Lock()
 	same := r.edgeKey == key
 	r.edgeMu.Unlock()
 	recreated := false
-	if !same || force {
+	if !same || force || recreate {
 		if r.edgeKey == "" {
 			r.setEdgeState(EdgeStatePreparing, "")
-			r.log.Info("preparing edge container (the first start may download the Caddy image)")
+			r.log.Info("preparing edge container")
 		}
 		info, err := m.EnsureEdge(ctx, spec)
 		if err != nil && strings.Contains(err.Error(), "cannot assign requested address") {
@@ -214,6 +242,7 @@ func (r *Reconciler) ensureEdge(ctx context.Context, routes []caddyroute.Route, 
 				r.edgeMu.Unlock()
 				r.log.Warn("edge: LAN address not bindable by Docker, apps reachable on this computer only", "lan", lan, "err", err)
 				spec = r.edgeSpec(ctx, routes)
+				spec.Recreate = recreate
 				key = specKey(spec)
 				info, err = m.EnsureEdge(ctx, spec)
 			}
@@ -225,12 +254,28 @@ func (r *Reconciler) ensureEdge(ctx context.Context, routes []caddyroute.Route, 
 			r.edgeMu.Unlock()
 			r.setEdgeState(EdgeStateError, err.Error())
 			r.log.Error("edge container", "attempt", n, "err", err)
-			return false, fmt.Errorf("入口容器（Caddy）启动失败：%w", err)
+			return false, fmt.Errorf("入口容器启动失败：%w", err)
 		}
 		r.edgeMu.Lock()
 		r.edgeFailures = 0
 		r.edgeMu.Unlock()
-		r.setEdgeState(EdgeStateRunning, "")
+		// A kept container still refuses the token: an EDGE-03 state
+		// (recreateEdgeIfTokenRefused) stays until a hand-over takes.
+		if st, msg := r.EdgeStatus(); info.Recreated || st != EdgeStateError || !strings.Contains(msg, edge.FaultAdmin) {
+			r.setEdgeState(EdgeStateRunning, "")
+		}
+		if info.AdminPort > 0 && r.cfg.Edge.UseAdminPort != nil {
+			r.cfg.Edge.UseAdminPort(info.AdminPort)
+		}
+		if info.Replaced != "" {
+			r.log.Info("edge container switched", "old", info.ReplacedName, "old_id", info.Replaced, "new_id", info.ID, "admin_port", info.AdminPort)
+			if info.Note != "" {
+				r.log.Warn("edge switch", "note", info.Note)
+			}
+			if r.cfg.Edge.OnSwitch != nil {
+				r.cfg.Edge.OnSwitch(info)
+			}
+		}
 		recreated = info.Recreated
 		if recreated {
 			r.log.Info("edge container created", "image", info.Image, "ports", len(spec.Ports))
@@ -250,10 +295,12 @@ func (r *Reconciler) ensureEdge(ctx context.Context, routes []caddyroute.Route, 
 	return recreated, nil
 }
 
+// waitEdgeReady waits until a (re)created proxy answers Version, which is
+// when it can take a configuration.
 func (r *Reconciler) waitEdgeReady(ctx context.Context) {
 	deadline := time.Now().Add(edgeReadyTimeout)
 	for time.Now().Before(deadline) {
-		if _, err := r.cfg.Router.Current(ctx); err == nil {
+		if _, err := r.cfg.Proxy.Version(ctx); err == nil {
 			return
 		}
 		select {
@@ -265,8 +312,8 @@ func (r *Reconciler) waitEdgeReady(ctx context.Context) {
 }
 
 // EnsureEdge starts the edge container at startup, before any app round, so
-// the Caddy admin gateway exists for domain verification and an empty server
-// still answers. It returns false when the caller should retry (runner or
+// the proxy's management endpoint exists for domain verification and an
+// empty proxy still answers. It returns false when the caller should retry (runner or
 // Docker not reachable yet); rounds also retry on their own.
 func (r *Reconciler) EnsureEdge(ctx context.Context) bool {
 	if r.edgeManager() == nil {
@@ -283,11 +330,96 @@ func (r *Reconciler) EnsureEdge(ctx context.Context) bool {
 		r.log.Error("edge", "err", err)
 		return false
 	}
-	// A new Caddy has no routes: push them now rather than on the next round.
+	// A container that refuses the token in the data directory (EDGE-03)
+	// is rebuilt in place with it, once per run of the server.
+	if err := r.recreateEdgeIfTokenRefused(ctx, routes); err != nil {
+		r.log.Error("edge", "err", err)
+		return false
+	}
+	// A new proxy has no configuration: hand it over now rather than on the
+	// next round.
 	if len(routes) > 0 {
-		if err := r.cfg.Router.Sync(ctx, routes); err != nil {
+		if err := r.applyRoutes(ctx, routes); err != nil {
 			r.log.Error("route sync", "err", err)
 		}
 	}
 	return true
+}
+
+// Token refusal (EDGE-03). The entry container reads its management token
+// from a file the runner copies in when it creates the container
+// (edge.TokenFile); the spec, and so the container's hash label, holds the
+// token in the data directory. When someone changes the file inside the
+// container (docker cp, a restored backup) the hash still matches and
+// EnsureEdge keeps the container, which then refuses every hand-over: apps
+// already routed keep working, new routes and domains never take effect.
+//
+// The rule: when the server starts (Reconciler.EnsureEdge) and the running
+// container refuses the token (Health cause edge.CauseAuth), the container
+// is rebuilt in place from the token in the data directory: same data and
+// settings volumes, the whole configuration copied in again, the app URLs
+// gone for the few seconds a recreation takes. At most
+// maxEdgeTokenRecreates times per run of the server: when it still refuses
+// afterwards nothing touches the container again until the next start, and
+// the state says EDGE-03. Only the start does this, not every round, so a
+// token that keeps changing never makes the entry container restart over
+// and over, and a container changed while the server runs stays as it is
+// (doctor reports EDGE-03) until the server is restarted.
+const maxEdgeTokenRecreates = 1
+
+// edgeTokenCheckWait bounds how long the start waits for the management
+// endpoint to answer at all before deciding whether it refuses the token (a
+// container that was just started is still coming up). Tests shorten it.
+var edgeTokenCheckWait = 20 * time.Second
+
+// recreateEdgeIfTokenRefused applies the rule above. It returns an error only
+// when the recreation itself failed.
+func (r *Reconciler) recreateEdgeIfTokenRefused(ctx context.Context, routes []edge.Route) error {
+	if r.edgeManager() == nil || r.cfg.Proxy == nil {
+		return nil
+	}
+	h := r.edgeHealthSettled(ctx)
+	if h.Cause != edge.CauseAuth {
+		return nil
+	}
+	r.edgeMu.Lock()
+	if r.edgeTokenRecreates >= maxEdgeTokenRecreates {
+		r.edgeMu.Unlock()
+		r.setEdgeState(EdgeStateError, h.Reason)
+		r.log.Warn("edge refuses the management token; already recreated once in this run, leaving it", "fault", edge.FaultAdmin)
+		return nil
+	}
+	r.edgeTokenRecreates++
+	r.edgeMu.Unlock()
+	r.log.Warn("edge refuses the management token in the data directory; recreating it in place", "fault", edge.FaultAdmin)
+	if _, err := r.ensureEdgeWith(ctx, routes, true, true); err != nil {
+		return err
+	}
+	if h := r.edgeHealthSettled(ctx); h.Cause == edge.CauseAuth {
+		r.setEdgeState(EdgeStateError, h.Reason)
+		r.log.Error("edge still refuses the management token after recreating it; not recreating it again in this run", "fault", edge.FaultAdmin)
+		return nil
+	}
+	r.log.Info("edge recreated with the management token in the data directory")
+	return nil
+}
+
+// edgeHealthSettled asks the proxy's health, waiting up to
+// edgeTokenCheckWait while the management endpoint does not answer yet.
+func (r *Reconciler) edgeHealthSettled(ctx context.Context) edge.Health {
+	deadline := time.Now().Add(edgeTokenCheckWait)
+	for {
+		h := r.cfg.Proxy.Health(ctx)
+		if h.Cause != edge.CauseUnreachable && h.State != edge.StateStarting {
+			return h
+		}
+		if !time.Now().Before(deadline) {
+			return h
+		}
+		select {
+		case <-ctx.Done():
+			return h
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
 }

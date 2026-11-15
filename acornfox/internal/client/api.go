@@ -170,9 +170,10 @@ type App struct {
 	// OpenHint (local-only apps on a Linux server): how the user opens the
 	// app from their own computer.
 	OpenHint *OpenHint `json:"open_hint,omitempty"`
-	// GatewayTokenFrom (detail view): the local model gateway app that
-	// issued this app a token with no quota and no expiry.
-	GatewayTokenFrom  string      `json:"gateway_token_from,omitempty"`
+	// InternalOnly (exposure internal): reached over the app network only,
+	// for other apps; no URL, nothing to open. InternalNote says so.
+	InternalOnly      bool        `json:"internal_only,omitempty"`
+	InternalNote      string      `json:"internal_note,omitempty"`
 	ObservedState     string      `json:"observed_state"`
 	Live              *Deployment `json:"live,omitempty"`
 	Latest            *Deployment `json:"latest,omitempty"`
@@ -180,19 +181,49 @@ type App struct {
 	Env               []EnvKey    `json:"env,omitempty"`
 	Volumes           []Volume    `json:"volumes,omitempty"`
 	Domains           []Domain    `json:"domains,omitempty"`
+	// Services (detail view, apps installed from the catalog): the app's
+	// needs and the service each is plugged into.
+	Services []AppService `json:"services,omitempty"`
+	// LegacyNote (detail view): said for an app installed with a manifest
+	// of the former format, "" otherwise.
+	LegacyNote string `json:"legacy_note,omitempty"`
+}
+
+// AppService is one need of an installed app and the service it is plugged
+// into (GET /v1/apps/{app} services). Service is "" and Status
+// "not_connected" when it is plugged into none (an optional need this
+// machine had nothing for).
+type AppService struct {
+	Use         string `json:"use"`
+	Kind        string `json:"kind"`
+	KindLabel   string `json:"kind_label"`
+	Required    bool   `json:"required"`
+	Service     string `json:"service"`
+	Status      string `json:"status"`
+	StatusLabel string `json:"status_label"`
 }
 
 // OpenHint is how to open a local-only app from the user's own computer:
 // Recommend is "lan" (the server is on the user's LAN and the app has its
 // own login: switching it to lan exposure is offered, with the user's
-// consent) or "tunnel" (Command, acornfox open APP, on the user's computer).
+// consent: Ask, then AskYesCommand) or "tunnel" (Command, acornfox open APP,
+// on the user's computer; TunnelCommand without the command line there).
+// LANURL is only set when the address opens now; LANURLAfterExpose is
+// where it opens once switched, not before.
 type OpenHint struct {
-	LANAddress string `json:"lan_address,omitempty"`
-	LANURL     string `json:"lan_url,omitempty"`
-	HasLogin   bool   `json:"has_login"`
-	CanLAN     bool   `json:"can_lan"`
-	Recommend  string `json:"recommend"`
-	Command    string `json:"command"`
+	LANAddress        string `json:"lan_address,omitempty"`
+	LANURL            string `json:"lan_url,omitempty"`
+	LANURLAfterExpose string `json:"lan_url_after_expose,omitempty"`
+	HasLogin          bool   `json:"has_login"`
+	CanLAN            bool   `json:"can_lan"`
+	Recommend         string `json:"recommend"`
+	Command           string `json:"command"`
+	CommandWhere      string `json:"command_where,omitempty"`
+	Ask               string `json:"ask,omitempty"`
+	AskYesCommand     string `json:"ask_yes_command,omitempty"`
+	TunnelCommand     string `json:"tunnel_command,omitempty"`
+	TunnelWhere       string `json:"tunnel_where,omitempty"`
+	TunnelURL         string `json:"tunnel_url,omitempty"`
 }
 
 type Status struct {

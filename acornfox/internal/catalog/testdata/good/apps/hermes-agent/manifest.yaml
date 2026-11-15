@@ -1,7 +1,11 @@
-# Hermes 智能体（Nous Research 的 Hermes Agent）。原样安装上游镜像，不改代码。
-# 它的网页控制台能改密钥、能开终端：默认只本机、必须登录，危险命令要人批准，不挂宿主机 Docker。
+# Hermes Agent, written in manifest format 3. A draft: not published yet. It
+# needs a model API like any other service (uses, kind llm_gateway): whatever
+# is registered on the machine, or provided by an app installed with it in a
+# recipe, is connected. Which model it talks to is its own setting (model),
+# filled in by the user: the service's model is at most a default, and may
+# be empty.
 id: hermes-agent
-schema: 2
+schema: 3
 source: upstream
 maintainer: acornfox
 
@@ -16,14 +20,12 @@ app:
   license: MIT
 
 lifecycle:
-  min_platform: "0.5.0"
+  min_platform: "0.6.0"
   status: active
 
 resources:
   memory_mb: { min: 1024, recommended: 2048 }
   cpu: { min: 1 }
-  # 实测：镜像在 Docker 里占 4.56 GB（containerd 镜像存储同时留压缩层和解开的文件），
-  # 经网关下载时镜像包（1.12 GB）也要先落盘，再加数据，所以至少 6 GB
   disk_mb: { min: 6144 }
   platforms: [linux/amd64, linux/arm64]
   gpu: none
@@ -63,16 +65,6 @@ volumes:
     backup: true
 
 params:
-  - key: llm
-    type: llm_provider
-    label: 大模型
-    hint: 模型的上下文要不少于 64K，否则 Hermes 启动不了
-    required: true
-    llm:
-      platform: optional
-      local_gateway: true
-      needs: [chat]
-      min_context: 65536
   - key: dashboard_password
     type: secret
     generate: { length: 24 }
@@ -83,15 +75,24 @@ params:
     generate: { length: 64, charset: hex }
     hidden: true
     editable: never
+  - key: model
+    type: string
+    label: 模型名
+    hint: 要调用的模型，上下文要不少于 64K，例如 qwen-plus
+    required: true
+
+# Required: the config file below takes its address and key from it, and a
+# config file has no way yet to say what to write when an optional service
+# is missing.
+uses:
+  - { name: llm, kind: llm_gateway }
 
 env:
   - { key: HERMES_DASHBOARD, value: "1" }
-  # 平台变量：时区，以及 Hermes 装插件、技能时用的 Python、Node 包下载源（国内自动用国内镜像）
   - { key: TZ, from: platform.tz }
   - { key: PIP_INDEX_URL, from: platform.mirror.pypi }
   - { key: UV_DEFAULT_INDEX, from: platform.mirror.pypi }
   - { key: npm_config_registry, from: platform.mirror.npm }
-  # 非本机回环地址上必须配登录方式，否则控制台拒绝启动（上游的安全默认）
   - { key: HERMES_DASHBOARD_BASIC_AUTH_USERNAME, value: admin }
   - { key: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD, from: params.dashboard_password, secret: true }
   - { key: HERMES_DASHBOARD_BASIC_AUTH_SECRET, from: params.dashboard_session_secret, secret: true }
@@ -101,32 +102,29 @@ files:
     path: config.yaml
     overwrite: install
     mode: "0600"
-    # Hermes 以 uid 10000 运行，配置文件要归它，否则读不到（试装实测）
     owner: "10000:10000"
     template: |
       model:
         provider: custom
-        base_url: "{{params.llm.base_url}}"
-        api_key: "{{params.llm.api_key}}"
-        default: "{{params.llm.model}}"
+        base_url: "{{uses.llm.base_url}}"
+        api_key: "{{uses.llm.api_key}}"
+        default: "{{params.model}}"
       approvals:
         mode: manual
       terminal:
         backend: local
-
-uses:
-  - { name: llm_gateway, kind: llm_gateway, for_param: llm, optional: true }
 
 first_login:
   - { label: 账号, value: admin }
   - { label: 密码, from: params.dashboard_password, secret: true }
 
 delivery:
-  tier: auto
+  tier: steps
   minutes: 3
   user_steps:
-    - 打开控制台，用应用详情里的密码登录
-    - 要接飞书、企业微信等机器人时，在控制台里填机器人凭据
+    - 确认所用模型的上下文不少于 64K，否则 Hermes 启动不了
+    - 打开 Hermes 的页面，用 AcornFox 控制台应用详情里的密码登录
+    - 要接飞书、企业微信等机器人时，在 Hermes 的页面里填机器人凭据
 
 upgrade:
   from: ">=v0.16.0"

@@ -4,30 +4,36 @@
 // 要更新版本的 AcornFox 才能装的（needs_platform 有值）：说明要升到哪个版本、给升级命令，不能提交；
 // 提交后才被拒绝或失败的：服务端的说明原样显示；错误里带 needs_platform 的，下面说“要先升级到 x.y.z”并给升级命令。
 // 表单要读的应用详情读不了、原因是版本不够时（409，带 needs_platform）也一样。
+// 需要的服务：打开时、换版本或选了用哪条服务时读一次安装前的计划（POST /v1/catalog/plan，只读），
+// 计划里有 needs 才显示“需要的服务”一块（install-needs.tsx）；服务端没有这个接口时和以前一样。
+// 点“安装”时用当时表单的内容再读一次计划，按这次的结果决定能不能装；这次读失败不拦安装，交给服务端检查。
+// 应用要用的服务只在“需要的服务”里接，表单里没有为某种服务或某个应用写的专门选项。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, CircleCheck, Copy, ExternalLink, Eye, EyeOff, KeyRound } from 'lucide-react'
 import { cn, safeHref } from '@/lib/utils'
 import { api, ApiError } from '@/lib/api'
 import {
   PUBLIC, appsIn, findApp, sourceId,
-  appMemory, buildRequest, checkForm, cliCommand, defaultModel, faultForAI, freeMB, groupSteps, memoryCheck, newInstallForm, recipeMemory,
-  type FormProblem, type InstallForm, type LLMField, type LLMSource, type PlainField, type PlatformField,
+  appMemory, buildRequest, checkForm, cliCommand, faultForAI, freeMB, groupSteps, memoryCheck, newInstallForm, recipeMemory,
+  type FormProblem, type InstallForm, type PlainField, type PlatformField,
 } from '@/lib/catalog'
 import { copyText } from '@/lib/clipboard'
 import { faultNeedsPlatform, installNeedsPlatform } from '@/lib/upgrade'
 import { appHref, go } from '@/lib/router'
-import { gatewayTokenText, isLoopbackURL, loginAddress, openableAddress } from '@/lib/appstatus'
-import type { AppDetail, AppView, FirstLogin, OpenHint, Recipe, StepProgress, TaskView } from '@/lib/types'
+import { isLoopbackURL, loginAddress, openableAddress } from '@/lib/appstatus'
+import { applyPlan, fetchPlan, planBlock, planCli } from '@/lib/services'
+import type { AppDetail, AppView, FirstLogin, InstallPlan, OpenHint, Recipe, StepProgress, TaskView } from '@/lib/types'
 import { useConsole, type InstallTarget } from '@/state'
 import { StepDot } from '@/components/bits'
 import { Button } from '@/components/ui/button'
-import { Select, Spinner, Tabs } from '@/components/ui/controls'
+import { Select, Spinner } from '@/components/ui/controls'
 import { CopyButton, CopyLine } from '@/components/ui/copy'
 import { Dialog, DialogHead } from '@/components/ui/dialog'
 import { Input, Label } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
 import { OpenHintBlock } from '../apps/open-hint'
 import { UpgradeFirst, UpgradeNeeded } from './upgrade-note'
+import { NeedsBlock, PlanBlocked } from './install-needs'
 
 const TITLE_ID = 'install-title'
 
@@ -154,7 +160,7 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
   onClose: () => void
   onStarted: (taskId: string) => void
 }) {
-  const { catalog, resources, install, refreshTasks } = useConsole()
+  const { catalog, resources, refreshTasks } = useConsole()
   const toast = useToast()
   const src = target.catalog || PUBLIC
   const [form, setForm] = useState<InstallForm>(() => newInstallForm(target.kind, target.id, details, recipe, src))
@@ -162,20 +168,36 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
   const [err, setErr] = useState<ApiError | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmReuse, setConfirmReuse] = useState(false)
+  // 安装前的计划：uses 是用户选的“某个需要接哪条服务”；planSeq 变了重新读（例如当场登记了一条）。
+  const [uses, setUses] = useState<Record<string, string>>({})
+  const [planSeq, setPlanSeq] = useState(0)
+  const [plan, setPlan] = useState<InstallPlan | null>(null)
+  const [planErr, setPlanErr] = useState<ApiError | null>(null)
+  // 每读一次计划加一；晚到的旧结果不覆盖新的（例如点安装时读的那次先回来）。
+  const planGen = useRef(0)
+  const usesKey = JSON.stringify(uses)
+  useEffect(() => {
+    let alive = true
+    const gen = ++planGen.current
+    fetchPlan(applyPlan(buildRequest(form), uses))
+      .then((v) => { if (alive && gen === planGen.current) { setPlan(v); setPlanErr(null) } })
+      .catch((e) => { if (alive && gen === planGen.current) setPlanErr(e as ApiError) })
+    return () => { alive = false }
+    // 填参数时不重读：计划只看版本和用哪条服务。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.version, usesKey, planSeq])
   const d0 = details[0]
   const mem = target.kind === 'app' ? appMemory(d0) : recipeMemory(recipe!, appsIn(catalog, src))
   const check = memoryCheck(mem.need, mem.min, freeMB(resources))
-  const command = useMemo(() => cliCommand(form), [form])
+  const command = useMemo(() => [cliCommand(form), ...planCli(uses)].join(' '), [form, uses])
+  const blocked = planBlock(plan, uses)
   // 服务端给的是目录里当前版本的要求；选了别的版本时交给服务端判断。
   const needs = target.kind === 'recipe' || !form.version || form.version === form.defaultVersion ? installNeedsPlatform(target.kind, details, recipe) : ''
   const required = form.plain.filter((p) => p.param.required && !p.param.generated && (p.param.default === undefined || p.param.default === ''))
   const optional = form.plain.filter((p) => !required.includes(p))
-  const isGateway = (a: { provides: string[] | null }) => (a.provides || []).includes('llm_gateway')
-  const gatewayApp = appsIn(catalog, PUBLIC).find(isGateway) || catalog?.apps.find(isGateway)
 
   const setPlain = (key: string, value: string) => setForm((f) => ({ ...f, plain: f.plain.map((p) => (p.key === key ? { ...p, value } : p)) }))
   const setPlatform = (name: string, value: string) => setForm((f) => ({ ...f, platform: f.platform.map((p) => (p.view.name === name ? { ...p, value } : p)) }))
-  const setLLM = (key: string, patch: Partial<LLMField>) => setForm((f) => ({ ...f, llm: f.llm.map((l) => (l.key === key ? { ...l, ...patch } : l)) }))
   const problemFor = (key: string) => problems.find((p) => p.key === key)?.message
 
   const submit = async (reuseData = false) => {
@@ -185,8 +207,17 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
     if (ps.length > 0) return
     setBusy(true)
     try {
-      const req = buildRequest(form)
+      const req = applyPlan(buildRequest(form), uses)
       if (reuseData) req.reuse_data = true
+      // 用现在的表单再读一次计划，按这次的结果决定能不能装。读失败（不是旧服务端）不拦，交给服务端检查。
+      const gen = ++planGen.current
+      try {
+        const pl = await fetchPlan(req)
+        if (gen === planGen.current) { setPlan(pl); setPlanErr(null) }
+        if (planBlock(pl, uses).length > 0) return
+      } catch (pe) {
+        if (gen === planGen.current) setPlanErr(pe as ApiError)
+      }
       const t = await api.post<TaskView>('/v1/catalog/install', req)
       refreshTasks()
       onStarted(t.id)
@@ -219,20 +250,9 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
             </div>
           </div>
         )}
-        {form.llm.map((l) => (
-          <LLMPicker
-            key={l.key}
-            field={l}
-            multi={form.llm.length > 1}
-            appName={details.find((x) => x.id === l.appId)?.name || l.appId}
-            problemFor={problemFor}
-            onChange={(patch) => setLLM(l.key, patch)}
-            onPlatform={() => toast('平台 Key 即将开放', '现在请用自己的 Key 或本机 New API')}
-            onInstallGateway={gatewayApp && gatewayApp.installed.length === 0 ? () => install({ kind: 'app', id: gatewayApp.id, catalog: sourceId(gatewayApp) }) : undefined}
-            gatewayName={gatewayApp?.name}
-            defaultModel={defaultModel(form)}
-          />
-        ))}
+        <NeedsBlock plan={plan} uses={uses} onUse={(k, v) => setUses((u) => ({ ...u, [k]: v }))}
+          onRegistered={(name) => { toast('已登记', name); setPlanSeq((x) => x + 1) }} />
+        {planErr && <p className="text-2xs text-muted-foreground" data-testid="plan-error">没能读到需要的服务（{planErr.message}），安装时由服务端检查。</p>}
         {required.map((p) => <ParamInput key={p.key} p={p} problem={problemFor(p.key)} onChange={(v) => setPlain(p.key, v)} />)}
         {optional.length > 0 && (
           <details className="group rounded-md border px-2.5 py-1.5" open={optional.some((p) => !!problemFor(p.key))}>
@@ -246,7 +266,7 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
           <details className="group rounded-md border px-2.5 py-1.5" open={form.platform.some((p) => !!problemFor('platform.' + p.view.name))} data-testid="platform-vars">
             <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">平台自动填的 {form.platform.length} 项（一般不用改）</summary>
             <div className="mt-2 flex flex-col gap-2.5 pb-1">
-              <p className="text-2xs text-muted-foreground">时区、下载源、默认模型这类底层设置，平台按这台机器自动填进应用，装好就能用。能改的只对这次安装生效。</p>
+              <p className="text-2xs text-muted-foreground">时区、下载源这类底层设置，平台按这台机器自动填进应用，装好就能用。能改的只对这次安装生效。</p>
               {form.platform.map((p) => <PlatformInput key={p.view.name} p={p} problem={problemFor('platform.' + p.view.name)} onChange={(v) => setPlatform(p.view.name, v)} />)}
             </div>
           </details>
@@ -257,6 +277,7 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
         </div>
         {needs && <UpgradeNeeded version={needs} />}
         <CopyLine text={command} />
+        <PlanBlocked reasons={blocked} />
         {err && (
           <div className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs" role="alert">
             <div className="font-medium text-danger">{err.code.startsWith('CAT-') ? err.code + ' · ' : ''}{err.message}</div>
@@ -280,7 +301,7 @@ function InstallFormView({ target, details, recipe, title, onClose, onStarted }:
       </div>
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" onClick={onClose}>取消</Button>
-        <Button onClick={() => submit()} disabled={busy || !!needs}>{busy && <Spinner />}{target.kind === 'recipe' ? '开始' : '安装'}</Button>
+        <Button onClick={() => submit()} disabled={busy || !!needs || blocked.length > 0}>{busy && <Spinner />}{target.kind === 'recipe' ? '开始' : '安装'}</Button>
       </div>
     </>
   )
@@ -326,74 +347,6 @@ function PlatformInput({ p, problem, onChange }: { p: PlatformField; problem?: s
   )
 }
 
-function LLMPicker({ field: l, multi, appName, problemFor, onChange, onPlatform, onInstallGateway, gatewayName, defaultModel }: {
-  field: LLMField
-  multi: boolean
-  appName: string
-  problemFor: (k: string) => string | undefined
-  onChange: (p: Partial<LLMField>) => void
-  onPlatform: () => void
-  onInstallGateway?: () => void
-  gatewayName?: string
-  defaultModel: string
-}) {
-  const label = (multi ? appName + ' · ' : '') + '模型'
-  const modelInput = (placeholder: string) => (
-    <Input id={'llm-model-' + l.appId} className="mono" autoComplete="off" placeholder={placeholder} value={l.model} onChange={(e) => onChange({ model: e.target.value })} aria-label="模型名" aria-invalid={!!problemFor(l.key + '.model')} />
-  )
-  if (l.fixed) {
-    return (
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium">{label}</span>
-        <div className="rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground">用本机的 {l.fixed}，配方会自动连好，装完在 {l.fixed} 里加一次上游 Key</div>
-        {modelInput('模型名，留空用 ' + defaultModel)}
-      </div>
-    )
-  }
-  const local = l.sources?.local_gateway
-  return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium">{label}</span>
-      <Tabs<LLMSource>
-        value={l.source}
-        label={label}
-        onChange={(s) => {
-          if (s === 'platform') onPlatform()
-          onChange({ source: s })
-        }}
-        items={[['own', '自己的 Key'], ['local_gateway', '本机 New API'], ['platform', '平台 Key']]}
-      />
-      {l.source === 'own' && (
-        <div className="flex flex-col gap-1.5">
-          <Input className="mono" autoComplete="off" placeholder="接口地址，例如 https://api.deepseek.com/v1" aria-label="接口地址" value={l.baseURL} onChange={(e) => onChange({ baseURL: e.target.value })} aria-invalid={!!problemFor(l.key + '.base_url')} />
-          <Input className="mono" type="password" autoComplete="off" placeholder="Key（DeepSeek / 通义 / OpenAI 兼容）" aria-label="Key" value={l.apiKey} onChange={(e) => onChange({ apiKey: e.target.value })} aria-invalid={!!problemFor(l.key + '.api_key')} />
-          {modelInput('模型名，例如 deepseek-chat')}
-        </div>
-      )}
-      {l.source === 'local_gateway' && (local?.available ? (
-        <div className="flex flex-col gap-1.5">
-          {local.apps.length > 1 && <Select aria-label="用哪个 New API" value={l.gatewayApp} onChange={(e) => onChange({ gatewayApp: e.target.value })} options={local.apps.map((a) => [a, a])} />}
-          {modelInput('模型名，留空用 ' + defaultModel)}
-          <span className="text-2xs text-muted-foreground">会在本机 {l.gatewayApp || 'New API'} 里建一把令牌给 {appName} 用</span>
-        </div>
-      ) : (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground">
-          <span>{local?.message || '本机还没有 New API'}</span>
-          {onInstallGateway && <Button variant="link" size="sm" className="h-auto p-0" onClick={onInstallGateway}>先装 {gatewayName}</Button>}
-        </div>
-      ))}
-      {l.source === 'platform' && (
-        <div className="flex items-center justify-between rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground">
-          登录后可用
-          <Button variant="link" size="sm" className="h-auto p-0" onClick={onPlatform}>登录</Button>
-        </div>
-      )}
-      {['', '.base_url', '.api_key', '.model'].map((s) => problemFor(l.key + s)).filter(Boolean).map((m) => <span key={m} className="text-2xs text-danger">{m}</span>)}
-      {l.hint && <span className="text-2xs text-muted-foreground">{l.hint}</span>}
-    </div>
-  )
-}
-
 // ---- 进度和结果 ----
 
 function TaskProgress({ task: t, title, onClose }: { task: TaskView; title: string; onClose: () => void }) {
@@ -411,7 +364,6 @@ function TaskProgress({ task: t, title, onClose }: { task: TaskView; title: stri
       ? { has_login: false, can_lan: false, recommend: 'tunnel', command: 'acornfox open ' + main.app }
       : undefined
   const openURL = mainView ? openableAddress(mainView) : main && !isLoopbackURL(main.url) ? main.url || '' : ''
-  const tokens = (t.apps || []).filter((a) => a.gateway_token)
   const heading = t.status === 'succeeded' ? title + ' 已装好' : t.status === 'failed' ? title + ' 没装好' : '正在安装 ' + title
   return (
     <>
@@ -450,9 +402,6 @@ function TaskProgress({ task: t, title, onClose }: { task: TaskView; title: stri
       )}
       {/* 总是渲染：改成局域网后 openHint 没了，这一块在原位置显示完成态。 */}
       {t.status === 'succeeded' && main && <OpenHintBlock className="mt-4" name={main.app} hint={openHint} openURL={openURL} onChanged={refreshApps} />}
-      {t.status === 'succeeded' && tokens.map((a) => (
-        <p key={a.app} className="mt-3 text-xs text-muted-foreground" data-testid="token-note">{gatewayTokenText(a.app, a.gateway_token!.provider)}</p>
-      ))}
       {t.status === 'succeeded' && <FirstLogins logins={t.first_login || []} apps={apps || undefined} />}
       {t.status === 'succeeded' && (t.user_steps?.length || 0) > 0 && (
         <div className="mt-3">
@@ -537,7 +486,10 @@ export function FirstLoginCard({ fl, title, url: urlProp }: { fl: FirstLogin; ti
   }
   const view = shown || fl
   const url = urlProp || fl.url
-  const hasSecret = fl.fields.some((f) => f.secret)
+  // 没有登录信息的应用（例如只在内部网络、没有网页的数据库）：服务端给的字段是空的，不显示这一块。
+  const fields = fl.fields || []
+  if (fields.length === 0) return null
+  const hasSecret = fields.some((f) => f.secret)
   return (
     <div className="rounded-md border p-2.5" data-testid="first-login">
       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
@@ -559,7 +511,7 @@ export function FirstLoginCard({ fl, title, url: urlProp }: { fl: FirstLogin; ti
             <CopyButton text={url} label="复制地址" />
           </div>
         )}
-        {view.fields.map((f, i) => (
+        {(view.fields || []).map((f, i) => (
           <div key={f.label + i} className="flex items-center gap-2 text-xs">
             <span className="w-16 shrink-0 truncate text-muted-foreground" title={f.label}>{f.label}</span>
             <span className="mono min-w-0 flex-1 truncate" data-secret={f.secret ? 'true' : undefined}>{f.value}</span>

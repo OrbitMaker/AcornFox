@@ -1,31 +1,36 @@
 // 概览：出问题时的提示（带“复制诊断给 AI”）、运行情况、资源、来源、访问地址（只本机的给怎么打开的说明）、
-// 经本机 New API 连模型时令牌不限额的提示、首次登录信息。
+// 首次登录信息。用旧格式清单装的应用，详情里带 legacy_note 时原样显示成一条提示。
 // 最上面两张小图：内存、CPU 的近 1 小时或 24 小时（GET /v1/metrics/apps/{app}/history，30 秒刷新一次）。
 // 历史只存在后台服务的内存里，重启后从头记；旧服务端没有这个接口时两张图不显示。
+// 用到的服务（GET /v1/apps/{app} 的 services）：需要的名字、类型、接的是哪条、状态；不是可用时最上面醒目提示。
+// 没有这个字段（旧服务端、旧清单装的应用）时不显示。
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Copy, FileText } from 'lucide-react'
+import { AlertTriangle, Copy, FileText, Info } from 'lucide-react'
 import { api } from '@/lib/api'
 import { appCharts } from '@/lib/apphistory'
 import { RANGE_TAB, type RangeKey } from '@/lib/dashboard'
 import { usePoll } from '@/lib/hooks'
-import { deployDiagnosisForAI, deriveStatus, failedDeployment, gatewayTokenText, liveSeq, loginAddress, oldVersionServing, openableAddress } from '@/lib/appstatus'
+import { deployDiagnosisForAI, deriveStatus, failedDeployment, liveSeq, loginAddress, oldVersionServing, openableAddress } from '@/lib/appstatus'
 import { copyText } from '@/lib/clipboard'
 import { mbText, pctText, sinceText } from '@/lib/format'
 import { appHref, go } from '@/lib/router'
-import type { AppHistory, FirstLogin } from '@/lib/types'
+import { TONE_BADGE, appServiceStatus, kindLabel } from '@/lib/services'
+import type { AppHistory, AppServiceUse, FirstLogin } from '@/lib/types'
 import { useConsole } from '@/state'
 import { KV } from '@/components/bits'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Alert } from '@/components/ui/controls'
 import { CopyLine } from '@/components/ui/copy'
 import { useToast } from '@/components/ui/toast'
 import { FirstLoginCard } from '../store/install-dialog'
+import { KindName } from '../prefs/service-form'
 import { TimeChart } from '../home/viz'
 import { OpenHintBlock } from './open-hint'
 import type { TabProps } from './app-page'
 
-export const EXPOSURE_TEXT: Record<string, string> = { local: '只本机', lan: '局域网', public: '公网', afx_cloud: 'AFX 云' }
+export const EXPOSURE_TEXT: Record<string, string> = { local: '只本机', lan: '局域网', public: '公网', afx_cloud: 'AFX 云', internal: '只在内部网络' }
 
 function useFirstLogin(app: string, fromCatalog: boolean) {
   const [fl, setFl] = useState<FirstLogin | null>(null)
@@ -72,6 +77,44 @@ function HistoryCharts({ app, running }: { app: string; running: boolean }) {
   )
 }
 
+// 用到的服务里不能用的，放在最上面提示。
+function ServicesAlert({ list }: { list: AppServiceUse[] }) {
+  const bad = list.map((u) => ({ u, st: appServiceStatus(u) })).filter((x) => x.st.tone !== 'success')
+  if (bad.length === 0) return null
+  return (
+    <Alert
+      tone={bad.some((x) => x.st.tone === 'danger') ? 'danger' : 'warning'}
+      icon={<AlertTriangle />}
+      title={bad.length === 1 ? '用到的服务不能用' : `有 ${bad.length} 项用到的服务不能用`}
+      action={<Button size="sm" variant="outline" onClick={() => go('#prefs/services')}>去看服务</Button>}
+    >
+      <span data-testid="services-alert">{bad.map(({ u, st }) => `${kindLabel(u.kind_label)}${u.service ? '（' + u.service + '）' : ''}：${st.text}`).join('；')}</span>
+    </Alert>
+  )
+}
+
+function ServicesCard({ list }: { list: AppServiceUse[] }) {
+  return (
+    <Card className="px-3.5 py-2" data-testid="app-services">
+      <div className="pt-1 text-xs font-medium">用到的服务</div>
+      <div className="divide-y">
+        {list.map((u) => {
+          const st = appServiceStatus(u)
+          return (
+            <div key={u.use} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 text-sm">
+              <span className="min-w-0 flex-1">
+                <KindName label={u.kind_label} kind={u.kind} /> <span className="mono text-2xs text-muted-foreground">{u.use}</span>
+              </span>
+              <span className="min-w-0 truncate text-xs">{u.service ? '接的是“' + u.service + '”' : '没接上'}</span>
+              <Badge variant={TONE_BADGE[st.tone]}>{st.text}</Badge>
+            </div>
+          )
+        })}
+      </div>
+    </Card>
+  )
+}
+
 export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
   const { installing } = useConsole()
   const toast = useToast()
@@ -97,6 +140,10 @@ export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
         <Alert tone="danger" icon={<AlertTriangle />} title="没在运行" action={<Button size="sm" variant="outline" onClick={() => go(appHref(a.name, 'logs'))}><FileText className="size-3.5" />看日志</Button>}>
           容器停了，系统会自动拉起；一直起不来就看日志
         </Alert>
+      )}
+      {a.services && a.services.length > 0 && <ServicesAlert list={a.services} />}
+      {typeof a.legacy_note === 'string' && a.legacy_note.trim() !== '' && (
+        <Alert icon={<Info />} title="说明"><span data-testid="legacy-note">{a.legacy_note}</span></Alert>
       )}
       {!!a.current_deployment && <HistoryCharts app={a.name} running={!!a.observed?.running} />}
       <div className="grid gap-3 md:grid-cols-3">
@@ -129,9 +176,9 @@ export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
           </div>
         </Card>
       </div>
+      {a.services && a.services.length > 0 && <ServicesCard list={a.services} />}
       {/* 总是渲染：改成局域网后 open_hint 没了，这一块在原位置显示完成态。 */}
       <OpenHintBlock name={a.name} hint={a.open_hint} openURL={openableAddress(a)} onChanged={reload} />
-      {a.gateway_token_from && <p className="text-xs text-muted-foreground" data-testid="token-note">{gatewayTokenText(a.name, a.gateway_token_from)}</p>}
       {!a.open_hint && (a.url || a.lan_url) && (
         <Card className="flex flex-col gap-2 p-3">
           {a.url && <CopyLine prompt={false} label="复制地址" text={a.url} />}

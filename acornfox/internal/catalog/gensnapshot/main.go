@@ -4,7 +4,11 @@
 // under -out. Nothing else under -out is touched. On a lint error it stops
 // and -out stays as it was.
 //
-//	go run ./internal/catalog/gensnapshot -src internal/catalog/testdata/good -serial 1 -out internal/catalog/snapshot
+// The defaults are what the snapshot is made from today, with paths relative
+// to internal/catalog (where go generate runs it):
+//
+//	go run ./gensnapshot                                      (= -src snapshotsrc -serial 4 -out snapshot)
+//	go run ./gensnapshot -src <catalog checkout> -serial <N>  (before a release, N above 4)
 package main
 
 import (
@@ -17,12 +21,12 @@ import (
 )
 
 func main() {
-	src := flag.String("src", "", "目录仓库的根目录（含 apps/、recipes/）")
-	serial := flag.Int64("serial", 1, "快照的发布序号")
+	src := flag.String("src", "snapshotsrc", "目录仓库的根目录（含 apps/、recipes/、service-types/）")
+	serial := flag.Int64("serial", 4, "快照的发布序号")
 	out := flag.String("out", "snapshot", "快照目录")
 	flag.Parse()
 	if *src == "" {
-		fmt.Fprintln(os.Stderr, "用法：gensnapshot -src 目录 [-serial N] [-out 快照目录]")
+		fmt.Fprintln(os.Stderr, "用法：gensnapshot [-src 目录] [-serial N] [-out 快照目录]")
 		os.Exit(2)
 	}
 	b, err := catalog.Build(*src, *serial)

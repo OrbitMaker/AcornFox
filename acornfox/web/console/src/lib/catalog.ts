@@ -1,5 +1,7 @@
 // 应用中心的数据整理：分类标签、搜索、内存检查、安装请求和对应的命令行写法。
 // 都是纯函数，页面只负责显示；单元测试见 catalog.test.ts。
+// 应用要用的服务不是表单里的设置项：它们由安装前的计划给出（lib/services.ts），
+// 选了哪条写进请求的 use。这里不认识任何一种服务，也不认识任何一个具体的应用。
 import type { AppDetail, CatalogApp, CatalogView, ParamView, PlatformVarView, Recipe, Resources, TaskView } from './types'
 import { mbText } from './format'
 
@@ -36,6 +38,32 @@ export function matchRecipe(r: Recipe, q: string): boolean {
 
 export function filterApps(apps: CatalogApp[], group: string, q: string): CatalogApp[] {
   return apps.filter((a) => (group === 'all' || groupOf(a.category) === group) && matchApp(a, q))
+}
+
+// ---- 旧格式的清单、空目录 ----
+
+// 目录里还是旧格式清单的应用（列表里 former 为 true）：这一版装不了，详情和安装都报这个编号（HTTP 409）。
+export const FORMER_CODE = 'CAT-INST-36'
+const FORMER_FALLBACK = '这是旧格式的清单，这一版装不了'
+
+// formerNote：应用或配方是旧格式的清单时给用户看的那句话（服务端的 note 原样用；没给时用一句通用的）；不是时为空串。
+export function formerNote(x: { former?: boolean; note?: string } | null | undefined): string {
+  if (x?.former !== true) return ''
+  return (typeof x.note === 'string' && x.note.trim()) || FORMER_FALLBACK
+}
+
+// isFormerFault：读详情或安装被拒绝的原因是“旧格式的清单”。只认编号：这个编号只有这一种意思，也不带 needs_platform。
+export function isFormerFault(e: unknown): boolean {
+  return !!e && typeof e === 'object' && (e as { code?: unknown }).code === FORMER_CODE
+}
+
+// storeEmpty：应用中心列表一个都没有时怎么说。用户没在搜索、目录里一个应用都没有：还没有可以安装的应用；
+// 搜索没结果：没找到。列表里有东西时为 null。
+export function storeEmpty(total: number, shown: number, q: string): { title: string; sub?: string; searching: boolean } | null {
+  if (shown > 0) return null
+  const s = q.trim()
+  if (!s && total === 0) return { title: '还没有可以安装的应用', sub: '应用按新格式上架后会出现在这里', searching: false }
+  return { title: s ? `没找到“${s}”` : '没找到', searching: true }
 }
 
 // 应用名的缩写和色相，用于没有图标时的图块。
@@ -101,22 +129,6 @@ export function recipeMemory(r: Recipe, apps: CatalogApp[]): { need: number; min
 
 // ---- 安装表单 ----
 
-export type LLMSource = 'own' | 'local_gateway' | 'platform'
-
-export interface LLMField {
-  appId: string
-  key: string // 请求里的参数名：单个应用是 llm，配方里是 <应用>.llm
-  label: string
-  hint?: string
-  fixed: string // 配方已经把它连到本机的这个网关（只能改模型）；空表示用户自己选
-  sources?: ParamView['llm']
-  source: LLMSource
-  baseURL: string
-  apiKey: string
-  model: string
-  gatewayApp: string
-}
-
 export interface PlainField {
   appId: string
   key: string // 请求里的参数名
@@ -138,30 +150,13 @@ export interface InstallForm {
   version: string // 空 = 目录里的当前版本
   defaultVersion: string
   plain: PlainField[]
-  llm: LLMField[]
   platform: PlatformField[] // 这次装的应用用到的平台变量（配方里几个应用合并，同名只列一次）
-}
-
-// defaultModel：没填模型名时用的默认模型（平台变量 llm.model.chat，用户在“平台自动填的”里改过就用改的；
-// 旧服务端没有就是 deepseek-chat）。
-export function defaultModel(f: InstallForm): string {
-  const p = f.platform.find((x) => x.view.name === 'llm.model.chat')
-  return p?.value.trim() || p?.base || 'deepseek-chat'
-}
-
-// recipeLinkTarget：配方里 app 的大模型参数被连到哪个应用（没有连就是空）。
-function recipeLinkTarget(r: Recipe | null, appId: string, d: AppDetail, key: string): string {
-  if (!r || !r.links) return ''
-  const viaUse = (d.uses || []).some((u) => u.kind === 'llm_gateway' && u.for_param === key)
-  if (!viaUse) return ''
-  const l = r.links.find((x) => x.to === appId && x.uses === 'llm_gateway')
-  return l ? l.from : ''
 }
 
 // newInstallForm：按应用详情（配方就是其中每个应用的详情）建表单的初始值。
 export function newInstallForm(kind: 'app' | 'recipe', id: string, details: AppDetail[], recipe: Recipe | null, catalog = PUBLIC): InstallForm {
   const prefix = (d: AppDetail) => (kind === 'recipe' ? d.id + '.' : '')
-  const form: InstallForm = { kind, id, catalog, version: '', defaultVersion: kind === 'app' && details[0] ? details[0].version : '', plain: [], llm: [], platform: [] }
+  const form: InstallForm = { kind, id, catalog, version: '', defaultVersion: kind === 'app' && details[0] ? details[0].version : '', plain: [], platform: [] }
   for (const d of details) {
     // 配方里已经装过、会被复用的应用不再填参数。
     if (kind === 'recipe' && d.installed.length > 0) {
@@ -174,16 +169,6 @@ export function newInstallForm(kind: 'app' | 'recipe', id: string, details: AppD
       form.platform.push({ view: v, base: v.value || '', value: v.value || '' })
     }
     for (const p of d.params) {
-      if (p.type === 'llm_provider') {
-        const fixed = recipeLinkTarget(recipe, d.id, d, p.key)
-        const localOK = !!p.llm?.local_gateway.available
-        form.llm.push({
-          appId: d.id, key: prefix(d) + p.key, label: p.label || '大模型', hint: p.hint, fixed, sources: p.llm,
-          source: fixed || localOK ? 'local_gateway' : 'own',
-          baseURL: '', apiKey: '', model: '', gatewayApp: p.llm?.local_gateway.apps?.[0] || '',
-        })
-        continue
-      }
       form.plain.push({ appId: d.id, key: prefix(d) + p.key, param: p, value: '' })
     }
   }
@@ -219,16 +204,6 @@ export function checkForm(f: InstallForm): FormProblem[] {
     else if (p.view.name.startsWith('mirror.') && !/^https?:\/\/[^\s@]+$/.test(v)) out.push({ key, message: `${p.view.label}要以 http:// 或 https:// 开头` })
     else if (p.view.name === 'tz' && !/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+){0,2}$/.test(v)) out.push({ key, message: '时区要写成 Asia/Shanghai 这样的名字' })
   }
-  for (const l of f.llm) {
-    if (l.fixed) continue
-    if (l.source === 'platform') out.push({ key: l.key, message: '平台 Key 即将开放，请先用自己的 Key 或本机 New API' })
-    if (l.source === 'local_gateway' && !l.sources?.local_gateway.available) out.push({ key: l.key, message: l.sources?.local_gateway.message || '本机还没有 New API' })
-    if (l.source === 'own') {
-      if (!/^https?:\/\/\S+$/.test(l.baseURL.trim())) out.push({ key: l.key + '.base_url', message: '接口地址要以 http:// 或 https:// 开头' })
-      if (!l.apiKey.trim()) out.push({ key: l.key + '.api_key', message: '请填写 Key' })
-      if (!l.model.trim()) out.push({ key: l.key + '.model', message: '请填写模型名' })
-    }
-  }
   return out
 }
 
@@ -240,6 +215,7 @@ export interface InstallRequest {
   params?: Record<string, unknown>
   platform?: Record<string, string> // 只放用户改过的平台变量
   reuse_data?: boolean // 接上以前同名应用留下的数据卷（CAT-INST-24 时用户确认后才发）
+  use?: Record<string, string> // 某个需要接哪条服务（计划里不止一个应用时，键是“应用实例名.需要的名字”）
 }
 
 // changedPlatform：用户改过的平台变量（和平台填的值不一样的）。
@@ -258,20 +234,6 @@ export function buildRequest(f: InstallForm): InstallRequest {
     const v = p.value.trim()
     if (v) params[p.key] = v
   }
-  for (const l of f.llm) {
-    const model = l.model.trim()
-    if (l.fixed) {
-      if (model) params[l.key] = { source: 'local_gateway', model }
-      continue
-    }
-    if (l.source === 'own') params[l.key] = { source: 'own', base_url: l.baseURL.trim(), api_key: l.apiKey.trim(), model }
-    else if (l.source === 'local_gateway') {
-      const c: Record<string, string> = { source: 'local_gateway' }
-      if (l.gatewayApp) c.app = l.gatewayApp
-      if (model) c.model = model
-      params[l.key] = c
-    }
-  }
   const req: InstallRequest = f.kind === 'app' ? { app: f.id } : { recipe: f.id }
   if (f.kind === 'app' && f.version && f.version !== f.defaultVersion) req.version = f.version
   if (f.catalog && f.catalog !== PUBLIC) req.catalog = f.catalog
@@ -282,32 +244,16 @@ export function buildRequest(f: InstallForm): InstallRequest {
 }
 
 // 命令行里不放密码和 Key 本身，用占位写法提醒自己填。
-const quote = (v: string) => (/^[A-Za-z0-9._:/@%+-]+$/.test(v) ? v : "'" + v.replace(/'/g, "'\\''") + "'")
+export const quote = (v: string) => (/^[A-Za-z0-9._:/@%+-]+$/.test(v) ? v : "'" + v.replace(/'/g, "'\\''") + "'")
 
 export function cliCommand(f: InstallForm): string {
   const parts = ['acornfox install', f.kind === 'app' ? f.id : '--recipe ' + f.id]
   if (f.catalog && f.catalog !== PUBLIC) parts.push('--catalog ' + quote(f.catalog))
   if (f.kind === 'app' && f.version && f.version !== f.defaultVersion) parts.push('--version ' + quote(f.version))
-  const llmSources = new Set(f.llm.filter((l) => !l.fixed || l.model.trim()).map((l) => (l.fixed ? 'local_gateway' : l.source)))
-  if (llmSources.size === 1) {
-    const s = [...llmSources][0]
-    parts.push('--llm ' + (s === 'local_gateway' ? 'local' : s))
-  }
   for (const p of f.plain) {
     const v = p.value.trim()
     if (!v) continue
     parts.push('--set ' + p.key + '=' + (p.param.type === 'secret' ? '<密码>' : quote(v)))
-  }
-  for (const l of f.llm) {
-    const model = l.model.trim()
-    if (!l.fixed && l.source === 'own') {
-      parts.push('--set ' + l.key + '.base_url=' + quote(l.baseURL.trim() || '<接口地址>'))
-      parts.push('--set ' + l.key + '.api_key=<你的 Key>')
-    }
-    if (!l.fixed && l.source === 'local_gateway' && l.gatewayApp && (l.sources?.local_gateway.apps?.length || 0) > 1) {
-      parts.push('--set ' + l.key + '.app=' + quote(l.gatewayApp))
-    }
-    if (model) parts.push('--set ' + l.key + '.model=' + quote(model))
   }
   for (const [k, v] of Object.entries(changedPlatform(f))) parts.push('--set platform.' + k + '=' + quote(v))
   return parts.join(' ')

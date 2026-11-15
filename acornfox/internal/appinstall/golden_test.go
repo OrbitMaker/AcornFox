@@ -1,49 +1,51 @@
 package appinstall
 
-// Golden samples of what the engine writes into the two published apps.
+// Golden samples of what the engine writes into apps.
 //
-// The files under testdata/golden/ record, for the New API and Hermes
-// manifests exactly as they were published (catalog serial 3, taken from
-// internal/catalog/testdata/published-3), what an install with fixed inputs
-// produces: the app's settings, every environment variable, every config
-// file with its content, mode and owner, the body of every init request,
-// and the first-login fields. The test compares them byte for byte.
+// The files under testdata/golden/ record, for the test material written
+// the current way (internal/catalog/testdata/good: an app that provides a
+// model API and issues a token per consumer, an app that needs one, the
+// recipe that wires them), what an install with fixed inputs produces: the
+// app's settings, every environment variable, every config file with its
+// content, mode and owner, the body of every init request, the credential
+// kept for each consumer (which keys, never the values) and the first-login
+// fields. The test compares them byte for byte.
 //
-// These samples stand for the behaviour of apps that are already published
-// and installed on users' machines. A published package can never be
-// changed, so the engine has to keep producing the same bytes from it. If
-// this test fails, the engine's output for a published app changed: treat
-// that as a breaking change and find out why, do not refresh the samples to
-// make the test pass. Refresh them only when the change is intended and has
-// been checked against the real apps (a changed escape in config.yaml or in
-// the setup request locks users out), and say so in the commit:
+// If this test fails, the engine's output changed: find out why before
+// refreshing the samples. Refresh them only when the change is intended (a
+// changed escape in a config file or in a set-up request locks users out),
+// and say so in the commit:
 //
-//	go test ./internal/appinstall -run TestGoldenPublishedApps -update
+//	go test ./internal/appinstall -run TestGoldenApps -update
 //
-// What is fixed: the manifests (published-3), the request, the machine's
-// platform settings, and the "random" passwords and keys (secretRand is a
+// What is fixed: the manifests, the request, the machine's platform
+// settings, and the "random" passwords and keys (secretRand is a
 // counter-mode SHA-256 stream; math/big's way of drawing from it is part of
 // the sample, so a Go release that changes crypto/rand.Int would show up
-// here as changed passwords and nothing else).
+// here as changed passwords and nothing else). The issue numbers are random
+// but show nowhere in the samples (the fake app's token values do not
+// depend on them).
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/acornfox/acornfox/internal/catalog"
+	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -69,24 +71,17 @@ func (r *fixedRand) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// publishedSnapshot is the published catalog (serial 3) rebuilt from its
-// source; the rebuilt index must be the published one, byte for byte, so the
-// packages in it are the published packages.
-func publishedSnapshot(t testing.TB) fs.FS {
+// formerManifest reads a manifest of the catalog published in the former
+// format (schema 2: a setting of the built-in model kind, a provides entry
+// whose steps were in platform code), kept as it was published in
+// testdata/former. This platform refuses to install it (CAT-INST-36).
+func formerManifest(t testing.TB, id string) string {
 	t.Helper()
-	root := filepath.Join("..", "catalog", "testdata", "published-3")
-	want, err := os.ReadFile(filepath.Join(root, "index.json"))
+	b, err := os.ReadFile(filepath.Join("testdata", "former", id+".yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := catalog.Build(filepath.Join(root, "src"), 3)
-	if err != nil {
-		t.Fatalf("the published catalog no longer builds: %v", err)
-	}
-	if !bytes.Equal(b.Index, want) {
-		t.Fatal("the published catalog no longer builds to the published index.json")
-	}
-	return bundleFS(b)
+	return string(b)
 }
 
 type goldenDoc struct {
@@ -113,6 +108,9 @@ type goldenApp struct {
 	Files      []goldenFile `json:"files"`
 	Init       []goldenCall `json:"init"`
 	FirstLogin FirstLogin   `json:"first_login"`
+	// Credentials: per need, the keys of the credential kept for it (never
+	// the values): only what is used later is kept.
+	Credentials map[string][]string `json:"credentials,omitempty"`
 }
 
 type goldenEnv struct {
@@ -158,12 +156,14 @@ func (r *initRecorder) wrap(next http.Handler) http.Handler {
 	})
 }
 
-func TestGoldenPublishedApps(t *testing.T) {
-	snap := publishedSnapshot(t)
+func TestGoldenApps(t *testing.T) {
+	snap := bundleFS(goodBundle(t))
 	scenarios := []struct {
 		name     string
 		platform PlatformEnv
 		req      Request
+		// service is a service the user registered before the install.
+		service *AddServiceRequest
 	}{
 		{
 			// Nothing given: defaults, generated secrets, a server in China
@@ -183,20 +183,24 @@ func TestGoldenPublishedApps(t *testing.T) {
 				Platform: map[string]string{"tz": "Europe/Berlin"}},
 		},
 		{
-			// Hermes with the user's own key; the key and the model hold a
-			// quote and a backslash, which config.yaml must escape exactly
-			// once inside the template's own quotes.
-			name:     "hermes-own-key",
+			// The consumer plugged into the user's own registered model API;
+			// the key and the model (the consumer's own setting: the
+			// service's model is not what it uses) hold a quote and a
+			// backslash, which config.yaml must escape exactly once inside
+			// the template's own quotes.
+			name:     "hermes-own-service",
 			platform: PlatformEnv{China: true, Cloud: "tencent", TZ: "Asia/Tokyo"},
-			req: Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{
-				"source": "own", "base_url": "https://api.example.com/v1", "api_key": `sk-"quoted"\back`, "model": `qwen-max:"v1"`}}},
+			req:      Request{App: "hermes-agent", Params: map[string]any{"model": `qwen-max:"v1"`}},
+			service: &AddServiceRequest{Name: "my-upstream", Kind: "llm_gateway", Values: map[string]string{
+				"base_url": "https://api.example.com/v1", "api_key": `sk-"quoted"\back`, "model": "not-this-one"}},
 		},
 		{
-			// The recipe: New API, then Hermes wired to it with a token
-			// issued in it and the platform's default model.
+			// The recipe: the provider, then the consumer wired to it with a
+			// token issued in it; the model is the one the user gave the
+			// consumer.
 			name:     "recipe-hermes-with-new-api",
-			platform: PlatformEnv{China: true, TZ: "Asia/Shanghai", ChatModel: "qwen-plus"},
-			req:      Request{Recipe: "hermes-with-new-api"},
+			platform: PlatformEnv{China: true, TZ: "Asia/Shanghai"},
+			req:      Request{Recipe: "hermes-with-new-api", Params: map[string]any{"hermes-agent.model": "qwen-plus"}},
 		},
 	}
 	for _, sc := range scenarios {
@@ -205,10 +209,21 @@ func TestGoldenPublishedApps(t *testing.T) {
 			secretRand = &fixedRand{seed: sc.name}
 			t.Cleanup(func() { secretRand = saved })
 
-			v, hits := setupSnapshot(t, snap, func(c *Config) { c.Platform = sc.platform })
+			// The server is reached at server.example and the apps are opened
+			// to the LAN: their address is http://server.example:<port>.
+			platform := sc.platform
+			platform.Host.PublicHost = "server.example"
+			v, hits := setupSnapshot(t, snap, func(c *Config) { c.Platform = platform })
 			v.e.SetHooks(Hooks{Reserve: v.w.reserve, Delete: v.w.delete, WithApp: v.w.withApp, Kick: v.w.kick,
-				URL: func(ctx context.Context, a state.App) string { return "http://server.example:8080/" + a.Name }})
+				Where: func(ctx context.Context, a state.App) platformvar.Where {
+					return platformvar.Where{Exposure: state.ExposureLAN, Port: a.PublicPort}
+				}})
 			ctx := context.Background()
+			if sc.service != nil {
+				if _, err := v.e.AddService(ctx, *sc.service); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			// Record the manifest's init requests as they arrive at the app.
 			recs := map[string]*initRecorder{}
@@ -221,7 +236,7 @@ func TestGoldenPublishedApps(t *testing.T) {
 				for _, st := range a.Manifest.Init {
 					rec.paths[st.HTTP.Path] = true
 				}
-				srv := httptest.NewServer(rec.wrap(v.newapi.handler()))
+				srv := httptest.NewServer(rec.wrap(v.tokens.handler()))
 				t.Cleanup(srv.Close)
 				v.w.mu.Lock()
 				v.w.servers[id] = srv
@@ -237,7 +252,7 @@ func TestGoldenPublishedApps(t *testing.T) {
 				t.Fatalf("the install went to the catalog source %d times", hits.Load())
 			}
 
-			doc := goldenDoc{Scenario: sc.name, Request: sc.req, Platform: sc.platform}
+			doc := goldenDoc{Scenario: sc.name, Request: sc.req, Platform: platform}
 			for _, r := range tv.Apps {
 				a, err := v.w.st.GetApp(ctx, r.App)
 				if err != nil {
@@ -281,6 +296,25 @@ func TestGoldenPublishedApps(t *testing.T) {
 					t.Fatal(err)
 				}
 				g.FirstLogin = fl
+				reg, err := v.e.Registry()
+				if err != nil {
+					t.Fatal(err)
+				}
+				bs, err := reg.ListBindings(ctx, state.BindingFilter{App: r.App})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, b := range bs {
+					if g.Credentials == nil {
+						g.Credentials = map[string][]string{}
+					}
+					keys := []string{}
+					for k := range b.Issued {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					g.Credentials[b.UseName+" → "+b.Service] = keys
+				}
 				doc.Apps = append(doc.Apps, g)
 			}
 
@@ -313,45 +347,67 @@ func TestGoldenPublishedApps(t *testing.T) {
 	}
 }
 
-// The published packages pass the strict manifest check and every other
-// check an install makes before it creates anything, both as rebuilt from
-// the published source and as built into the program.
-func TestPublishedPackagesPassStrictCheck(t *testing.T) {
-	for name, snap := range map[string]fs.FS{"published-3": publishedSnapshot(t), "built-in snapshot": catalog.Snapshot()} {
-		v, _ := setupSnapshot(t, snap, nil)
-		idx, _, err := v.e.Catalog().Index()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(idx.Apps) < 2 {
-			t.Fatalf("%s: %d apps", name, len(idx.Apps))
-		}
-		for _, ia := range idx.Apps {
-			a, err := v.e.appToInstall(context.Background(), PublicSource, ia.ID)
-			if err != nil {
-				t.Errorf("%s: %s %s is refused: %v", name, ia.ID, ia.Version, err)
-				continue
-			}
-			if err := v.e.checkManifest(a); err != nil {
-				t.Errorf("%s: %s %s: %v", name, ia.ID, ia.Version, err)
-			}
-			if need := v.e.needsPlatform(ia.MinPlatform, a.Manifest.Lifecycle.MinPlatform); need != "" {
-				t.Errorf("%s: %s asks for %s, which 0.5.0 is not", name, ia.ID, need)
-			}
-		}
-		l, err := v.e.List(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, a := range l.Apps {
-			if a.NeedsPlatform != "" {
-				t.Errorf("%s: %s is marked needs_platform %q on 0.5.0", name, a.ID, a.NeedsPlatform)
-			}
-		}
-		for _, r := range l.Recipes {
-			if r.NeedsPlatform != "" {
-				t.Errorf("%s: recipe %s is marked needs_platform %q on 0.5.0", name, r.ID, r.NeedsPlatform)
-			}
+// A manifest of the former format is refused before anything is created or
+// downloaded (CAT-INST-36), by the plan as by the install and the catalog
+// detail, whatever else is wrong or right with it; nothing of it is
+// installed. The catalog list marks such an app, and a recipe holding one.
+func TestFormerManifestsRefused(t *testing.T) {
+	recipes := []catalog.Recipe{{ID: "both", Schema: 1, Title: "两个", Summary: "两个一起装", Apps: []catalog.RecipeApp{{App: "new-api"}, {App: "hermes-agent"}},
+		Delivery: catalog.Delivery{Tier: "auto"}}}
+	// The index says 0.5.0 (as it was published): refused without even
+	// reading the package, which is not there.
+	b := fixtureBundle(t, 1, "", []fixApp{{manifest: formerManifest(t, "new-api"), noPackage: true}, {manifest: formerManifest(t, "hermes-agent"), noPackage: true}}, recipes, nil)
+	v, hits := setupSnapshot(t, bundleFS(b), nil)
+	ctx := context.Background()
+	isFormer := func(what string, err error) {
+		t.Helper()
+		var f *Fault
+		if !errors.As(err, &f) || f.Code != CodeLegacyManifest || f.HTTPStatus() != http.StatusConflict || f.NeedsPlatform != "" ||
+			!strings.Contains(f.Message, "旧格式") || !strings.Contains(f.Message, "按新格式重新上架") || strings.Contains(f.Message, "反馈") || f.Hint == "" {
+			t.Fatalf("%s: %v", what, err)
 		}
 	}
+	for _, id := range []string{"new-api", "hermes-agent"} {
+		_, err := v.e.StartInstall(ctx, Request{App: id})
+		isFormer(id, err)
+		pv, err := v.e.Plan(ctx, Request{App: id})
+		if err != nil || pv.CanInstall || len(pv.Problems) != 1 || pv.Problems[0].Code != CodeLegacyManifest {
+			t.Fatalf("%s plan: %+v %v", id, pv, err)
+		}
+		_, err = v.e.Detail(ctx, id)
+		isFormer(id+" detail", err)
+	}
+	_, err := v.e.StartInstall(ctx, Request{Recipe: "both"})
+	isFormer("recipe", err)
+	list, err := v.e.List(ctx)
+	if err != nil || len(list.Apps) != 2 || len(list.Recipes) != 1 {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	for _, a := range list.Apps {
+		if !a.Former || a.Note != FormerNote || a.NeedsPlatform != "" {
+			t.Fatalf("list app %+v", a)
+		}
+	}
+	if r := list.Recipes[0]; !r.Former || r.Note != FormerNote {
+		t.Fatalf("list recipe %+v", r)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("asked the catalog source %d times", hits.Load())
+	}
+	nothingCreated(t, v)
+
+	// An index that claims the current platform but a package whose
+	// manifest is of the former format: refused once the package is read,
+	// before its schema is checked (not "the catalog is broken").
+	b = fixtureBundle(t, 1, "", []fixApp{{manifest: formerManifest(t, "new-api"), indexMin: catalog.BasePlatform}}, nil, nil)
+	v, _ = setupSnapshot(t, bundleFS(b), nil)
+	_, err = v.e.StartInstall(ctx, Request{App: "new-api"})
+	isFormer("package", err)
+	if !strings.Contains(err.Error(), "第 2 版") {
+		t.Fatalf("which format: %v", err)
+	}
+	if list, _ := v.e.List(ctx); list.Apps[0].Former {
+		t.Fatal("the list goes by the index, which says the current platform")
+	}
+	nothingCreated(t, v)
 }

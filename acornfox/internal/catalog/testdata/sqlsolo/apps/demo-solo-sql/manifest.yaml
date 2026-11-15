@@ -1,0 +1,129 @@
+# Test material: an app that provides a database-shaped service to one
+# consumer only (max_consumers: 1). Deleting a consumer with its data runs
+# purge after revoke; an old credential that fails its check stops the
+# reinstall (on_check_fail: stop); a readiness check says whether the
+# service can be used now; the health check also compares the command's
+# output (expect_stdout). Not a real app: the commands and the image are
+# made up.
+id: demo-solo-sql
+schema: 3
+source: official
+maintainer: acornfox
+
+app:
+  name: 样例独占数据库
+  summary: 只给一个使用方用的样例数据库，只为测试清单格式
+  category: database
+  icon: icon.svg
+  homepage: https://example.com/demo-solo-sql
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64]
+
+release:
+  version: v1.0.0
+  images:
+    - name: app
+      repository: example/demo-solo-sql
+      tag: v1.0.0
+      digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+
+endpoints:
+  - name: db
+    port: 5000
+    protocol: tcp
+    primary: true
+    health:
+      exec: [demo-sql-ping, --host, 127.0.0.1, --port, "5000"]
+      expect_stdout: PONG
+      timeout_s: 120
+
+exposure:
+  default: internal
+
+volumes:
+  - name: data
+    path: /var/lib/demo-sql
+    backup: true
+
+params:
+  - key: admin_password
+    type: secret
+    generate: { length: 32, charset: alnum }
+    hidden: true
+    editable: never
+
+env:
+  - { key: DEMO_SQL_ADMIN_PASSWORD, from: params.admin_password, secret: true }
+
+provides:
+  - kind: demo_sql
+    endpoint: db
+    max_consumers: 1
+    issue_vars:
+      database: "af_{{issue.id}}"
+      username: "af_{{issue.id}}"
+      password: { generate: { length: 32, charset: alnum }, secret: true }
+    values:
+      host: "{{self.host}}"
+      port: "{{self.port}}"
+      database: { issued: database }
+      username: { issued: username }
+      password: { issued: password, secret: true }
+    issue:
+      - name: create
+        exec:
+          command: [demo-sql, --admin, --on-error-stop]
+          env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+          stdin: |
+            CREATE ROLE "{{issue.username}}" LOGIN PASSWORD '{{issue.password}}';
+            CREATE DATABASE "{{issue.database}}" OWNER "{{issue.username}}";
+    revoke:
+      - name: lock
+        exec:
+          command: [demo-sql, --admin, --on-error-stop]
+          env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+          stdin: |
+            ALTER ROLE "{{issued.username}}" NOLOGIN;
+          finish_if: { exit: [3] }
+    purge:
+      - name: drop
+        exec:
+          command: [demo-sql, --admin, --on-error-stop]
+          env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+          stdin: |
+            DROP DATABASE IF EXISTS "{{issued.database}}" WITH (FORCE);
+            DROP ROLE IF EXISTS "{{issued.username}}";
+          timeout_s: 120
+          finish_if: { exit: [3] }
+    check:
+      - name: connect
+        exec:
+          command: [demo-sql, --host, "{{self.host}}", --user, "{{issued.username}}", --database, "{{issued.database}}", --ping]
+          env: { DEMO_SQL_PASSWORD: "{{issued.password}}" }
+    on_check_fail: stop
+    ready:
+      say: 样例数据库还没建好管理账号：重装一次这个应用
+      steps:
+        - name: count
+          exec:
+            command: [demo-sql, --host, "{{self.host}}", --admin, --json, --count-roles]
+            env: { DEMO_SQL_PASSWORD: "{{params.admin_password}}" }
+            save:
+              roles: data.roles
+        - name: at-least-one
+          exec:
+            command: [demo-sql, --at-least, "1", --count, "{{saved.roles}}"]
+
+delivery:
+  tier: auto
+  minutes: 1
+
+uninstall:
+  data: [volumes.data]

@@ -1,0 +1,13 @@
+schema: 1
+kind: smtp
+label: 邮箱（发信）
+summary: 给应用发通知邮件用的发信服务器
+fields:
+  - { key: host, label: 服务器地址, type: string, required: true }
+  - { key: port, label: 端口, type: int, default: 587 }
+  - { key: username, label: 账号, type: string }
+  - { key: password, label: 密码, type: string, secret: true }
+  - { key: from, label: 发件人地址, type: string }
+  - { key: tls, label: 加密方式, type: enum, options: [starttls, tls, none], default: starttls }
+test:
+  tcp: { host: "{{host}}", port: "{{port}}" }

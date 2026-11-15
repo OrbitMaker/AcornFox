@@ -4,7 +4,7 @@ package main
 // runtime is detected, how the gateway is prepared and which self checks run.
 // "acornfox serve" (macOS, Windows) can install the built-in runtime; the
 // Linux server only detects Docker through the runner (install.sh installs
-// Docker and builds the Caddy image).
+// Docker and checks the entry proxy image).
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/acornfox/acornfox/internal/apiserver"
 	"github.com/acornfox/acornfox/internal/cli"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/reconcile"
 	"github.com/acornfox/acornfox/internal/runner"
@@ -39,6 +42,9 @@ type setupDeps struct {
 	LANEnabled func() bool
 	Log        io.Writer
 	Relay      *lanForwarder // nil unless the LAN relay is configured
+	// Proxy is the entry proxy (startServer sets it); the self checks ask
+	// it whether it works instead of probing a particular proxy.
+	Proxy edge.Proxy
 }
 
 func newSetupManager(d setupDeps, rec *reconcile.Reconciler) *setup.Manager {
@@ -80,51 +86,28 @@ func newSetupManager(d setupDeps, rec *reconcile.Reconciler) *setup.Manager {
 	})
 }
 
-// edgeWait bounds the wait for the Caddy container in the setup.
+// edgeWait bounds the wait for the entry proxy container in the setup.
 var edgeWait = 2 * time.Minute
 
-// edgePreparer pulls the Caddy image with progress (desktop) and waits until
-// the reconciler has the Caddy container running.
+// edgePreparer makes sure the entry proxy image is there and waits until the
+// reconciler has the entry proxy container running. On macOS and Windows a
+// missing image is loaded from the release's entry package (the same file
+// the Linux install script loads, from the same place as the program,
+// checked against the release's SHA256SUMS); it never comes from an image
+// registry. On the Linux server (d.Docker nil) the scripts load it.
 func edgePreparer(d setupDeps, rec *reconcile.Reconciler) setup.EdgePreparer {
 	return func(ctx context.Context, r setup.Reporter) (string, error) {
-		if d.Options.EdgeMode == "" || d.Options.EdgeMode == edgeModeOff {
-			return "宿主机 Caddy", nil
-		}
 		if d.Docker != nil && !d.Docker.EdgeImagePresent(ctx) {
-			it := setup.Item{ID: "caddy-image", Title: "Caddy 镜像", State: setup.StateRunning, TotalBytes: 50 << 20}
-			r.Item(it)
-			var last time.Time
-			var lastDone int64
-			pctx := runner.WithPullProgress(ctx, func(src string, done, total int64) {
-				if time.Since(last) < time.Second {
-					return
+			if err := importEdgePackage(ctx, d, r); err != nil {
+				r.Item(setup.Item{ID: "edge-image", Title: "入口镜像", State: setup.StateFailed})
+				var f *setup.Fault
+				if errors.As(err, &f) {
+					return "", f
 				}
-				if !last.IsZero() {
-					it.SpeedBps = int64(float64(done-lastDone) / time.Since(last).Seconds())
-				}
-				last, lastDone = time.Now(), done
-				it.Source, it.DoneBytes = src, done
-				if total > 0 {
-					it.TotalBytes = total
-				}
-				r.Item(it)
-			})
-			if _, err := d.Docker.PrepareEdgeImage(pctx); err != nil {
-				if ctx.Err() != nil {
-					return "", ctx.Err()
-				}
-				if runner.IsPullStalled(err) {
-					return "", setup.Faultf("SETUP-NET-02", err, "Caddy 镜像下载没有进展")
-				}
-				if pullNetworkError(err) {
-					return "", setup.Faultf("SETUP-NET-01", err, "Caddy 镜像的下载源都连不上")
-				}
-				return "", setup.Faultf("SETUP-EDGE-01", err, "Caddy 镜像没有下载下来")
+				return "", setup.Faultf("SETUP-EDGE-01", err, "入口镜像没有准备好（故障编号 %s）", edge.FaultImageMissing)
 			}
-			it.State, it.DoneBytes, it.SpeedBps, it.Detail = setup.StateDone, it.TotalBytes, 0, "已就绪"
-			r.Item(it)
 		}
-		r.Item(setup.Item{ID: "caddy", Title: "网关容器", State: setup.StateRunning})
+		r.Item(setup.Item{ID: "edge", Title: "网关容器", State: setup.StateRunning})
 		deadline := time.Now().Add(edgeWait)
 		for !rec.EnsureEdge(ctx) {
 			if ctx.Err() != nil {
@@ -136,8 +119,8 @@ func edgePreparer(d setupDeps, rec *reconcile.Reconciler) setup.EdgePreparer {
 			}
 			time.Sleep(2 * time.Second)
 		}
-		r.Item(setup.Item{ID: "caddy", Title: "网关容器", State: setup.StateDone, Detail: "运行中"})
-		return "Caddy " + runner.EdgeCaddyVersion + " · 运行中", nil
+		r.Item(setup.Item{ID: "edge", Title: "网关容器", State: setup.StateDone, Detail: "运行中"})
+		return "入口 " + edge.ImageVersion + " · 运行中", nil
 	}
 }
 
@@ -151,10 +134,10 @@ func setupChecks(d setupDeps, rec *reconcile.Reconciler) func(context.Context) [
 		dockerOK, detail := checkDocker(ctx, d)
 		add(setup.Check{ID: "docker", Title: "Docker 能创建和删除容器", OK: dockerOK, Required: true, Detail: detail, Code: code(dockerOK, "SETUP-CHK-02")})
 
-		edge := d.Options.EdgeMode != "" && d.Options.EdgeMode != edgeModeOff
-		if edge {
-			// 2. The Caddy admin gateway answers only with the token, 2019 stays closed.
-			adminOK, detail := checkEdgeAdmin(ctx, d.Options.EdgeAdminPort)
+		if d.Options.EdgeMode != "" {
+			// 2. The proxy's management endpoint answers only with the token
+			// (the proxy's own Health decides what that takes).
+			adminOK, detail := checkEdgeAdmin(ctx, d)
 			adminCode := "SETUP-CHK-03"
 			if !adminOK && platform.GOOS == "windows" {
 				// The edge runs but its 127.0.0.1 port does not reach Windows:
@@ -211,12 +194,16 @@ func checkDocker(ctx context.Context, d setupDeps) (bool, string) {
 		return true, "通过执行器"
 	}
 	c := d.Docker.Client()
-	img := runner.EdgeImagePublic
-	if _, err := c.ImageInspect(ctx, runner.EdgeImageLocal); err == nil {
-		img = runner.EdgeImageLocal
+	// Any image already on this computer will do (nothing is downloaded):
+	// the edge container's, or else the first local image.
+	img, err := d.Docker.LocalImageForCheck(ctx)
+	if err != nil {
+		return false, "找不到可以用来试建容器的本地镜像：" + err.Error()
 	}
 	name := "acornfox-selfcheck-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	created, err := c.ContainerCreate(ctx, dockerclient.ContainerCreateOptions{Name: name, Config: &container.Config{Image: img}})
+	// The container is never started; an explicit command keeps the create
+	// working with images that declare none (Docker refuses those).
+	created, err := c.ContainerCreate(ctx, dockerclient.ContainerCreateOptions{Name: name, Config: &container.Config{Image: img, Cmd: []string{"true"}}})
 	if err != nil {
 		return false, "创建测试容器失败：" + err.Error()
 	}
@@ -226,21 +213,19 @@ func checkDocker(ctx context.Context, d setupDeps) (bool, string) {
 	return true, ""
 }
 
-func checkEdgeAdmin(ctx context.Context, port int) (bool, string) {
-	cl := &http.Client{Timeout: 3 * time.Second}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/config/", nil)
-	resp, err := cl.Do(req)
-	if err != nil {
-		return false, "管理网关没有应答：" + err.Error()
+// edgeHealthTimeout bounds one Health call of the self checks.
+var edgeHealthTimeout = 8 * time.Second
+
+func checkEdgeAdmin(ctx context.Context, d setupDeps) (bool, string) {
+	if d.Proxy == nil {
+		return false, "网关没有接上"
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		return false, fmt.Sprintf("不带令牌访问返回 %d（应为 403）", resp.StatusCode)
+	hctx, cancel := context.WithTimeout(ctx, edgeHealthTimeout)
+	defer cancel()
+	if h := d.Proxy.Health(hctx); !h.OK() {
+		return false, h.Reason
 	}
-	if dialOK("127.0.0.1", 2019) {
-		return false, "Caddy 默认管理口 2019 开着"
-	}
-	return true, "127.0.0.1:" + strconv.Itoa(port)
+	return true, "127.0.0.1:" + strconv.Itoa(d.Options.EdgeAdminPort)
 }
 
 func checkPorts(ctx context.Context, d setupDeps, rec *reconcile.Reconciler) (bool, string) {
@@ -317,18 +302,6 @@ func checkLAN(ctx context.Context, d setupDeps, rec *reconcile.Reconciler) (bool
 	return false, fmt.Sprintf("%s:%d 连不上，本机能连（防火墙或运行环境只绑定了 127.0.0.1）", lan, port)
 }
 
-// pullNetworkError reports a pull that failed because no source could be
-// reached (as opposed to a missing image or a Docker error).
-func pullNetworkError(err error) bool {
-	m := strings.ToLower(err.Error())
-	for _, p := range []string{"connection refused", "no such host", "i/o timeout", "tls handshake timeout", "network is unreachable", "connection reset"} {
-		if strings.Contains(m, p) {
-			return true
-		}
-	}
-	return false
-}
-
 // linuxInstallEnv is where install.sh records the Linux server's network
 // (ACORNFOX_IN_CHINA, ACORNFOX_CLOUD); tests point it elsewhere.
 var linuxInstallEnv = "/etc/acornfox/install.env"
@@ -341,7 +314,7 @@ func setupNetwork(dataDir string) platform.Network {
 	if china, ok := platform.LinuxInstallChina(linuxInstallEnv); ok {
 		n := platform.Network{China: china, Source: "install.env"}
 		if china {
-			n.Mirrors = runner.CloudRegistryMirrors(platform.LinuxInstallCloud(linuxInstallEnv))
+			n.Mirrors = runner.WithUserMirrors(runner.CloudRegistryMirrors(platform.LinuxInstallCloud(linuxInstallEnv)), runner.DaemonMirrorHosts(daemonConfigFile))
 		}
 		return n
 	}
@@ -477,4 +450,32 @@ func (runnerRuntime) StartDockerDesktop(context.Context) error {
 }
 func (runnerRuntime) Builtin(context.Context, setup.StartOptions, setup.Reporter) (setup.Detection, error) {
 	return setup.Detection{}, setup.Faultf("SETUP-RT-03", nil, "Linux 服务器请用 install.sh 安装 Docker")
+}
+
+// importEdgePackage downloads the entry package for this program's version
+// and the Docker daemon's architecture and loads it (desktop setup).
+func importEdgePackage(ctx context.Context, d setupDeps, r setup.Reporter) error {
+	arch := "amd64"
+	if info, err := d.Docker.Client().Info(ctx, dockerclient.InfoOptions{}); err == nil {
+		switch strings.ToLower(info.Info.Architecture) {
+		case "aarch64", "arm64":
+			arch = "arm64"
+		}
+	}
+	dl := &setup.Downloader{Dir: filepath.Join(d.DataDir, "runtime", "downloads")}
+	path, err := dl.FetchEdgePackage(ctx, cli.Version, arch, setupNetwork(d.DataDir).China, nil, r.Item)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	r.Item(setup.Item{ID: "edge-image", Title: "入口镜像", State: setup.StateRunning, Detail: "导入中"})
+	if err := d.Docker.ImportEdgeImage(ctx, f); err != nil {
+		return err
+	}
+	r.Item(setup.Item{ID: "edge-image", Title: "入口镜像", State: setup.StateDone, Detail: edge.ImageVersion})
+	return nil
 }

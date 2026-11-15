@@ -1,0 +1,15 @@
+# Redis 缓存。一个 Redis 只给一个使用方用（提供它的应用写 max_consumers: 1），
+# 所以这里的项都是这台 Redis 自己的，不按使用方单独发；库号由使用方自己选，不在这里。
+# 用户也可以把自己已有的 Redis 登记成一条（有的自建 Redis 没设密码，所以密码不是必须的）。
+schema: 1
+kind: redis
+label: Redis 缓存
+summary: 一个 Redis，给要用缓存或消息队列的应用用
+fields:
+  - { key: host, label: 地址, type: string, required: true, hint: Redis 服务器的主机名或 IP，不带端口 }
+  - { key: port, label: 端口, type: int, default: 6379 }
+  - { key: username, label: 账号, type: string, hint: 没开账号功能的 Redis 填 default 或留空 }
+  - { key: password, label: 密码, type: string, secret: true, hint: 没设密码就留空 }
+  - { key: url, label: 连接串, type: string, secret: true, hint: 形如 redis://default:密码@地址:端口，可以不填 }
+test:
+  tcp: { host: "{{host}}", port: "{{port}}" }

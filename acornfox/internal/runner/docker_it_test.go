@@ -17,6 +17,12 @@ import (
 	"github.com/moby/moby/client"
 )
 
+// These integration tests (ACORNFOX_DOCKER_IT=1) create containers that carry
+// the platform's labels. Do not run them on a machine where an AcornFox
+// service is already running: its reconciler removes labelled containers it
+// does not know about every 30 seconds, and the tests then fail at random
+// with exit code 137. Run them on a machine with Docker and no AcornFox.
+
 // itBaseImage must already be present on the devbox (checked via docker images).
 const itBaseImage = "alpine:3.22"
 

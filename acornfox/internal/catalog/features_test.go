@@ -3,11 +3,11 @@ package catalog
 import (
 	"crypto/ed25519"
 	"encoding/json"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -70,6 +70,10 @@ func schemaFeatureKeys(kind string, root map[string]any) []string {
 		if items, ok := node["items"].(map[string]any); ok {
 			walk(items, path+"/*")
 		}
+		// A map whose values the schema describes: each value is "/*".
+		if each, ok := node["additionalProperties"].(map[string]any); ok {
+			walk(each, path+"/*")
+		}
 	}
 	walk(root, "")
 	sort.Strings(out)
@@ -129,7 +133,7 @@ func TestFeatureTableCoversSchemas(t *testing.T) {
 		}
 	}
 	if len(Features()) != len(featureTable) {
-		t.Errorf("Features() 有 %d 行，表里 %d 行", len(Features()), len(featureTable))
+		t.Errorf("Features() 有 %d 行，表里共 %d 行", len(Features()), len(featureTable))
 	}
 }
 
@@ -141,9 +145,9 @@ func TestFeatureTableCatchesUnregistered(t *testing.T) {
 	props["sidecars"] = map[string]any{"type": "array", "items": map[string]any{"type": "object",
 		"properties": map[string]any{"image": map[string]any{"type": "string"}}}}
 	proto := props["endpoints"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)["protocol"].(map[string]any)
-	proto["enum"] = append(proto["enum"].([]any), "tcp")
+	proto["enum"] = append(proto["enum"].([]any), "udp")
 	got := strings.Join(missingFeatures("manifest", root), ",")
-	want := "manifest:/endpoints/*/protocol=tcp,manifest:/sidecars,manifest:/sidecars/*,manifest:/sidecars/*/image"
+	want := "manifest:/endpoints/*/protocol=udp,manifest:/sidecars,manifest:/sidecars/*,manifest:/sidecars/*/image"
 	if got != want {
 		t.Fatalf("没登记的应该是 %s，得到 %s", want, got)
 	}
@@ -154,15 +158,30 @@ func TestFeatureTableCatchesUnregistered(t *testing.T) {
 	}
 }
 
-func TestEverythingPublishedNeedsOnlyBasePlatform(t *testing.T) {
+// The table starts at format 3: every row is BasePlatform. Exec steps,
+// dedicated uses and the other writings this platform does not carry out
+// yet are BasePlatform too: they are refused at install (PendingFeatures),
+// not given a higher version.
+// The format's first manifests (the drafts in testdata/good) need exactly
+// BasePlatform.
+func TestTableStartsAtBasePlatform(t *testing.T) {
+	if BasePlatform != "0.6.0" || featureSince["manifest:/schema="+strconv.Itoa(ManifestSchema)] != BasePlatform {
+		t.Fatalf("BasePlatform = %s，schema=%d 那一行 %q", BasePlatform, ManifestSchema, featureSince["manifest:/schema="+strconv.Itoa(ManifestSchema)])
+	}
 	for _, f := range Features() {
-		if f.Key != "" && f.Since != BasePlatform {
-			// Not wrong in itself; it lists what needs more than the base
-			// release. The first such rows were the per-architecture image
-			// archives (0.5.1); TestLintPerArchClean checks that recipes
-			// using them go to recipes_v2. Whoever adds more: check the
-			// docs that say which version a feature comes with.
-			t.Logf("%s 从 %s 起有", f.Key, f.Since)
+		if f.Since != BasePlatform {
+			t.Errorf("%s 从 %s 起有：第 3 版的表里只能是 %s", f.Key, f.Since, BasePlatform)
+		}
+	}
+	for _, key := range []string{"manifest:/init/*/exec", "manifest:/provides/*/issue/*/exec/stdin", "manifest:/provides/*/check/*/exec/save/*/stdout=true",
+		"manifest:/provides/*/revoke/*/exec/finish_if/exit/*", "manifest:/endpoints/*/protocol=tcp", "manifest:/exposure/default=internal",
+		"manifest:/provides/*/issue_vars/*/generate/length", "manifest:/provides/*/values/*/template", "manifest:/endpoints/*/health/tcp=true",
+		"manifest:/uses/*/dedicated", "manifest:/provides/*/max_consumers", "manifest:/provides/*/purge/*/exec/finish_if/exit/*",
+		"manifest:/provides/*/purge/*/http/finish_if/status", "manifest:/provides/*/on_check_fail=stop", "manifest:/provides/*/on_check_fail=reissue",
+		"manifest:/provides/*/ready/say", "manifest:/provides/*/ready/steps/*/http/method=GET", "manifest:/provides/*/ready/steps/*/exec/save/*/stdout",
+		"manifest:/endpoints/*/health/expect_stdout"} {
+		if featureSince[key] != BasePlatform {
+			t.Errorf("%s 要从 %s 起有，表里是 %q", key, BasePlatform, featureSince[key])
 		}
 	}
 	for _, v := range PlatformVars {
@@ -171,7 +190,7 @@ func TestEverythingPublishedNeedsOnlyBasePlatform(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"new-api", "hermes-agent"} {
-		raw, err := os.ReadFile(filepath.Join("testdata", "published-3", "src", "apps", id, manifestName))
+		raw, err := os.ReadFile(filepath.Join("testdata", "good", "apps", id, manifestName))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -216,13 +235,13 @@ func TestManifestMinPlatform(t *testing.T) {
 		}
 	}
 	if hit == nil || hit.Level != LevelError || hit.Path != "/lifecycle/min_platform" ||
-		!strings.Contains(hit.Message, "/container/shm_mb") || !strings.Contains(hit.Message, "9.9.9") || !strings.Contains(hit.Message, "0.5.0") {
+		!strings.Contains(hit.Message, "/container/shm_mb") || !strings.Contains(hit.Message, "9.9.9") || !strings.Contains(hit.Message, "0.6.0") {
 		t.Fatalf("要报 %s 并写明原因：%+v", CodeMinPlatform, r.Problems)
 	}
-	if info := r.MinPlatform.Apps["new-api"]; info.Declared != "0.5.0" || info.Computed != "9.9.9" || info.Required() != "9.9.9" || len(info.Reasons) != 1 {
+	if info := r.MinPlatform.Apps["new-api"]; info.Declared != "0.6.0" || info.Computed != "9.9.9" || info.Required() != "9.9.9" || len(info.Reasons) != 1 {
 		t.Fatalf("报告里的版本 %+v", info)
 	}
-	if info := r.MinPlatform.Apps["hermes-agent"]; info.Declared != "0.5.0" || info.Computed != "0.5.0" || len(info.Reasons) != 0 {
+	if info := r.MinPlatform.Apps["hermes-agent"]; info.Declared != "0.6.0" || info.Computed != "0.6.0" || len(info.Reasons) != 0 {
 		t.Fatalf("没用新写法的应用 %+v", info)
 	}
 	if _, err := Build(dir, 1); CodeOf(err) != CodeBuildLint {
@@ -234,7 +253,7 @@ func TestManifestMinPlatform(t *testing.T) {
 		d := copyTree(t)
 		f := filepath.Join(d, "apps", "new-api", manifestName)
 		edit(t, f, "endpoints:\n", "container:\n  shm_mb: 128\n\nendpoints:\n")
-		edit(t, f, `min_platform: "0.5.0"`, `min_platform: "`+v+`"`)
+		edit(t, f, `min_platform: "0.6.0"`, `min_platform: "`+v+`"`)
 		r, err := Lint(d)
 		if err != nil || codes(r)[CodeMinPlatform] != 0 {
 			t.Fatalf("写 %s 不该报：%+v %v", v, r.Problems, err)
@@ -281,6 +300,22 @@ func TestManifestMinPlatformEnumValueAndPlatformVar(t *testing.T) {
 	}
 }
 
+// Declared lower than what the format itself starts at, with nothing in
+// particular raising it: CAT-LINT-17 says so, not a list of no reasons.
+func TestMinPlatformBelowTheFormat(t *testing.T) {
+	dir := copyTree(t)
+	edit(t, filepath.Join(dir, "apps", "new-api", manifestName), `min_platform: "0.6.0"`, `min_platform: "0.5.0"`)
+	r, err := Lint(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := problemsWith(r, CodeMinPlatform)
+	if len(hits) != 1 || !strings.Contains(hits[0].Message, "最低就要 AcornFox 0.6.0") || strings.Contains(hits[0].Message, "：。") ||
+		!strings.Contains(hits[0].Message, `"0.6.0"`) {
+		t.Fatalf("%+v", r.Problems)
+	}
+}
+
 func TestRecipeMinPlatform(t *testing.T) {
 	// The recipe's own syntax.
 	withFeature(t, "recipe:/apps/*/preset", "9.9.9")
@@ -288,7 +323,7 @@ func TestRecipeMinPlatform(t *testing.T) {
 	file := filepath.Join(dir, "recipes", "new-api", recipeName)
 	edit(t, file, "  - app: new-api\n", "  - app: new-api\n    preset: { admin_username: root }\n")
 	raw, _ := os.ReadFile(file)
-	mp, err := RecipeMinPlatform(raw, map[string]string{"new-api": "0.5.0"})
+	mp, err := RecipeMinPlatform(raw, map[string]string{"new-api": "0.6.0"})
 	if err != nil || mp.Version != "9.9.9" || len(mp.Reasons) != 1 || mp.Reasons[0] != (Requirement{Feature: "recipe:/apps/*/preset", Where: "/apps/new-api/preset", Since: "9.9.9"}) {
 		t.Fatalf("配方自己的写法：%+v %v", mp, err)
 	}
@@ -300,7 +335,7 @@ func TestRecipeMinPlatform(t *testing.T) {
 	if info := r.MinPlatform.Recipes["new-api"]; info.Declared != "" || info.Computed != "9.9.9" || info.Required() != "9.9.9" {
 		t.Fatalf("%+v", info)
 	}
-	edit(t, file, "schema: 1\n", "schema: 1\nmin_platform: \"0.5.0\"\n")
+	edit(t, file, "schema: 1\n", "schema: 1\nmin_platform: \"0.6.0\"\n")
 	r, _ = Lint(dir)
 	var hit *Problem
 	for i := range r.Problems {
@@ -311,26 +346,28 @@ func TestRecipeMinPlatform(t *testing.T) {
 	if hit == nil || hit.File != "recipes/new-api/recipe.yaml" || hit.Path != "/min_platform" || !strings.Contains(hit.Message, "/apps/new-api/preset") {
 		t.Fatalf("配方写低了要报 %s：%+v", CodeMinPlatform, r.Problems)
 	}
-	edit(t, file, `min_platform: "0.5.0"`, `min_platform: "9.9.9"`)
+	edit(t, file, `min_platform: "0.6.0"`, `min_platform: "9.9.9"`)
 	if r, _ = Lint(dir); r.Errors() != 0 {
 		t.Fatalf("%+v", r.Problems)
 	}
 
 	// A member app that needs more lifts the recipe.
-	mp, _ = RecipeMinPlatform([]byte("id: x\nschema: 1\napps:\n  - app: a\n  - app: b\n  - app: gone\n"), map[string]string{"a": "0.5.0", "b": "1.2.0"})
+	mp, _ = RecipeMinPlatform([]byte("id: x\nschema: 1\napps:\n  - app: a\n  - app: b\n  - app: gone\n"), map[string]string{"a": "0.6.0", "b": "1.2.0"})
 	if mp.Version != "1.2.0" || len(mp.Reasons) != 1 || mp.Reasons[0] != (Requirement{Feature: "app:b", Where: "/apps/b", Since: "1.2.0"}) {
 		t.Fatalf("成员应用：%+v", mp)
 	}
 }
 
 // Recipes that need more than the first platform release go to recipes_v2,
-// where that release does not look; the others stay where they were.
+// where that release does not look. Every app of format 3 needs at least
+// BasePlatform, so every recipe goes there, each with its version filled in,
+// and the first release sees no recipe at all.
 func TestBuildPutsNewerRecipesInV2(t *testing.T) {
 	withFeature(t, "manifest:/container/shm_mb", "9.9.9")
 	dir := copyTree(t)
 	file := filepath.Join(dir, "apps", "new-api", manifestName)
 	edit(t, file, "endpoints:\n", "container:\n  shm_mb: 128\n\nendpoints:\n")
-	edit(t, file, `min_platform: "0.5.0"`, `min_platform: "9.9.9"`)
+	edit(t, file, `min_platform: "0.6.0"`, `min_platform: "9.9.9"`)
 	// One recipe declares a version itself, higher than anything it uses.
 	edit(t, filepath.Join(dir, "recipes", "hermes-with-new-api", recipeName), "schema: 1\n", "schema: 1\nmin_platform: \"10.1.0\"\n")
 	b, err := Build(dir, 5)
@@ -341,11 +378,12 @@ func TestBuildPutsNewerRecipesInV2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(idx.Recipes) != 1 || idx.Recipes[0].ID != "hermes-agent" || idx.Recipes[0].MinPlatform != "" {
+	if idx.Recipes == nil || len(idx.Recipes) != 0 {
 		t.Fatalf("recipes = %+v", idx.Recipes)
 	}
-	if len(idx.RecipesV2) != 2 || idx.RecipesV2[0].ID != "hermes-with-new-api" || idx.RecipesV2[0].MinPlatform != "10.1.0" ||
-		idx.RecipesV2[1].ID != "new-api" || idx.RecipesV2[1].MinPlatform != "9.9.9" {
+	if len(idx.RecipesV2) != 3 || idx.RecipesV2[0].ID != "hermes-agent" || idx.RecipesV2[0].MinPlatform != BasePlatform ||
+		idx.RecipesV2[1].ID != "hermes-with-new-api" || idx.RecipesV2[1].MinPlatform != "10.1.0" ||
+		idx.RecipesV2[2].ID != "new-api" || idx.RecipesV2[2].MinPlatform != "9.9.9" {
 		t.Fatalf("recipes_v2 = %+v", idx.RecipesV2)
 	}
 	all := idx.AllRecipes()
@@ -353,7 +391,8 @@ func TestBuildPutsNewerRecipesInV2(t *testing.T) {
 		t.Fatalf("AllRecipes = %+v", all)
 	}
 	// What the first release does: plain JSON decoding into the fields it
-	// knows, index schema still 1. It sees one recipe and no error.
+	// knows, index schema still 1. It sees no recipe and no error, and every
+	// app asks for a newer platform.
 	var old struct {
 		Schema  int `json:"schema"`
 		Recipes []struct {
@@ -364,14 +403,14 @@ func TestBuildPutsNewerRecipesInV2(t *testing.T) {
 			MinPlatform string `json:"min_platform"`
 		} `json:"apps"`
 	}
-	if err := json.Unmarshal(b.Index, &old); err != nil || old.Schema != 1 || len(old.Recipes) != 1 || old.Recipes[0].ID != "hermes-agent" {
+	if err := json.Unmarshal(b.Index, &old); err != nil || old.Schema != 1 || old.Recipes == nil || len(old.Recipes) != 0 {
 		t.Fatalf("旧客户端看到的：%+v %v", old, err)
 	}
-	if len(old.Apps) != 2 || old.Apps[1].MinPlatform != "9.9.9" {
+	if len(old.Apps) != 2 || old.Apps[0].MinPlatform != BasePlatform || old.Apps[1].MinPlatform != "9.9.9" {
 		t.Fatalf("应用的最低版本仍在 apps 里：%+v", old.Apps)
 	}
 	// Key order in the file: recipes, then recipes_v2.
-	if i, j := strings.Index(string(b.Index), `"recipes": [`), strings.Index(string(b.Index), `"recipes_v2": [`); i < 0 || j < i {
+	if i, j := strings.Index(string(b.Index), `"recipes": []`), strings.Index(string(b.Index), `"recipes_v2": [`); i < 0 || j < i {
 		t.Fatalf("index.json 里 recipes_v2 的位置不对")
 	}
 	// VerifyDir counts both.
@@ -386,16 +425,12 @@ func TestBuildPutsNewerRecipesInV2(t *testing.T) {
 		t.Fatalf("verify: %+v %v", res, err)
 	}
 
-	// A recipe that writes the base version stays in recipes, as written.
+	// A recipe can no longer declare the first release's version: its apps
+	// need more, which is CAT-LINT-17, and nothing is built.
 	dir = copyTree(t)
-	edit(t, filepath.Join(dir, "recipes", "new-api", recipeName), "schema: 1\n", "schema: 1\nmin_platform: \"0.5.0\"\n")
-	b, err = Build(dir, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx, _ = ParseIndex(b.Index)
-	if len(idx.Recipes) != 3 || len(idx.RecipesV2) != 0 || idx.Recipes[2].MinPlatform != "0.5.0" || strings.Contains(string(b.Index), "recipes_v2") {
-		t.Fatalf("写 0.5.0 的配方：%+v", idx.Recipes)
+	edit(t, filepath.Join(dir, "recipes", "new-api", recipeName), "schema: 1\n", "schema: 1\nmin_platform: \""+FirstCatalogPlatform+"\"\n")
+	if _, err := Build(dir, 5); CodeOf(err) != CodeBuildLint {
+		t.Fatalf("写 %s 的配方：%v", FirstCatalogPlatform, err)
 	}
 }
 
@@ -441,8 +476,9 @@ func TestValidateManifest(t *testing.T) {
 	}{
 		{"unknown field", "maintainer: acornfox", "maintainer: acornfox\nsidecars: []", CodeSchema},
 		{"unknown nested field", "    backup: true", "    backup: true\n    snapshot: daily", CodeSchema},
-		{"unknown enum value", "protocol: http", "protocol: tcp", CodeSchema},
-		{"unknown format version", "schema: 2", "schema: 3", CodeSchema},
+		{"unknown enum value", "protocol: http", "protocol: udp", CodeSchema},
+		{"unknown format version", "schema: 3", "schema: 4", CodeSchema},
+		{"former format version", "schema: 3", "schema: 2", CodeSchema},
 		{"wrong type", "port: 3000", "port: three thousand", CodeSchema},
 		{"not yaml", "id: new-api", "id: [new-api", CodeRead},
 	}
@@ -468,7 +504,7 @@ func TestValidateManifest(t *testing.T) {
 	if ps := ValidateRecipe(recipe); len(ps) != 0 {
 		t.Fatalf("好的配方：%+v", ps)
 	}
-	if ps := ValidateRecipe(append([]byte("min_platform: \"0.5.1\"\n"), recipe...)); len(ps) != 0 {
+	if ps := ValidateRecipe(append([]byte("min_platform: \"0.6.1\"\n"), recipe...)); len(ps) != 0 {
 		t.Fatalf("配方可以写 min_platform：%+v", ps)
 	}
 	if ps := ValidateRecipe(append([]byte("min_platform: latest\nparallel: true\n"), recipe...)); len(ps) == 0 || ps[0].Code != CodeSchema || ps[0].File != recipeName {
@@ -476,36 +512,36 @@ func TestValidateManifest(t *testing.T) {
 	}
 }
 
-// The manifests inside the packages that were actually published must pass
-// the check the install engine runs before installing.
-func TestValidateManifestAcceptsPublishedPackages(t *testing.T) {
-	snap := Snapshot()
-	b, err := fs.ReadFile(snap, IndexFile)
+// The manifests inside the packages a catalog of format 3 builds to (the
+// drafts in testdata/good, the same as the catalog repository's) pass the
+// check the install engine runs before installing, and none declares less
+// than it needs.
+func TestValidateManifestAcceptsBuiltPackages(t *testing.T) {
+	b, err := Build(filepath.Join("testdata", "good"), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := ParseIndex(b)
+	idx, err := ParseIndex(b.Index)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(idx.Apps) < 2 {
-		t.Fatalf("快照里只有 %d 个应用", len(idx.Apps))
+		t.Fatalf("目录里只有 %d 个应用", len(idx.Apps))
 	}
 	for _, a := range idx.Apps {
-		pkg, err := fs.ReadFile(snap, a.Package.Path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files, err := ReadPackage(a.ID, pkg)
+		files, err := ReadPackage(a.ID, b.Packages[a.Package.Path])
 		if err != nil {
 			t.Fatal(err)
 		}
 		if ps := ValidateManifest(files[manifestName]); len(ps) != 0 {
-			t.Errorf("已发布的 %s %s 过不了检查：%+v", a.ID, a.Version, ps)
+			t.Errorf("%s %s 过不了检查：%+v", a.ID, a.Version, ps)
+		}
+		if n, former := FormerManifest(files[manifestName]); former || n != ManifestSchema {
+			t.Errorf("%s 的 schema 是 %d", a.ID, n)
 		}
 		mp, err := ManifestMinPlatform(files[manifestName])
-		if err != nil || CompareVersions(mp.Version, a.MinPlatform) > 0 {
-			t.Errorf("已发布的 %s 写的最低版本 %s 低于算出来的 %s（%v）", a.ID, a.MinPlatform, mp.Version, err)
+		if err != nil || CompareVersions(mp.Version, a.MinPlatform) > 0 || FormerIndexApp(a) {
+			t.Errorf("%s 写的最低版本 %s 低于算出来的 %s（%v）", a.ID, a.MinPlatform, mp.Version, err)
 		}
 	}
 }
@@ -530,6 +566,9 @@ func fullDocument(t *testing.T, root, node map[string]any, path string, pick map
 			obj[k] = fullDocument(t, root, sub.(map[string]any), path+"/"+k, pick)
 		}
 		return obj
+	}
+	if each, ok := node["additionalProperties"].(map[string]any); ok {
+		return map[string]any{"anything": fullDocument(t, root, each, path+"/*", pick)}
 	}
 	if items, ok := node["items"].(map[string]any); ok {
 		return []any{fullDocument(t, root, items, path+"/*", pick)}
@@ -679,7 +718,7 @@ func TestResolveRef(t *testing.T) {
 func TestDeclaredMinPlatform(t *testing.T) {
 	good, _ := os.ReadFile(filepath.Join("testdata", "good", "apps", "new-api", manifestName))
 	cases := map[string]string{
-		string(good): "0.5.0",
+		string(good): "0.6.0",
 		"lifecycle:\n  min_platform: \"9.9.9\"\nendpoints: later-format\nvolumes: {a: 1}\n": "9.9.9", // nothing else has to be decodable
 		"lifecycle:\n  status: active\n":  "",
 		"lifecycle: soon\n":               "",
@@ -703,8 +742,9 @@ func TestDeclaredMinPlatform(t *testing.T) {
 // a platform that was released with the old one.
 func TestFormatDefinitionsArePinned(t *testing.T) {
 	pinned := map[string]string{
-		manifestSchemaF: "ae2c40e779c603a3b5f45294813a68dd22c1ebaaecddcd9a3cf9c4402e729a01",
-		recipeSchemaF:   "9334a4f1487e2c1d8352d547ef538b6830e5ef3b4ad8ef8faf37f5a1a4c671a2",
+		manifestSchemaF:    "609119b4a6d55ee2678e993e2e3e89d41c2830e68f744b6b36878d8826558fcd",
+		recipeSchemaF:      "d170d37874fc0eccd46aef6f73f6fbb7f074e7f1f1f6ddc4abd09dc2cf3ac853",
+		serviceTypeSchemaF: "2bfba85806d3412569be5ed9600330105d75023d830064483f3f8611d0f0ff41",
 	}
 	for file, want := range pinned {
 		b, err := schemaFS.ReadFile(file)
@@ -720,19 +760,21 @@ Before you put the new checksum into this test, do all of the following:
  1. Feature table: every new field and every new enum value needs a row in
     featureTable (features.go) with the platform version that first ships it,
     so that manifests using it get the right minimum platform version.
+    (The service type definition has no feature table: its definitions carry
+    their own format version, and a client skips the ones it does not know.)
  2. Older clients: think through what a platform that is already released
     does with a manifest that is only valid under the new definition. This
     matters most when you loosen something (larger maxItems, wider pattern,
     dropped "required", extra type): no test catches that. If an older
     platform would install such a manifest wrongly, the new form must raise
-    the minimum platform version (a feature row plus a detector in
-    manifestMinPlatform), because lifecycle.min_platform is the only thing
-    an older platform checks.
+    the minimum platform version (a detector in manifestMinPlatform plus a
+    row of its own, features.go), because lifecycle.min_platform is the only
+    thing an older platform checks.
  3. Catalog repository: copy the file to the catalog repository's schema/
     directory and commit it there; the two copies must stay byte-identical
     (TestEmbeddedSchemasMatchCatalogCopy checks when the checkout is nearby).
- 4. Published manifests must still validate and build to the same bytes
-    (TestValidateManifestAcceptsPublishedPackages, TestBuildMatchesPublishedIndex).`, file, got)
+ 4. The manifests of testdata/good (the same as the catalog repository's)
+    must still validate (TestValidateManifestAcceptsBuiltPackages).`, file, got)
 		}
 	}
 }

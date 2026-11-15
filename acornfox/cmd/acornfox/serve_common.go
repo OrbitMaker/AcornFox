@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,10 +22,11 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/apiserver"
-	"github.com/acornfox/acornfox/internal/caddyroute"
 	"github.com/acornfox/acornfox/internal/cli"
 	"github.com/acornfox/acornfox/internal/deploylog"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/hostcheck"
+	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/publicconsole"
 	"github.com/acornfox/acornfox/internal/reconcile"
 	"github.com/acornfox/acornfox/internal/runner"
@@ -38,11 +40,13 @@ import (
 // build before that package exists.
 var consoleFS fs.FS
 
-// Edge (Caddy container) defaults.
+// Edge (entry proxy container) defaults. The adapter's management endpoint
+// is its own port, not the loopback gateway older installs used (18808): an
+// old and a new entry container may run side by side while an upgrade
+// switches them, and each must be reached on its own endpoint only.
 const (
-	edgeModeOff          = "off"
-	defaultEdgeAdminPort = 18808
-	edgeTokenFile        = "caddy-admin.token"
+	defaultEdgeAdminPort = 18807
+	edgeTokenFile        = "edge-admin.token"
 )
 
 // serverOptions is everything startServer needs; flag parsing (Linux) or the
@@ -52,19 +56,18 @@ type serverOptions struct {
 	Listens       []string // trusted API unix sockets
 	ListenGID     int      // -1: leave the socket group alone
 	ConsoleListen string   // loopback console; "" disables
-	PublicListen  string   // public console gateway behind Caddy; "" disables
+	PublicListen  string   // public console gateway behind the entry proxy; "" disables
 	PublicHost    string
 	PublicPortMin int
 	PublicPortMax int
-	HTTPS         caddyroute.HTTPSConfig
+	HTTPS         edge.HTTPS
 	HTTPSCAFile   string
 
-	// Caddy: EdgeMode host|bridge runs Caddy as a container managed through
-	// the runner (admin gateway on 127.0.0.1:EdgeAdminPort); "off" uses the
-	// v0.3 host Caddy at CaddyAdmin (a unix socket).
+	// Entry proxy: EdgeMode host|bridge runs it as a container managed
+	// through the runner; the program reaches the adapter in it on
+	// 127.0.0.1:EdgeAdminPort.
 	EdgeMode      string
 	EdgeAdminPort int
-	CaddyAdmin    string
 
 	DefaultExposure string
 	LANHost         func() string // nil => PublicHost
@@ -105,7 +108,7 @@ func readOrCreateToken(path string) (string, error) {
 	return t, nil
 }
 
-// startServer opens the state store, wires the Caddy router, reconciler and
+// startServer opens the state store, wires the entry proxy, reconciler and
 // API, serves until ctx is cancelled, and returns the process exit code.
 // serverRunner is what the server needs from the runner: the runner API plus
 // per-app network cleanup. *runner.Client (Linux) and *runner.Docker
@@ -139,32 +142,36 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	}
 	defer st.Close()
 
+	// The entry proxy: the reconciler, the public console and the self checks
+	// all talk to it through edge.Proxy only (edge_wiring.go builds it).
 	var (
-		router   caddyroute.Router
-		verifier caddyroute.Verifier
-		edge     *reconcile.EdgeConfig
+		proxy   edge.Proxy
+		edgeCfg *reconcile.EdgeConfig
 	)
-	if o.EdgeMode != "" && o.EdgeMode != edgeModeOff {
+	{
 		token, err := readOrCreateToken(filepath.Join(o.DataDir, edgeTokenFile))
 		if err != nil {
-			fmt.Fprintln(stderr, "caddy admin token:", err)
+			fmt.Fprintln(stderr, "edge admin token:", err)
 			return 1
 		}
-		admin := fmt.Sprintf("http://127.0.0.1:%d", o.EdgeAdminPort)
-		router = caddyroute.New(admin, o.HTTPS, caddyroute.WithToken(token))
-		verifier = caddyroute.NewVerifier(admin, o.HTTPS, caddyroute.WithToken(token))
-		edge = &reconcile.EdgeConfig{Mode: o.EdgeMode, AdminPort: o.EdgeAdminPort, AdminToken: token,
-			PortMin: o.PublicPortMin, PortMax: o.PublicPortMax, LANHost: o.LANHost}
-	} else {
-		router = caddyroute.New(o.CaddyAdmin, o.HTTPS)
-		verifier = caddyroute.NewVerifier(o.CaddyAdmin, o.HTTPS)
+		var useAdminPort func(int)
+		proxy, useAdminPort = newEdgeProxy(o, token)
+		edgeCfg = &reconcile.EdgeConfig{Mode: o.EdgeMode, AdminPort: o.EdgeAdminPort, AdminToken: token,
+			PortMin: o.PublicPortMin, PortMax: o.PublicPortMax, LANHost: o.LANHost,
+			UseAdminPort: useAdminPort,
+			OnSwitch: func(info runner.EdgeInfo) {
+				if err := writeEdgeSwitchRecord(o.DataDir, info, time.Now()); err != nil {
+					fmt.Fprintln(stderr, "edge switch record:", err)
+				}
+			}}
 	}
 
-	// The public console's domain route rides along every route
-	// sync; its configuration lives in the data directory.
+	// The public console's domain route is part of every configuration
+	// handed to the proxy; its configuration lives in the data directory.
 	pcStore := publicconsole.NewFileStore(filepath.Join(o.DataDir, "public-console.json"))
+	var extraRoutes func(context.Context) ([]edge.Route, error)
 	if o.PublicListen != "" {
-		router = publicconsole.WrapRouter(router, pcStore, o.PublicListen)
+		extraRoutes = publicconsole.Routes(pcStore, o.PublicListen)
 	}
 
 	// Old-version logs are a convenience: when the directory cannot be
@@ -179,12 +186,13 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		Store:           st,
 		DeployLogs:      deployLogs,
 		Runner:          runnerAPI,
-		Router:          router,
+		Proxy:           proxy,
+		ExtraRoutes:     extraRoutes,
 		UploadDir:       uploadDir,
 		PublicHost:      o.PublicHost,
 		HTTPS:           o.HTTPS,
 		HTTPSCAFile:     o.HTTPSCAFile,
-		Edge:            edge,
+		Edge:            edgeCfg,
 		DefaultExposure: o.DefaultExposure,
 	})
 
@@ -231,11 +239,15 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		}
 		apiCfg.CheckPorts = hostcheck.Ports{Admin: admin, LAN: lan, AppMin: o.PublicPortMin, AppMax: o.PublicPortMax}
 	}
-	appCenter := newAppCenter(st, o.DataDir, uploadDir, runnerAPI)
+	// The apps' addresses are worked out from the same options in the
+	// app center (app.url) and in the API's views (one provider for both).
+	appCenter := newAppCenter(st, o.DataDir, uploadDir, runnerAPI,
+		platformvar.Host{PublicHost: o.PublicHost, Desktop: o.LANHost != nil, HTTPSPort: o.HTTPS.HTTPSPort})
 	defer appCenter.Close()
 	apiCfg.AppCenter = appCenter
+	apiCfg.PlatformVars = appCenter.PlatformVarProvider()
 	var relay *lanForwarder
-	if o.LANRelay && o.LANHost != nil && edge != nil && o.EdgeMode == runner.EdgeModeBridge {
+	if o.LANRelay && o.LANHost != nil && edgeCfg != nil && o.EdgeMode == runner.EdgeModeBridge {
 		relay = &lanForwarder{lanHost: o.LANHost, active: rec.LANUnbindable,
 			portMin: o.PublicPortMin, portMax: o.PublicPortMax, offset: reconcile.LANPortOffset,
 			logf: func(f string, a ...any) {
@@ -255,14 +267,14 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 			return h
 		}
 	}
-	if edge != nil {
+	if edgeCfg != nil {
 		apiCfg.EdgeStatus = rec.EdgeStatus
 	}
 	var pcManager *publicconsole.Manager
 	if o.PublicListen != "" {
 		pcManager = publicconsole.NewManager(publicconsole.ManagerConfig{
 			Store:    pcStore,
-			Verifier: verifier,
+			Verifier: proxy,
 			Sessions: st,
 			Routes:   rec,
 			Domains: func(ctx context.Context) ([]string, error) {
@@ -281,6 +293,7 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	if o.Setup != nil {
 		deps := *o.Setup
 		deps.Options = o
+		deps.Proxy = proxy
 		deps.Relay = relay
 		deps.LANEnabled = func() bool {
 			lan := lanRef.Load()
@@ -313,27 +326,28 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 
 	if pcManager != nil {
 		pcManager.Cleanup(ctx)
-		// Caddy keeps no config across restarts (persist_config off); while the
-		// public console is on, put its route back even when no app has a round.
-		go func() {
-			t := time.NewTicker(30 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					if cfg, err := pcStore.Load(); err == nil && cfg != nil {
-						rec.RefreshRoutes(ctx)
-					}
-				}
-			}
-		}()
 	}
+	// Every 30 seconds compare the version in effect with the one wanted and
+	// hand the whole configuration over again when they differ, also when no
+	// app has a round (no apps, only the public console, the last app just
+	// removed). The entry proxy reloads its saved configuration by itself
+	// after a restart; this catches anything else.
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				rec.RefreshRoutes(ctx)
+			}
+		}
+	}()
 
-	// Start the Caddy container before the first app round, and keep trying
+	// Start the edge container before the first app round, and keep trying
 	// while the runner or Docker is not reachable yet.
-	if edge != nil {
+	if edgeCfg != nil {
 		go func() {
 			for !rec.EnsureEdge(ctx) {
 				select {
@@ -397,7 +411,7 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		fmt.Fprintln(stdout, "acornfox server (console) listening on", o.ConsoleListen)
 	}
 
-	// The public console gateway (loopback; Caddy terminates TLS in front).
+	// The public console gateway (loopback; the entry proxy terminates TLS in front).
 	var publicSrv *http.Server
 	if pcManager != nil {
 		pln, err := net.Listen("tcp", o.PublicListen)
@@ -497,4 +511,37 @@ func lanConsoleRefuse(serverLAN func() string) func() string {
 		}
 		return "这台服务器是云主机或公网服务器（或者还没判断出来），没有可信的局域网，不开局域网控制台。在自己电脑上运行 acornfox open 进控制台（经 SSH 隧道）；如果它确实在你的局域网里，等十几秒再试一次。"
 	}
+}
+
+// edgeSwitchFile is the switch record in the data directory: which entry
+// container the runner switched away from (stopped, kept) and which one
+// serves now. The upgrade script reads it to remove the old container once
+// the new version is confirmed, or to switch back to it when the upgrade is
+// undone. The new container carries the old one's ID as a label too
+// (runner.LabelEdgeReplaced), for when the file is missing.
+const edgeSwitchFile = "edge-switch.json"
+
+type edgeSwitchRecord struct {
+	OldID   string    `json:"old_id"`
+	OldName string    `json:"old_name"`
+	NewID   string    `json:"new_id"`
+	NewName string    `json:"new_name"`
+	Image   string    `json:"image"`
+	At      time.Time `json:"at"`
+}
+
+// writeEdgeSwitchRecord writes edgeSwitchFile atomically (0644: only IDs and
+// names, the upgrade script reads it as root).
+func writeEdgeSwitchRecord(dataDir string, info runner.EdgeInfo, now time.Time) error {
+	b, err := json.MarshalIndent(edgeSwitchRecord{OldID: info.Replaced, OldName: info.ReplacedName, NewID: info.ID,
+		NewName: runner.EdgeContainerName, Image: info.Image, At: now.UTC()}, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dataDir, edgeSwitchFile)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

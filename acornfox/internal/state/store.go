@@ -266,15 +266,24 @@ func (s *Store) UpdateApp(ctx context.Context, name string, fn func(*App) error)
 		if err != nil {
 			return err
 		}
+		healthText, err := encodeHealthCheck(draft.HealthCheck)
+		if err != nil {
+			return err
+		}
+		internal := 0
+		if draft.Internal {
+			internal = 1
+		}
 		draft.UpdatedAt = time.Now().UTC()
 		_, err = tx.ExecContext(ctx, `UPDATE apps SET
 			desired=?, port=?, health_path=?, current_deployment=?, memory_mb=?, cpu_milli=?, exposure=?,
-			command=?, pids_limit=?, links=?, catalog_id=?, catalog_version=?, catalog_source=?, catalog_origin=?, updated_at=?
+			command=?, pids_limit=?, links=?, catalog_id=?, catalog_version=?, catalog_source=?, catalog_origin=?,
+			internal=?, health_check=?, updated_at=?
 			WHERE name=?`,
 			draft.Desired, draft.Port, draft.HealthPath, draft.CurrentDeployment,
 			draft.MemoryMB, draft.CPUMilli, draft.Exposure,
 			commandText, draft.PidsLimit, linksText, draft.CatalogID, draft.CatalogVersion, draft.CatalogSource, draft.CatalogOrigin,
-			formatTime(draft.UpdatedAt), name)
+			internal, healthText, formatTime(draft.UpdatedAt), name)
 		if err != nil {
 			return fmt.Errorf("update app: %w", err)
 		}
@@ -961,7 +970,7 @@ func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 // catalogOriginRe is a private catalog id (the gateway's format).
 var catalogOriginRe = regexp.MustCompile(`^cat-[A-Za-z0-9_-]{1,64}$`)
 
-const appSelect = `SELECT name, desired, port, health_path, public_port, current_deployment, memory_mb, cpu_milli, exposure, command, pids_limit, links, catalog_id, catalog_version, catalog_source, catalog_origin, created_at, updated_at`
+const appSelect = `SELECT name, desired, port, health_path, public_port, current_deployment, memory_mb, cpu_milli, exposure, command, pids_limit, links, catalog_id, catalog_version, catalog_source, catalog_origin, internal, health_check, created_at, updated_at`
 
 // rowScanner abstracts *sql.Row and *sql.Rows for shared scanning.
 type rowScanner interface {
@@ -970,14 +979,19 @@ type rowScanner interface {
 
 func scanAppFrom(sc rowScanner) (App, error) {
 	var a App
-	var createdText, updatedText, commandText, linksText string
+	var createdText, updatedText, commandText, linksText, healthText string
+	var internal int
 	if err := sc.Scan(&a.Name, &a.Desired, &a.Port, &a.HealthPath, &a.PublicPort,
 		&a.CurrentDeployment, &a.MemoryMB, &a.CPUMilli, &a.Exposure,
 		&commandText, &a.PidsLimit, &linksText, &a.CatalogID, &a.CatalogVersion, &a.CatalogSource, &a.CatalogOrigin,
-		&createdText, &updatedText); err != nil {
+		&internal, &healthText, &createdText, &updatedText); err != nil {
 		return App{}, err
 	}
+	a.Internal = internal == 1
 	var err error
+	if a.HealthCheck, err = decodeHealthCheck(healthText); err != nil {
+		return App{}, fmt.Errorf("app %s health check: %w", a.Name, err)
+	}
 	if a.Command, err = decodeStringList(commandText); err != nil {
 		return App{}, fmt.Errorf("app %s command: %w", a.Name, err)
 	}

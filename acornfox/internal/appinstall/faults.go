@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/acornfox/acornfox/internal/catalog"
 	"github.com/acornfox/acornfox/internal/installtiming"
 )
 
@@ -12,17 +13,17 @@ import (
 // catalogs (CAT-CONN-*). This file is their single source: the API, the CLI's --json output, the Skill and docs/capabilities.md
 // refer to these strings, so never renumber; new codes are appended.
 const (
-	CodeUnknown       = "CAT-INST-01" // app, recipe or version not in the catalog
-	CodeBadParams     = "CAT-INST-02" // unknown, hidden or malformed parameter, or a required one missing
-	CodeNameTaken     = "CAT-INST-03" // an app with that name already exists
-	CodeBusy          = "CAT-INST-04" // an install of the same app is already running (task_id is the running one)
-	CodeNoMemory      = "CAT-INST-05" // not enough room under the server-wide memory cap
-	CodeArch          = "CAT-INST-06" // this machine's CPU architecture is not in the app's platforms
-	CodeNoPort        = "CAT-INST-07" // no free access port left on this server
-	CodeTooOld        = "CAT-INST-08" // this AcornFox is older than the app's min_platform
-	CodePlatformLLM   = "CAT-INST-09" // the platform model key is not available yet (coming soon)
-	CodeNoGateway     = "CAT-INST-10" // a local model gateway is needed (chosen, or the old app's on reuse_data) but none is installed, or it is stopped or not running
-	CodeGatewayToken  = "CAT-INST-11" // the local gateway would not issue a token (login or token API failed)
+	CodeUnknown   = "CAT-INST-01" // app, recipe or version not in the catalog
+	CodeBadParams = "CAT-INST-02" // unknown, hidden or malformed parameter, or a required one missing
+	CodeNameTaken = "CAT-INST-03" // an app with that name already exists
+	CodeBusy      = "CAT-INST-04" // an install of the same app is already running (task_id is the running one)
+	CodeNoMemory  = "CAT-INST-05" // not enough room under the server-wide memory cap
+	CodeArch      = "CAT-INST-06" // this machine's CPU architecture is not in the app's platforms
+	CodeNoPort    = "CAT-INST-07" // no free access port left on this server
+	CodeTooOld    = "CAT-INST-08" // this AcornFox is older than the app's min_platform
+	// CAT-INST-09, -10 and -11 were about a model source built into the
+	// platform, which is gone (a model API is a service like any other):
+	// nothing raises them any more, and the numbers are never used again.
 	CodePull          = "CAT-INST-12" // the image could not be obtained from any source
 	CodeImageDigest   = "CAT-INST-13" // a gateway image archive did not match the catalog's signed checksum or size (not loaded)
 	CodeFiles         = "CAT-INST-14" // writing config files into the data volume failed
@@ -44,6 +45,37 @@ const (
 	// CodeStuck is not an error: it is in a running task's timing when the
 	// running step is past its stuck threshold (internal/installtiming).
 	CodeStuck = installtiming.CodeStuck // CAT-INST-30
+
+	// Services an app needs (manifest uses written the new way) and what a
+	// providing app hands out to it (needs.go, connect.go).
+	CodeNoService     = "CAT-INST-31"            // a required service is not on this machine (usable): register one; nothing is installed
+	CodeChooseService = "CAT-INST-32"            // several usable services of the kind: the request must name one (use)
+	CodeBadUse        = "CAT-INST-33"            // the service named in use does not exist, is of another kind or is not usable now, or no app of the request has that need
+	CodeIssue         = "CAT-INST-34"            // the providing app's issue steps did not pass (no credential for the consumer), or the provider was not running
+	CodeRevoke        = installtiming.RevokeCode // CAT-INST-35: a credential was not taken back (a warning: it never stops anything)
+
+	// CodeLegacyManifest: the app package's manifest is written the former
+	// way (a setting of the built-in model kind, a provides entry whose
+	// steps were in platform code, a use that filled such a setting); this
+	// platform does not install it (refused before anything is created).
+	CodeLegacyManifest = "CAT-INST-36"
+
+	// Services that hold a consumer's data, and services only some apps
+	// may take (connect.go, needs.go).
+	CodeCheckStop = "CAT-INST-37" // an old credential failed the check, and its provider wrote on_check_fail: stop: the install stopped, nothing was replaced
+	CodeTaken     = "CAT-INST-38" // the service named (or matched) cannot take this app: another app holds it for itself, the need wants it for itself and others use it, or the provider's limit is reached
+
+	// A value the manifest writes could not be worked out: a template that
+	// cannot be read, a transform that failed (a map without a matching
+	// entry), an if that cannot be read, two entries of one env key both
+	// holding, a start command that would carry a secret (steps.go).
+	CodeRender = "CAT-INST-39"
+
+	// A platform variable an installed app was given at install time is
+	// not what the platform would give it now (its address after the
+	// exposure changed or a domain was bound): `apps vars` marks the row
+	// with it. Not an error; nothing is rewritten in this version.
+	CodeVarsStale = "APP-VARS-01"
 
 	// Connecting a private catalog with a code (POST /v1/catalog/connect).
 	CodeConnFormat    = "CAT-CONN-01" // the code is not AFXC- plus 16 letters/digits (checked here, not sent)
@@ -67,29 +99,29 @@ type FaultDef struct {
 // the user (spending money, opening to the network, typing a key) say so.
 var Faults = []FaultDef{
 	{CodeUnknown, "目录里没有这个应用、配方或版本", "acornfox catalog list 看有哪些；目录太旧就 acornfox catalog sync"},
-	{CodeBadParams, "参数不对：没有这个参数、这个参数由平台生成不能填、格式不符或缺了必填项；接上旧数据重装时，原来用的本机模型网关已经不在本机了（删掉了），也报这个", "按 message 改 --set；acornfox catalog info <应用> 看参数。message 说原来用的本机网关本机没有了时，问用户要用哪个：--llm local（本机在运行的 New API）或 --llm own（自己的 Key）。网关只是停着报的是 CAT-INST-10，不是这个"},
+	{CodeBadParams, "参数不对：没有这个参数、这个参数由平台生成不能填、格式不符或缺了必填项", "按 message 改 --set；acornfox catalog info <应用> 看参数。必填项要用户提供内容的（例如要用的模型名），先问用户"},
 	{CodeNameTaken, "已经有同名的应用", "用 --name 换个名字；要重装先由用户确认后 acornfox delete 旧的"},
 	{CodeBusy, "同一个应用正在安装", "不要重复点安装；acornfox install status <task_id> 看进度"},
 	{CodeNoMemory, "整机分配给应用的内存不够", "问用户：调小别的应用（acornfox app set --memory）或调大整机上限（acornfox limits --memory）"},
 	{CodeArch, "这台机器的 CPU 架构不在应用支持的列表里", "换一台机器，或等应用出这个架构的版本"},
 	{CodeNoPort, "这台服务器的访问端口用完了", "删掉不用的应用后重试"},
 	{CodeTooOld, "AcornFox 版本比应用要求的旧", "先升级 AcornFox 再装（错误里的 needs_platform 是要升到的版本）"},
-	{CodePlatformLLM, "平台 Key 还没开放", "改用 --llm local（本机 New API）或 --llm own（自己的 Key，要用户提供）"},
-	{CodeNoGateway, "要用本机的模型网关（选了 --llm local，或接上旧数据时原来用的就是它），但它没装、停着或没在运行", "看 message：说“装着但停着”的，先问用户，同意后 acornfox start <网关名>，acornfox status <网关名> 显示在运行后再装（不要再装一个 New API，同名的已经装着）；说“容器却没起来”的，acornfox status <网关名> 看它怎么了；本机还没有 New API 才 acornfox install new-api，或装配方 hermes-with-new-api。不想用本机网关就改 --llm own（自己的 Key，要用户提供）"},
-	{CodeGatewayToken, "本机 New API 发不出令牌（登录或令牌接口失败）", "看 New API 是否在运行（acornfox status new-api）；管理员密码被改过时改用 --llm own；message 里有 HTTP 429 是 New API 限制了登录和取令牌的次数（同一来源 20 分钟 20 次），等 20 分钟再装，不要反复重试"},
+	{"CAT-INST-09", retiredMeaning, retiredAction},
+	{"CAT-INST-10", retiredMeaning, retiredAction},
+	{"CAT-INST-11", retiredMeaning, retiredAction},
 	{CodePull, "镜像从所有来源都没拿到", "看 attempts；国内网络确认已配镜像加速；稍后重试"},
 	{CodeImageDigest, "下载网关给的镜像包和目录里签名的校验值或大小对不上，没有导入、已删掉", "公共目录的应用自动换公共源，都不对就等目录更新；私有目录的应用直接停下，不去公共源找，等目录更新或联系给码的人。不要手动绕过"},
 	{CodeFiles, "往数据卷里写配置文件失败", "看 message；检查磁盘空间和 Docker 状态（acornfox doctor）"},
 	{CodeStart, "容器没能启动或上线", "看 diagnosis；acornfox logs <应用> 看日志"},
 	{CodeHealth, "健康检查在时限内没通过", "acornfox logs <应用> 看日志；内存太小时调大后重装"},
-	{CodeInit, "装好后的初始化调用失败（没收到应答的不会重发，因为它可能已经生效）", "看 message；acornfox logs <应用>；这次的应用已清理，可以直接重装"},
+	{CodeInit, "装好后的初始化调用失败：发给应用的请求，或在应用自己的容器里执行的命令（没收到应答的请求、超时的命令不会重发，因为它可能已经生效）", "看 message（命令失败的写了退出码和标准错误的最后几行）；acornfox logs <应用>；这次的应用已清理，可以直接重装"},
 	{CodeInterrupted, "安装途中服务重启了，这次安装已作废并清理", "重新安装"},
 	{CodePackage, "目录或应用包读不了、校验不过", "acornfox catalog sync 后重试；都不行就重装 AcornFox"},
 	{CodeInternal, "内部错误：运行器版本旧、数据库或 Docker 出错", "acornfox doctor；升级 AcornFox 后重试"},
 	{CodeTaskNotFound, "没有这个安装任务", "检查任务编号"},
 	{CodeNotCatalogApp, "这个应用不是从应用中心装的，没有首次登录信息", "—"},
-	{CodeUnsupported, "清单用到了这个版本还不支持的写法（多个镜像、自带依赖）", "升级 AcornFox"},
-	{CodeOldVolumes, "这台机器上还留着以前同名应用的数据卷（删应用时保留了数据），默认不让新装悄悄接上旧数据，所以拒绝", "停下问用户：旧数据还要不要。要接着用就加 --reuse-data 重装（页面上是“接上旧数据重装”；删除时保留过参数的，账号密码、改过的平台变量、大模型来源和配置文件都按以前的，这次写了的以这次为准）；不要旧数据就用 --name 换个名字装，或者由用户执行 message 里卷名对应的 docker volume rm 后再装"},
+	{CodeUnsupported, "清单用到了这个版本还不支持的写法（多个镜像，或格式已经认、这一版还不执行的写法；现在格式里的写法这一版都已执行）", "升级 AcornFox"},
+	{CodeOldVolumes, "这台机器上还留着以前同名应用的数据卷（删应用时保留了数据），默认不让新装悄悄接上旧数据，所以拒绝", "停下问用户：旧数据还要不要。要接着用就加 --reuse-data 重装（页面上是“接上旧数据重装”；删除时保留过参数的，账号密码、你填过的设置项、改过的平台变量、接的服务和配置文件都按以前的，这次写了的以这次为准）；不要旧数据就用 --name 换个名字装，或者由用户执行 message 里卷名对应的 docker volume rm 后再装"},
 	{CodeDisconnected, "这个应用或配方来自已断开的私有目录（授权被撤销或目录被停用）；已装好的照常运行，但不能再装、不能升级", "告诉用户联系给连接码的人；拿到新连接码后 acornfox catalog connect 新码，再装"},
 	{CodePrivateDenied, "私有目录的文件（应用包或镜像）没从下载网关取到：网关不给（这台机器对这个目录没有授权了、目录停用，或文件不在目录里），或者这台服务器关掉了下载网关、连不上网关、本机时钟不准、下载多次都没下完，或者私有目录的清单没写镜像包、没有这台机器 CPU 架构的镜像包。私有应用的文件只走下载网关，不去公共源找", "看 gateway_code：GW-CAT-* 先 acornfox catalog sync 看目录是否已断开，还连着就请给码的人检查目录；GW-AUTH-01 先校准本机时间（acornfox doctor 看 SETUP-CLOCK-01）；GW-NET-01 或下载中断就检查网络后重装；网关被关掉时问用户是否打开；message 说清单没写镜像包、或没有这台机器架构（例如 linux/arm64）的镜像包时，告诉用户联系给码的人补上"},
 	{CodeNoDisk, "Docker 存镜像的分区剩余空间不够这次要装的应用（清单的 disk_mb.min 之和，含下载的镜像包和解开后的镜像）", "问用户：删掉不用的应用或镜像（acornfox delete、docker image prune 由用户确认后执行），或扩容磁盘；acornfox doctor 看各分区剩余空间"},
@@ -97,7 +129,17 @@ var Faults = []FaultDef{
 	// The action here covers both cases for the fault catalogue; a fault
 	// itself carries the hint of its own case (see checkPackage).
 	{CodeBadManifest, "应用包里的清单有这个版本的 AcornFox 不认识的写法（字段、取值或格式版本），安装前就拒绝了，什么都没建、没下载镜像", "错误里带 needs_platform 的：先升级 AcornFox 到那个版本再装。不带的：是这份目录有问题，不是操作不对，过一会儿 acornfox catalog sync 后再试，还不行就把 message 反馈给我们；不要想办法绕过"},
-	{CodeStuck, "安装任务还在进行，但正在做的那一步用的时间超过了它的卡住门槛（各步骤的正常时长和门槛写在程序里，install status 输出的 timing.step 有 normal_seconds、stuck_after_seconds）。这是提醒，不是失败：任务没有停，到了 AcornFox 自己的时限会判失败并清理（从公共源拉镜像 10 分钟、启动 15 分钟、健康检查按清单的 timeout_s、整次 60 分钟）", "先运行 next_command（就是 timing.step.look：下载镜像等步骤是 acornfox doctor --json，启动、健康检查、初始化是 acornfox logs 应用 --tail 200 --json）看原因，只读、不用问用户；把 say 和看到的要点告诉用户，问用户接着等还是不装了；不要自己删除、重装或重启服务"},
+	{CodeStuck, "安装任务还在进行，但正在做的那一步用的时间超过了它的卡住门槛（各步骤的正常时长和门槛写在程序里，install status 输出的 timing.step 有 normal_seconds、stuck_after_seconds）。这是提醒，不是失败：任务没有停，到了 AcornFox 自己的时限会判失败并清理（从公共源拉一个镜像所有源加起来 50 分钟、启动 15 分钟、健康检查按清单的 timeout_s、整次 60 分钟，从公共源拉镜像的时间不算在这 60 分钟里）", "先运行 next_command（就是 timing.step.look：下载镜像等步骤是 acornfox doctor --json，启动、健康检查、初始化是 acornfox logs 应用 --tail 200 --json）看原因，只读、不用问用户；把 say 和看到的要点告诉用户，问用户接着等还是不装了；不要自己删除、重装或重启服务"},
+	{CodeNoService, svcNoServiceMeaning, svcNoServiceAction},
+	{CodeChooseService, svcChooseMeaning, svcChooseAction},
+	{CodeBadUse, svcBadUseMeaning, svcBadUseAction},
+	{CodeIssue, svcIssueMeaning, svcIssueAction},
+	{CodeRevoke, svcRevokeMeaning, svcRevokeAction},
+	{CodeLegacyManifest, legacyMeaning, legacyAction},
+	{CodeCheckStop, svcCheckStopMeaning, svcCheckStopAction},
+	{CodeTaken, svcTakenMeaning, svcTakenAction},
+	{CodeRender, renderMeaning, renderAction},
+	{CodeVarsStale, varsStaleMeaning, varsStaleAction},
 	{CodeConnFormat, "连接码格式不对（应是 AFXC- 加 16 个字母数字），没有发给网关", "让用户照原样再抄一遍；0、1、8 会当成 O、I、B"},
 	{CodeConnNoGateway, "这台服务器关掉了下载网关，连不了私有目录", "问用户是否打开下载网关（去掉 ACORNFOX_GATEWAY=off 或 network.json 里的 \"gateway\": \"off\"）"},
 	{CodeConnUnknown, "连接码不存在、抄错了，或已经被别的机器用过（一码一机）", "让用户核对连接码；还不行就找给码的人要新码。不要反复试"},
@@ -118,6 +160,11 @@ type Fault struct {
 	GatewayCode string `json:"gateway_code,omitempty"`
 	// RetryAfter is the wait in seconds for CAT-CONN-06.
 	RetryAfter int `json:"retry_after,omitempty"`
+	// Attempts is what each image source did for CAT-INST-12 (source: the
+	// registry host, code: skipped, slow, stalled, timeout, cancelled,
+	// not_found, unreachable or failed; cut_off only from a runner whose
+	// caller sent a deadline, which an install does not).
+	Attempts []catalog.Attempt `json:"attempts,omitempty"`
 	// Diagnosis carries the deployment's diagnosis for CAT-INST-15/16.
 	Diagnosis any `json:"diagnosis,omitempty"`
 	// TaskID is the running task for CAT-INST-04.
@@ -146,13 +193,16 @@ func (f *Fault) Unwrap() error { return f.err }
 
 // HTTPStatus is the status the API answers a synchronous fault with.
 func (f *Fault) HTTPStatus() int {
+	if s, ok := serviceFaultStatus[f.Code]; ok { // CAT-SVC-* (services.go)
+		return s
+	}
 	switch f.Code {
 	case CodeUnknown, CodeTaskNotFound, CodeNotCatalogApp, CodeConnUnknown:
 		return http.StatusNotFound
-	case CodeBadParams, CodePlatformLLM, CodeUnsupported, CodeConnFormat, CodeBadPlatform:
+	case CodeBadParams, CodeUnsupported, CodeConnFormat, CodeBadPlatform, CodeChooseService, CodeBadUse:
 		return http.StatusBadRequest
-	case CodeNameTaken, CodeBusy, CodeNoMemory, CodeNoDisk, CodeArch, CodeNoPort, CodeTooOld, CodeNoGateway, CodeOldVolumes,
-		CodeDisconnected, CodeConnNoGateway, CodeBadManifest:
+	case CodeNameTaken, CodeBusy, CodeNoMemory, CodeNoDisk, CodeArch, CodeNoPort, CodeTooOld, CodeOldVolumes, CodeNoService,
+		CodeDisconnected, CodeConnNoGateway, CodeBadManifest, CodeLegacyManifest, CodeTaken, CodeRender:
 		return http.StatusConflict
 	case CodePrivateDenied, CodeConnDisabled:
 		return http.StatusForbidden
@@ -192,3 +242,30 @@ func AsFault(err error) *Fault {
 	}
 	return fault(CodeInternal, err, "内部错误：%v", err)
 }
+
+// What CAT-INST-31 … 35 mean and what to do (the fault catalog says the
+// same, word for word).
+const (
+	svcNoServiceMeaning = "这个应用必须用到的一种服务（例如大模型接口），这台机器上没有能用的，安装前就停下了，什么都没装。平台不会替用户去装别的应用来提供它"
+	svcNoServiceAction  = "你手上已经有这种服务的话（地址、Key 等），照 message 里的命令登记一条（acornfox services add 类型 --name 名字 --set 项=值，保密的项写成 项=-，从标准输入给值；命令里的 … 要换成用户给的真实值，先问到再给命令）；登记好以后先运行 acornfox services test 名字 试一下通不通，通了再看一次计划（acornfox install 应用 --plan），能装了再装；这台机器上有、但现在不能用的（提供它的应用停着、还差必填项），--plan 的 how 里写了怎么让它能用"
+	svcChooseMeaning    = "这台机器上有好几条同一类型的服务都能用，平台不替用户选，要指定用哪一条"
+	svcChooseAction     = "从 message 里列的几条服务里选一条用：安装时加 --use 需要名=服务名 选一条，页面上在“需要的服务”里选"
+	svcBadUseMeaning    = "安装时指定的服务（--use）不对：这台机器上没有这个名字的服务、类型不对、现在不能用（例如提供它的应用停着），或者要装的应用里没有这个需要"
+	svcBadUseAction     = "acornfox services list 看有哪些服务和它们的状态；acornfox install 应用 --plan 看应用有哪些需要；改对 --use 再装。提供这条服务的应用停着的，先启动它（acornfox start 应用名）"
+	svcIssueMeaning     = "提供服务的应用没能给这个应用发凭据（例如在大模型网关里建令牌、在数据库里建库和账号）：提供方没在运行，或者它清单里写的步骤没走通：发请求的应答不对（message 说“这个应用限制了请求次数”的，是提供方回了 HTTP 429，平台没有自动重发），或者在它容器里执行的命令退出码不对、超时（命令可能还在容器里运行，没有重新执行）、输出太多。这次安装已失败并清理，发了一半的凭据已尽量收回，提供方清单写了删数据步骤（purge）的，这次建了一半的库或数据也已照着删掉；收不回、删不掉的，任务的 apps[].carried 里有一条 CAT-INST-35 提醒"
+	svcIssueAction      = "看 message 是哪个提供方、哪一步（命令失败的写了退出码和标准错误的最后几行）；acornfox status 提供方 看它是否在运行，acornfox logs 提供方 --tail 200 看日志；说限制了请求次数的，过一会儿再装；提供方的管理员密码在应用里改过的话，平台登不进去：请在提供方应用里手工建一个凭据，登记成服务（acornfox services add …）后用 --use 指定"
+	svcRevokeMeaning    = "发给某个应用的凭据没有收回：收回的步骤没走通，或者接旧数据重装时旧的那份没通过检查、换了一份新的，旧的留在了提供方里，或者应用是用旧格式的清单装的、删除时平台不再替它收回；也可能是应用连数据一起删时，提供方清单里删数据的步骤没走通，给它建的库或数据还留在提供方里；或者安装没成功（或两个安装同时抢一条服务、这个输了）回滚时，平台收回了这次刚发的凭据，再照提供方清单的删数据步骤删这次给它新建的库或数据，没删成；或者这次安装的记录里没写明发的是哪一份凭据（旧版本留下的记录），平台不能确认那份库是这次新建的，所以没有删；或者提供方清单里删数据的步骤不是只按这次发凭据的编号找要删的东西（那可能是装之前就有的数据），回滚时平台也只收回凭据、没有删。这只是提醒：删除、回滚或安装照常完成了，但那个凭据（或那份数据）在提供方应用里可能还在、还能用"
+	svcRevokeAction     = "到提醒里写的那个应用里，按写的名字或编号看一下那一项，用不上就手工删掉；那个应用停着的，启动后再删"
+	legacyMeaning       = "目录里这个应用还是按旧格式的清单（第 2 版及更早）上架的。这一版平台只装新格式（第 3 版）的清单，旧的不装也不转换，安装前就拒绝了，什么都没建（目录的索引里已经标明是旧格式的，连应用包也不下载；没标明的，应用包会先下载到本机缓存，读了清单才知道）。这不是操作不对。用旧清单装好的应用照常运行，能启停、删除。应用中心的列表里这样的应用标着“这是旧格式的清单，这一版装不了，等这个应用按新格式重新上架”（接口里 former 是 true），点进详情也报这个编号"
+	legacyAction        = "这个应用要等按新格式重新上架后才能装，现在装不了，不是你的操作不对。已经装着的旧应用照常用；要用需要的服务、自动接上这些新功能，得等新清单上架后删了重装"
+	svcCheckStopMeaning = "接旧数据重装时，这个应用以前从一条服务拿到的凭据（例如数据库的账号和密码）没通过提供方清单里写的核对。提供方的清单写了“核对不过就停下”（存数据的服务这样写：换一份新的凭据就等于接到一个空的新库，原来的数据就接不上了），所以平台没有换新的，这次安装停下并清理了，原来的接入和凭据原样留着"
+	svcCheckStopAction  = "先查提供方：acornfox status 提供方 看它是否在运行，acornfox logs 提供方 --tail 200 看日志；提供方好了再装一次（还是 --reuse-data）。确认原来的数据还在不在（例如用户在提供方里删过库、改过密码就会这样）。只有用户确定不要原来的数据时，才改接别的服务：加 --use 需要名=服务名 再装；不要自己删库、改密码"
+	svcTakenMeaning     = "要接的那条服务现在接不了这个应用：别的应用把它独占了（清单写了只接没有别的使用方在用的服务），这个应用要独占它但已经有别的应用在用，或者提供它的应用限制了同时接几个、已经接满。删了但数据还留着的应用也占着它的位置（它装回来时要接回去）。安装前就停下了，或者在接的那一刻发现被同时在装的别的应用先接上了，这次安装已清理（这次刚发的凭据已收回，提供方清单写了删数据步骤的，给它新建的库或数据也已删掉；没删成的在任务的 apps[].carried 里有 CAT-INST-35 提醒）"
+	svcTakenAction      = "acornfox services list 看每条服务被谁独占、还能接几个；acornfox install 应用 --plan 看现在能接哪条。有别的同类服务就用 --use 需要名=服务名 指定；没有就登记一条你已有的（acornfox services add …）。占着位置的是删了但数据还留着的应用、用户也确认它不要了：它已经删了，不能直接 delete --volumes，也不要手工 docker volume rm（接入记录还在，位置照样占着）；问过用户后先 acornfox install --name 原来的名字 --reuse-data 装回来，再 acornfox delete 原来的名字 --volumes 连数据一起删，位置才让出来。不要为了腾位置去删别的应用，要删先问用户"
+	renderMeaning       = "清单里写的一个值算不出来：环境变量、启动命令、配置文件、首次登录信息或初始化步骤里的 {{…}} 写法读不了（检查工具会报 CAT-LINT-46、47），一个变换没做成（例如 map 对照表里没有取到的那个值，又没写 \"*=值\" 兜底），if 条件读不了，同名的两条环境变量的条件同时成立，或者启动命令引用了保密的值。这是清单的问题，不是操作不对；这次安装已失败并清理"
+	renderAction        = "看 message 是哪一处的哪个 {{…}}（message 里不带取到的值）。是 map 没对上、条件同时成立这类、要靠换一个值解决的（例如换一种对外方式、--set 改设置项；acornfox catalog platform-vars 看本机平台变量的值），问用户后再装；写法读不了、启动命令带保密值的，是目录的问题，把 message 反馈给我们，不要想办法绕过"
+	varsStaleMeaning    = "应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。这一版平台不会去改已经装好的应用：应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行。这只是提醒，不是出错"
+	varsStaleAction     = "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式不是清单默认的就加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装"
+	retiredMeaning      = "已不再使用的编号：以前是平台内置的大模型来源（--llm）出的错。大模型接口现在是一种普通的服务，这一类问题报 CAT-INST-31～35。编号保留，不会再分给别的错误"
+	retiredAction       = "这一版不会再出现这个编号。遇到了说明看的是旧版本的输出：按 acornfox faults CAT-INST-31 等新编号处理"
+)

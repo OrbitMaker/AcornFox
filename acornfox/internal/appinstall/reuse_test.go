@@ -30,13 +30,14 @@ func installAndKeepData(t *testing.T, v *env, req Request) []string {
 
 // Deleted with its data kept, an app of the same name is refused
 // (CAT-INST-24) unless reuse_data; then the kept parameters come back (same
-// admin password, same session key), init is skipped, and a Hermes can still
-// be linked to the New API because the platform knows its admin again.
+// admin password, same session key), init is skipped, the service it
+// provided is its own again, and a consumer can still get a credential from
+// it because the platform knows its admin again.
 func TestReuseDataRestoresParameters(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
 	vols := installAndKeepData(t, v, Request{App: "new-api"})
-	oldPassword := v.newapi.password
+	oldPassword := v.tokens.password
 	if _, err := v.e.StartInstall(ctx, Request{App: "new-api"}); code(err) != CodeOldVolumes {
 		t.Fatalf("without reuse_data: %v", err)
 	}
@@ -59,11 +60,14 @@ func TestReuseDataRestoresParameters(t *testing.T) {
 	if _, err := v.w.st.GetKeptCatalogSecrets(ctx, "new-api"); err == nil {
 		t.Fatal("kept parameters not dropped after the reuse install")
 	}
-	// the reused gateway still issues tokens: the platform knows its admin
+	if sv, err := registry(t, v).GetService(ctx, "new-api"); err != nil || sv.App != "new-api" || len(tv.Apps[0].Services) != 0 {
+		t.Fatalf("its service taken over: %+v %v (%+v)", sv, err, tv.Apps[0])
+	}
+	// the reused provider still issues tokens: the platform knows its admin
 	v.w.adopted[hermesDigestForTest] = true
-	h := v.install(t, Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "local_gateway"}}})
-	if h.Status != state.TaskSucceeded {
-		t.Fatalf("hermes on the reused New API: %+v", h.Fault)
+	h := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
+	if h.Status != state.TaskSucceeded || v.tokens.tokenCount() != 1 {
+		t.Fatalf("hermes on the reused provider: %+v", h.Fault)
 	}
 }
 
@@ -104,7 +108,7 @@ func TestReuseDataOfAnotherApp(t *testing.T) {
 	ctx := context.Background()
 	installAndKeepData(t, v, Request{App: "new-api", Name: "box"})
 	v.w.adopted[hermesDigestForTest] = true
-	_, err := v.e.StartInstall(ctx, Request{App: "hermes-agent", Name: "box", ReuseData: true, Params: map[string]any{"llm": map[string]any{"source": "own", "base_url": "https://x.example/v1", "api_key": "sk-test-key", "model": "m"}}})
+	_, err := v.e.StartInstall(ctx, Request{App: "hermes-agent", Name: "box", ReuseData: true})
 	if code(err) != CodeOldVolumes || !strings.Contains(err.Error(), "new-api") {
 		t.Fatalf("got %v", err)
 	}

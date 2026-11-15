@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -26,7 +26,8 @@ type Sessions interface {
 	RevokeConsoleSessionDigest(ctx context.Context, digest string) error
 }
 
-// Refresher re-syncs Caddy routes (the reconciler's RefreshRoutes).
+// Refresher hands the entry proxy its configuration again (the reconciler's
+// RefreshRoutes).
 type Refresher interface{ RefreshRoutes(ctx context.Context) }
 
 // Error is a classified failure returned to the API layer.
@@ -69,7 +70,7 @@ type EnableResult struct {
 // ManagerConfig wires a Manager.
 type ManagerConfig struct {
 	Store    *FileStore
-	Verifier caddyroute.Verifier
+	Verifier edge.Challenger
 	Sessions Sessions
 	Routes   Refresher
 	Fetch    Fetcher                                     // nil => HTTPFetcher(3s)
@@ -189,8 +190,8 @@ func (m *Manager) StartVerify(ctx context.Context, domain string) (VerifyInfo, e
 	}
 	path := VerifyPathPrefix + id
 	if err := m.cfg.Verifier.SetChallenge(ctx, d, path, token); err != nil {
-		return VerifyInfo{}, &Error{Status: http.StatusBadGateway, Code: "caddy_unavailable",
-			Message: "无法在 Caddy 上设置域名验证：" + err.Error()}
+		return VerifyInfo{}, &Error{Status: http.StatusBadGateway, Code: "edge_unavailable",
+			Message: "无法在网关上设置域名验证：" + err.Error()}
 	}
 	m.mu.Lock()
 	m.pending = &pendingVerify{domain: d, id: id, token: token, expires: m.cfg.Now().Add(VerifyTTL)}

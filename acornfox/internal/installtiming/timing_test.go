@@ -46,10 +46,11 @@ func TestEveryStepHasTimesAndSource(t *testing.T) {
 	// The health threshold is past the longest health wait a published
 	// manifest allows (Hermes: timeout_s 300), the start one under the
 	// engine's 15 minutes, the image one under the task's 60 minutes.
-	// A pull from the public sources is cut off at 10 minutes, so its stuck
-	// threshold is past that; a gateway download is not.
+	// A pull from the public sources is cut off at 50 minutes over all
+	// sources, so its stuck threshold is past that and under the task's 60;
+	// a gateway download is not cut off.
 	if Limits["health"].StuckAfter <= 300*time.Second || Limits["start"].StuckAfter >= 15*time.Minute || Limits["image.gateway"].StuckAfter >= 60*time.Minute ||
-		Limits["image"].StuckAfter <= 10*time.Minute || Limits["image"].Normal >= 10*time.Minute {
+		Limits["image"].StuckAfter <= 50*time.Minute || Limits["image"].StuckAfter >= 60*time.Minute || Limits["image"].Normal >= 20*time.Minute {
 		t.Fatalf("门槛和引擎自己的时限对不上：%+v", Limits)
 	}
 }
@@ -94,11 +95,14 @@ func TestRunningSlowAndStuck(t *testing.T) {
 	}
 	// The image step looks at doctor, not at logs (there is no container yet).
 	task.Steps = steps("new-api", "image", 0)
-	if v = Assess(task, t0.Add(7*time.Minute), "server"); !v.Slow || v.Stuck {
-		t.Fatalf("public pull at 7 min (a real one took 422 s): %+v", v)
+	if v = Assess(task, t0.Add(7*time.Minute), "server"); v.Slow || v.Stuck {
+		t.Fatalf("public pull at 7 min (a real one took 422 s) is normal: %+v", v)
 	}
-	v = Assess(task, t0.Add(13*time.Minute), "server")
-	if !v.Stuck || v.NextCommand != "acornfox doctor --json" || v.Step.StuckAfterSeconds != 720 {
+	if v = Assess(task, t0.Add(20*time.Minute), "server"); !v.Slow || v.Stuck {
+		t.Fatalf("public pull at 20 min (a home line took up to 32 min) is slow, not stuck: %+v", v)
+	}
+	v = Assess(task, t0.Add(53*time.Minute), "server")
+	if !v.Stuck || v.NextCommand != "acornfox doctor --json" || v.Step.StuckAfterSeconds != 3120 {
 		t.Fatalf("image stuck: %+v", v)
 	}
 	// Once done, the image step is timed by how it came.
@@ -130,19 +134,114 @@ func TestDownloadStall(t *testing.T) {
 	}
 }
 
-// Succeeded: final, the old token that could not be revoked and the no-quota
-// token are must-tells, the other carried lines are not.
+// A pull from the public sources (progress phase pull) counts as the plain
+// image step, not as a download through the gateway, and is judged stuck by
+// its own time: the minutes spent on the gateway before it do not count. A
+// slow network's long pull (longer than the task's 60 minutes would have
+// allowed together with the other steps) is not called stuck.
+func TestPublicPull(t *testing.T) {
+	task := Task{ID: "t3", Status: StatusRunning, CreatedAt: t0, Steps: steps("demo-app", "image", 0)}
+	task.Steps[2].Message = "从 dockerproxy.net 拉 demo/app:1（第 2 个源，共 3 个）：已下 120 MB / 304 MB（39%，最近 85 KB/s），这个镜像已拉 40 分 0 秒"
+	task.Steps[2].Progress = &Progress{Phase: PhasePull, DoneBytes: 120 << 20, TotalBytes: 304 << 20, BytesPerSec: 85 << 10, Source: "dockerproxy.net", PullSeconds: 2400}
+	if LimitFor(task.Steps[2]) != Limits["image"] {
+		t.Fatal("a public pull counted as the gateway's download")
+	}
+	// The step began 55 minutes ago (the gateway was tried first), the pull 40.
+	v := Assess(task, t0.Add(55*time.Minute), "server")
+	if v.Stuck || !v.Slow || !strings.Contains(v.Say, "已下 120 MB / 304 MB") || v.Next != NextRunning {
+		t.Fatalf("pulling for 40 min: %+v", v)
+	}
+	task.Steps[2].Progress.PullSeconds = 53 * 60
+	if v = Assess(task, t0.Add(55*time.Minute), "server"); !v.Stuck || v.Code != CodeStuck {
+		t.Fatalf("pulled 53 min, past one image's limit: %+v", v)
+	}
+	// Without the pull's own time (an older server) the step's time decides, as before.
+	task.Steps[2].Progress = nil
+	if v = Assess(task, t0.Add(55*time.Minute), "server"); !v.Stuck {
+		t.Fatalf("no progress: %+v", v)
+	}
+}
+
+// Succeeded: final; a credential not taken back (a line beginning with
+// RevokeCode, of any app of the task) is a must-tell, the other carried
+// lines are not.
 func TestSucceededMustTell(t *testing.T) {
-	notRevoked := NotRevokedPrefix + "以前在 new-api 里给 hermes-agent 的令牌（编号 1，结尾 rvRH）：new-api 停着。这把令牌不限额、不过期"
-	task := Task{ID: "t3", Status: StatusSucceeded, CreatedAt: t0, FinishedAt: at(18), Steps: steps("hermes-agent", "", 0),
-		Apps: []App{{Name: "hermes-agent", Carried: []string{"接上了旧数据（af-hermes-agent-1）", notRevoked}},
-			{Name: "other", TokenProvider: "new-api"}}}
+	notTaken := RevokeCode + " consumer-app 的“model”：以前 provider-app 发给它的那份凭据没通过检查，已经换了一份新的；旧的那份（名字或备注里带编号 0a1b2c3d）没有删，要不要删请到 provider-app 里看"
+	revokeFailed := RevokeCode + " 没能收回发给 other 的凭据（应用停着）：请到 provider-app 里手工删掉给 other 建的那一项"
+	task := Task{ID: "t3", Status: StatusSucceeded, CreatedAt: t0, FinishedAt: at(18), Steps: steps("consumer-app", "", 0), HasSecrets: true,
+		Apps: []App{{Name: "consumer-app", Carried: []string{"接上了旧数据（af-consumer-app-1）", notTaken}},
+			{Name: "other", Carried: []string{revokeFailed, "沿用以前改过的平台变量：platform.tz=Asia/Tokyo"}}}}
 	v := Assess(task, t0.Add(time.Hour), "server")
-	if !v.Done || v.Stuck || v.Slow || v.Step != nil || v.ElapsedSeconds != 18 || v.Say != "已装好，整次用了 18 秒。" || v.NextCommand != "" || v.Next != NextSucceeded {
+	if !v.Done || v.Stuck || v.Slow || v.Step != nil || v.ElapsedSeconds != 18 || v.Say != "已装好，整次用了 18 秒。" || v.NextCommand != "" || v.Next != NextSucceeded ||
+		v.ShowSecretsCommand != "acornfox install status t3 --show-secrets" {
 		t.Fatalf("%+v", v)
 	}
-	if len(v.MustTell) != 2 || v.MustTell[0] != notRevoked || v.MustTell[1] != TokenNote("other", "new-api") {
+	if len(v.MustTell) != 2 || v.MustTell[0] != notTaken || v.MustTell[1] != revokeFailed {
 		t.Fatalf("must_tell %q", v.MustTell)
+	}
+}
+
+// What the providers of the services the apps were plugged into wrote for
+// the user (App.Tell) goes into must_tell after the credentials not taken
+// back, each sentence once even when two apps use the same service.
+func TestSucceededMustTellProviderAsk(t *testing.T) {
+	ask := "在提供方应用里加好上游后，填一个要用的模型名"
+	revokeFailed := RevokeCode + " 没能收回发给 other 的凭据（应用停着）：请到 provider-app 里手工删掉给 other 建的那一项"
+	task := Task{ID: "t5", Status: StatusSucceeded, CreatedAt: t0, FinishedAt: at(10), Steps: steps("a", "", 0),
+		Apps: []App{{Name: "a", Tell: []string{ask}}, {Name: "b", Carried: []string{revokeFailed}, Tell: []string{ask, " "}}}}
+	v := Assess(task, t0.Add(time.Hour), "server")
+	if len(v.MustTell) != 2 || v.MustTell[0] != revokeFailed || v.MustTell[1] != ask {
+		t.Fatalf("must_tell %q", v.MustTell)
+	}
+	// Not before the end.
+	task.Status, task.FinishedAt = "running", nil
+	if v = Assess(task, t0, "server"); v.MustTell != nil {
+		t.Fatalf("must_tell while running: %q", v.MustTell)
+	}
+}
+
+// The verdict on a finished install says how to tell the user, in order:
+// the login (no password; the command that shows it is a field of its own,
+// with the real task id), how to open it by open_hint (ask first when there
+// is a question; the address after switching does not open before), then
+// user_steps and must_tell. Next names fields and the order only: no
+// command sits inside its sentences.
+func TestNextSucceededSaysOpenHint(t *testing.T) {
+	if c := ShowSecretsCommand("5961fd8ff351"); c != "acornfox install status 5961fd8ff351 --show-secrets" {
+		t.Errorf("show secrets: %s", c)
+	}
+	for _, want := range []string{"first_login", "账号和地址", "url_note", "show_secrets_command", "open_hint", "ask", "ask_yes_command",
+		"lan_url_after_expose", "打不开", "command", "tunnel_command", "代码块", "apps[].url", "user_steps", "must_tell", "照原话",
+		"apps[].bindings", "command_where", "tunnel_where", "用户自己电脑上运行", "不要说成在服务器上运行",
+		"apps[].internal", "不用打开", "只在内部网络", "给别的应用用"} {
+		if !strings.Contains(NextSucceeded, want) {
+			t.Errorf("NextSucceeded lacks %q", want)
+		}
+	}
+	for _, not := range []string{"acornfox ", "--show-secrets", "--expose", "<task_id>", "open_hint.lan_url"} {
+		if strings.Contains(NextSucceeded, not) {
+			t.Errorf("NextSucceeded has %q in it: %s", not, NextSucceeded)
+		}
+	}
+	// No password among the first-login fields (the app lets the user make
+	// their own account): no command, nothing sends the user to look one up.
+	plain := Task{ID: "t8", Status: StatusSucceeded, CreatedAt: t0, FinishedAt: at(5), Steps: steps("a", "", 0)}
+	if v := Assess(plain, t0, "server"); v.ShowSecretsCommand != "" {
+		t.Errorf("command without a secret: %q", v.ShowSecretsCommand)
+	}
+	plain.HasSecrets = true
+	if v := Assess(plain, t0, "server"); v.ShowSecretsCommand != "acornfox install status t8 --show-secrets" {
+		t.Errorf("command with a secret: %q", v.ShowSecretsCommand)
+	}
+	// No task id, no command to fill in.
+	task := Task{Status: StatusSucceeded, CreatedAt: t0, FinishedAt: at(5), Steps: steps("a", "", 0), HasSecrets: true}
+	if v := Assess(task, t0, "server"); v.ShowSecretsCommand != "" {
+		t.Errorf("command without an id: %q", v.ShowSecretsCommand)
+	}
+	// Only once succeeded.
+	task.ID, task.Status, task.FinishedAt = "t9", "running", nil
+	if v := Assess(task, t0, "server"); v.ShowSecretsCommand != "" {
+		t.Errorf("command while running: %q", v.ShowSecretsCommand)
 	}
 }
 

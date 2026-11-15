@@ -23,9 +23,15 @@ type edgeRunner struct {
 	// noBind makes binding this host address fail like Docker does when it
 	// runs in a VM without that address (WSL 2 in NAT mode).
 	noBind string
+	// onEnsure, when set, sees every spec after it is recorded (outside the
+	// lock).
+	onEnsure func(runner.EdgeSpec)
 }
 
 func (e *edgeRunner) EnsureEdge(_ context.Context, s runner.EdgeSpec) (runner.EdgeInfo, error) {
+	if e.onEnsure != nil {
+		defer e.onEnsure(s)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.specs = append(e.specs, s)
@@ -35,7 +41,7 @@ func (e *edgeRunner) EnsureEdge(_ context.Context, s runner.EdgeSpec) (runner.Ed
 		}
 	}
 	key := specKey(s)
-	recreated := key != e.lastKey
+	recreated := key != e.lastKey || s.Recreate
 	e.lastKey = key
 	return runner.EdgeInfo{Running: true, Recreated: recreated}, nil
 }
@@ -62,7 +68,7 @@ func newEdgeHarness(t *testing.T, mode, defaultExposure string) (*Reconciler, *f
 	rec := New(Config{
 		Store:     st,
 		Runner:    er,
-		Router:    rt,
+		Proxy:     rt,
 		UploadDir: t.TempDir(),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Tick:      time.Hour,
@@ -186,7 +192,7 @@ func TestEdgeDomainsPublishHTTPPorts(t *testing.T) {
 func TestNoEdgeConfigKeepsHostCaddy(t *testing.T) {
 	st, rt := newStore(), newRouter()
 	er := &edgeRunner{fakeRunner: newRunner()}
-	rec := New(Config{Store: st, Runner: er, Router: rt, UploadDir: t.TempDir(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Tick: time.Hour})
+	rec := New(Config{Store: st, Runner: er, Proxy: rt, UploadDir: t.TempDir(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Tick: time.Hour})
 	liveEdgeApp(st, er, "web", "", 18810)
 	rec.syncRoutesIfChanged(context.Background())
 	if len(er.specs) != 0 {
@@ -220,7 +226,7 @@ func (c *concurrentEdge) EnsureEdge(ctx context.Context, s runner.EdgeSpec) (run
 func TestEnsureEdgeIsSerialized(t *testing.T) {
 	st, rt := newStore(), newRouter()
 	ce := &concurrentEdge{edgeRunner: edgeRunner{fakeRunner: newRunner()}}
-	rec := New(Config{Store: st, Runner: ce, Router: rt, UploadDir: t.TempDir(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Tick: time.Hour,
+	rec := New(Config{Store: st, Runner: ce, Proxy: rt, UploadDir: t.TempDir(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Tick: time.Hour,
 		Edge: &EdgeConfig{Mode: runner.EdgeModeHost, AdminPort: 18808, AdminToken: "0123456789abcdef0123456789abcdef"}})
 	liveEdgeApp(st, &ce.edgeRunner, "web", "", 18810)
 	var wg sync.WaitGroup

@@ -1,0 +1,7 @@
+schema: 1
+kind: demo_token
+label: 样例令牌
+summary: 只为测试用的一种服务，一个地址加一个令牌
+fields:
+  - { key: url, label: 地址, type: url, required: true }
+  - { key: token, label: 令牌, type: string, required: true, secret: true }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/acornfox/acornfox/internal/catalog"
+	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -26,11 +27,13 @@ func envMap(t *testing.T, v *env, app string) map[string]string {
 	return out
 }
 
-// In China on Aliyun: the apps get the machine's time zone, Aliyun's public
-// mirrors and the platform's default model, without the user filling any.
+// In China on Aliyun: the apps get the machine's time zone and Aliyun's
+// public mirrors without the user filling any. No model name is filled in
+// behind the user's back: the model is the app's own setting (or the
+// service's), empty here.
 func TestPlatformVarsFillApps(t *testing.T) {
 	v := setupWith(t, func(c *Config) {
-		c.Platform = PlatformEnv{China: true, Cloud: "aliyun", TZ: "Asia/Tokyo", ChatModel: "qwen-plus"}
+		c.Platform = PlatformEnv{China: true, Cloud: "aliyun", TZ: "Asia/Tokyo"}
 	})
 	if tv := v.install(t, Request{App: "new-api"}); tv.Status != state.TaskSucceeded {
 		t.Fatalf("new-api %+v", tv.Fault)
@@ -39,7 +42,7 @@ func TestPlatformVarsFillApps(t *testing.T) {
 		t.Fatalf("new-api TZ %q", got)
 	}
 	v.w.adopted[hermesDigestForTest] = true
-	tv := v.install(t, Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "local_gateway"}}})
+	tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatalf("hermes %+v", tv.Fault)
 	}
@@ -56,33 +59,32 @@ func TestPlatformVarsFillApps(t *testing.T) {
 		}
 	}
 	cfg := string(v.w.wrote[0].Files[0].Content)
-	if !strings.Contains(cfg, `default: "qwen-plus"`) {
-		t.Fatalf("default model not from the platform:\n%s", cfg)
-	}
-	// the user's own model still wins over the platform default
-	v2 := setupWith(t, func(c *Config) { c.Platform = PlatformEnv{ChatModel: "qwen-plus"} })
-	if tv := v2.install(t, Request{App: "new-api"}); tv.Status != state.TaskSucceeded {
-		t.Fatal(tv.Fault)
-	}
-	v2.w.adopted[hermesDigestForTest] = true
-	if tv := v2.install(t, Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "local_gateway", "model": "glm-4"}}}); tv.Status != state.TaskSucceeded {
-		t.Fatal(tv.Fault)
-	}
-	if cfg := string(v2.w.wrote[0].Files[0].Content); !strings.Contains(cfg, `default: "glm-4"`) {
-		t.Fatalf("user model lost:\n%s", cfg)
+	if !strings.Contains(cfg, `default: "demo-model"`) {
+		t.Fatalf("not the model the user gave:\n%s", cfg)
 	}
 }
 
 // Outside China (and when this machine names no time zone): official
-// registries and UTC. In China off the known clouds: Huawei's mirrors.
+// registries and UTC. In China off the known clouds: Huawei's mirrors. The
+// engine has these from the standalone provider (internal/platformvar,
+// where the full cases are tested); nothing about a model is filled.
 func TestPlatformDefaults(t *testing.T) {
+	ctx := context.Background()
 	e := &Engine{cfg: Config{}}
-	b := e.platformBase()
-	if b["region"] != "global" || b["tz"] != "UTC" || b["mirror.pypi"] != officialPyPI || b["mirror.npm"] != officialNPM || b["llm.model.chat"] != DefaultGatewayModel {
+	b, err := e.platformValues(ctx, platformvar.App{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b["region"] != "global" || b["tz"] != "UTC" || b["mirror.pypi"] != "https://pypi.org/simple/" || b["mirror.npm"] != "https://registry.npmjs.org/" {
 		t.Fatalf("global %v", b)
 	}
+	for _, name := range []string{"llm.model.chat", "llm.api_key", "llm.base_url"} {
+		if _, ok := b[name]; ok {
+			t.Fatalf("%s has a value: the platform fills nothing about a model %v", name, b)
+		}
+	}
 	e.cfg.Platform = PlatformEnv{China: true, Cloud: "volcengine", TZ: "../../etc/passwd"}
-	b = e.platformBase()
+	b, _ = e.platformValues(ctx, platformvar.App{})
 	if b["region"] != "cn" || !strings.Contains(b["mirror.pypi"], "huaweicloud") || !strings.Contains(b["mirror.npm"], "huaweicloud") || b["tz"] != "UTC" {
 		t.Fatalf("cn %v", b)
 	}
@@ -107,12 +109,11 @@ func TestPlatformSets(t *testing.T) {
 		{"timezone": "Asia/Tokyo"},               // not in the table
 		{"region": "global"},                     // the platform decides
 		{"app.url": "https://evil.example"},      // the platform decides
-		{"llm.api_key": "sk-x"},                  // the platform decides
+		{"llm.api_key": "sk-x"},                  // not in the table (a model API is a service)
 		{"mirror.pypi": "ftp://m.example/"},      // not http(s)
 		{"mirror.pypi": "https://u:p@m.example"}, // credentials in the address
 		{"tz": "../../etc/passwd"},               // not a zone name
 		{"tz": "Asia/Tokyo\nX=1"},                // newline
-		{"llm.model.chat": "a b"},                // not a model name
 		{"tz": "  "},                             // empty
 	}
 	for _, sets := range bad {
@@ -139,8 +140,15 @@ func TestPlatformAppURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := Values(saved).lookup("platform.app.url")
-	if err != nil || got == "" || !strings.HasSuffix(got, ":"+strconv.Itoa(a.PublicPort)) {
+	if err != nil || got != "http://127.0.0.1:"+strconv.Itoa(a.PublicPort) {
 		t.Fatalf("app.url %q %v", got, err)
+	}
+	// Its parts, worked out with it (only on this machine: http, 127.0.0.1).
+	if s, err := Values(saved).lookup("platform.app.scheme"); err != nil || s != "http" {
+		t.Fatalf("app.scheme %q %v", s, err)
+	}
+	if h, err := Values(saved).lookup("platform.app.host"); err != nil || h != "127.0.0.1" {
+		t.Fatalf("app.host %q %v", h, err)
 	}
 	if _, err := Values(saved).lookup("platform.llm.api_key"); err == nil {
 		t.Fatal("platform.llm.api_key resolved directly")
@@ -164,7 +172,7 @@ func TestDiskCheck(t *testing.T) {
 	}
 	// a recipe adds up its apps: 512 + 6144 MB
 	v2 := setupWith(t, space(DiskSpace{DockerFree: 6000 << 20, DockerPath: "/var/lib/docker", Same: true}))
-	if _, err := v2.e.StartInstall(ctx, Request{Recipe: "hermes-with-new-api"}); code(err) != CodeNoDisk || !strings.Contains(err.Error(), "6656 MB") {
+	if _, err := v2.e.StartInstall(ctx, Request{Recipe: "hermes-with-new-api", Params: hermesModel()}); code(err) != CodeNoDisk || !strings.Contains(err.Error(), "6656 MB") {
 		t.Fatalf("recipe: %v", err)
 	}
 	v3 := setupWith(t, func(c *Config) {
@@ -198,7 +206,7 @@ func TestDiskCheckArchive(t *testing.T) {
 	if tv := v.install(t, Request{App: "new-api"}); tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
-	_, err := v.e.StartInstall(ctx, Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "local_gateway"}}})
+	_, err := v.e.StartInstall(ctx, Request{App: "hermes-agent", Params: hermesModel()})
 	if code(err) != CodeNoDisk || !strings.Contains(err.Error(), "1069 MB") || !strings.Contains(err.Error(), "uploads") {
 		t.Fatalf("archive: %v", err)
 	}
@@ -207,13 +215,14 @@ func TestDiskCheckArchive(t *testing.T) {
 	if tv := v2.install(t, Request{App: "new-api"}); tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
-	if _, err := v2.e.StartInstall(ctx, Request{App: "hermes-agent", Params: map[string]any{"llm": map[string]any{"source": "local_gateway"}}}); code(err) == CodeNoDisk {
+	if _, err := v2.e.StartInstall(ctx, Request{App: "hermes-agent", Params: hermesModel()}); code(err) == CodeNoDisk {
 		t.Fatalf("2 GB upload partition refused: %v", err)
 	}
 }
 
 // A manifest using a platform variable this binary does not have (from a
-// newer catalog) is refused before anything is created (CAT-INST-23).
+// newer catalog), or one without a value on this machine, is refused before
+// anything is created (CAT-INST-23).
 func TestUnknownPlatformVarRefusedEarly(t *testing.T) {
 	e := &Engine{cfg: Config{Version: "0.5.0", Arch: "amd64"}}
 	base := func() *catalog.Manifest {
@@ -229,7 +238,7 @@ func TestUnknownPlatformVarRefusedEarly(t *testing.T) {
 		"first_login": func(m *catalog.Manifest) {
 			m.FirstLogin = []catalog.LoginField{{Label: "x", From: "platform.app.domain"}}
 		},
-		"via_param": func(m *catalog.Manifest) { m.Env = []catalog.EnvVar{{Key: "K", From: "platform.llm.api_key"}} },
+		"a former variable": func(m *catalog.Manifest) { m.Env = []catalog.EnvVar{{Key: "K", From: "platform.llm.api_key"}} },
 	}
 	for name, mod := range cases {
 		m := base()
@@ -246,22 +255,24 @@ func TestUnknownPlatformVarRefusedEarly(t *testing.T) {
 }
 
 func TestTimezoneMustExist(t *testing.T) {
-	if err := checkPlatformSets(map[string]string{"tz": "Asia/Tokio"}); code(err) != CodeBadPlatform {
+	e := &Engine{cfg: Config{}}
+	if err := e.checkPlatformSets(map[string]string{"tz": "Asia/Tokio"}); code(err) != CodeBadPlatform {
 		t.Fatalf("typo accepted: %v", err)
 	}
 	for _, ok := range []string{"Asia/Tokyo", "UTC", "Etc/UTC", "America/Argentina/Buenos_Aires"} {
-		if err := checkPlatformSets(map[string]string{"tz": ok}); err != nil {
+		if err := e.checkPlatformSets(map[string]string{"tz": ok}); err != nil {
 			t.Fatalf("%s: %v", ok, err)
 		}
 	}
-	e := &Engine{cfg: Config{Platform: PlatformEnv{TZ: "Asia/Tokio"}}}
-	if got := e.platformBase()["tz"]; got != "UTC" {
-		t.Fatalf("unknown host zone kept: %s", got)
+	e = &Engine{cfg: Config{Platform: PlatformEnv{TZ: "Asia/Tokio"}}}
+	if got, _ := e.platformValues(context.Background(), platformvar.App{}); got["tz"] != "UTC" {
+		t.Fatalf("unknown host zone kept: %s", got["tz"])
 	}
 }
 
 // The detail lists the platform variables an app uses, with this machine's
-// values; the full list marks the platform key as not available yet.
+// values; the full list has every variable of the table, none about a model
+// (a model API is a service).
 func TestPlatformViews(t *testing.T) {
 	v := setupWith(t, func(c *Config) { c.Platform = PlatformEnv{China: true, TZ: "Asia/Shanghai"} })
 	ctx := context.Background()
@@ -275,7 +286,7 @@ func TestPlatformViews(t *testing.T) {
 		got[p.Name] = p
 		names = append(names, p.Name)
 	}
-	if strings.Join(names, ",") != "llm.model.chat,mirror.npm,mirror.pypi,tz" {
+	if strings.Join(names, ",") != "mirror.npm,mirror.pypi,tz" {
 		t.Fatalf("hermes uses %v", names)
 	}
 	if got["tz"].Value != "Asia/Shanghai" || !got["tz"].UserCanSet || !strings.Contains(got["mirror.pypi"].Value, "huaweicloud") {
@@ -286,11 +297,10 @@ func TestPlatformViews(t *testing.T) {
 		t.Fatalf("%d vars", len(all))
 	}
 	for _, p := range all {
+		if strings.HasPrefix(p.Name, "llm.") {
+			t.Fatalf("a platform variable about a model: %+v", p)
+		}
 		switch p.Name {
-		case "llm.api_key", "llm.base_url":
-			if p.Available || p.Value != "" {
-				t.Fatalf("%s should not be available: %+v", p.Name, p)
-			}
 		case "region":
 			if p.Value != "cn" || p.UserCanSet {
 				t.Fatalf("region %+v", p)

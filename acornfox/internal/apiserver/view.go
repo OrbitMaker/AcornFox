@@ -3,6 +3,7 @@ package apiserver
 import (
 	"fmt"
 
+	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
@@ -71,7 +72,7 @@ type appView struct {
 	CPUMilli          int    `json:"cpu_milli"`
 	URL               string `json:"url"`
 	LANURL            string `json:"lan_url,omitempty"` // http://<LAN address>:<port> when reachable from the local network
-	Exposure          string `json:"exposure"`          // effective: local | lan | public | afx_cloud
+	Exposure          string `json:"exposure"`          // effective: local | lan | public | afx_cloud | internal
 	// ExposureIsDefault: the app has no exposure of its own and follows the
 	// platform default (DefaultExposure); PATCH exposure "" goes back to it.
 	ExposureIsDefault bool   `json:"exposure_is_default,omitempty"`
@@ -82,7 +83,13 @@ type appView struct {
 	LocalOnly bool `json:"local_only,omitempty"`
 	// OpenHint tells a local-only app on a Linux server how the user opens
 	// it from their own computer (the loopback URL does not open there).
-	OpenHint      *openHint          `json:"open_hint,omitempty"`
+	OpenHint *openHint `json:"open_hint,omitempty"`
+	// InternalOnly: the app is reached over the app network only (exposure
+	// internal, a database or a cache installed from the app catalog): it
+	// has no URL, no open hint, nothing to open, and its access cannot be
+	// changed. InternalNote says so in words, for people and for the AI.
+	InternalOnly  bool               `json:"internal_only,omitempty"`
+	InternalNote  string             `json:"internal_note,omitempty"`
 	ObservedState string             `json:"observed_state"` // running | stopped | missing | unavailable
 	Observed      *observedContainer `json:"observed,omitempty"`
 	Live          *deploymentOut     `json:"live,omitempty"`
@@ -103,10 +110,15 @@ type appView struct {
 	CatalogOrigin       string `json:"catalog_origin,omitempty"`
 	CatalogOriginName   string `json:"catalog_origin_name,omitempty"`
 	CatalogDisconnected bool   `json:"catalog_disconnected,omitempty"`
-	// GatewayTokenFrom names the local model gateway app (New API) that
-	// issued this app a token when it was installed. The token has no quota
-	// and no expiry; the console and the CLI say so. Detail view only.
-	GatewayTokenFrom string `json:"gateway_token_from,omitempty"`
+	// Services are the app's needs (written the new way in its manifest)
+	// and the service each is plugged into ("" when none). Detail view only;
+	// left out for apps without such needs.
+	Services []appinstall.AppServiceUse `json:"services,omitempty"`
+	// LegacyNote: for an app installed with a manifest of the former
+	// format, one sentence for the user (it runs as before; the new
+	// features need it installed again). Detail view only; left out for
+	// any other app.
+	LegacyNote string `json:"legacy_note,omitempty"`
 }
 
 // openHint is how to open a local-only app from the user's own computer.
@@ -118,8 +130,19 @@ type openHint struct {
 	// LANAddress is the server's private IPv4 on the user's local network;
 	// "" on a cloud or other public server.
 	LANAddress string `json:"lan_address,omitempty"`
-	// LANURL is where the app opens after switching it to lan exposure.
+	// LANURL is only set when the app already opens on the LAN, so the
+	// address works now. open_hint is only given to apps that do not, so it
+	// stays empty here; the address of an exposed app is the view's lan_url.
 	LANURL string `json:"lan_url,omitempty"`
+	// LANURLAfterExpose is where the app would open after switching it to
+	// lan exposure (CanLAN only). It does not open now.
+	LANURLAfterExpose string `json:"lan_url_after_expose,omitempty"`
+	// Ask is the question to put to the user as it is, word for word, when
+	// Recommend is "lan" and the app is not exposed yet: whether to let the
+	// computers of the LAN open it, with what that means. AskYesCommand is
+	// what the AI runs once the user agrees.
+	Ask           string `json:"ask,omitempty"`
+	AskYesCommand string `json:"ask_yes_command,omitempty"`
 	// HasLogin: the app asks for its own login (a catalog app whose
 	// manifest gives first-login credentials). Apps without it are never
 	// offered the LAN switch here.
@@ -129,9 +152,25 @@ type openHint struct {
 	CanLAN    bool   `json:"can_lan"`
 	Recommend string `json:"recommend"` // lan | tunnel
 	// Command opens the app through an SSH tunnel, run on the user's own
-	// computer.
-	Command string `json:"command"`
+	// computer. CommandWhere says so to the user, word for word: run on
+	// the server, it only prints the server's own loopback address.
+	Command      string `json:"command"`
+	CommandWhere string `json:"command_where"`
+	// TunnelCommand is the same tunnel without the acornfox command line
+	// on the user's computer: plain ssh, the real port filled in; the user
+	// puts their own login and the server's address in place of
+	// "用户@服务器地址". TunnelURL is what they then open in the browser.
+	// TunnelWhere says where it runs, like CommandWhere.
+	TunnelCommand string `json:"tunnel_command,omitempty"`
+	TunnelWhere   string `json:"tunnel_where,omitempty"`
+	TunnelURL     string `json:"tunnel_url,omitempty"`
 }
+
+// Where an open hint's two commands run, said to the user as they are.
+const (
+	openCommandWhere = "在你自己电脑的终端运行（电脑上要装了 acornfox 命令行，并用 --ssh 登记过这台服务器）；在服务器上运行没有用"
+	tunnelWhere      = "在你自己电脑的终端运行，保持不关"
+)
 
 // appURL builds the public URL for an app: http://<public-host>:<PublicPort>.
 func appURL(publicHost string, publicPort int) string {

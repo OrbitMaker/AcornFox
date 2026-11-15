@@ -25,3 +25,23 @@ func TestHasLogin(t *testing.T) {
 		t.Fatal("invalid name: want false")
 	}
 }
+
+// Only an address the machine itself answers on gets the first-login note:
+// the loopback range and ::1, not localhost (a desktop install, where the
+// user sits at that machine) and not a LAN or public address.
+func TestLoopbackURL(t *testing.T) {
+	for u, want := range map[string]bool{
+		"http://127.0.0.1:18811":    true,
+		"http://127.0.0.2:80/x":     true,
+		"http://[::1]:18811/":       true,
+		"http://localhost:18811":    false,
+		"http://192.168.1.20:18811": false,
+		"https://app.example.com/":  false,
+		"":                          false,
+		"http://%zz":                false,
+	} {
+		if got := loopbackURL(u); got != want {
+			t.Errorf("%q: %v", u, got)
+		}
+	}
+}

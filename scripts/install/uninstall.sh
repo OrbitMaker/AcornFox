@@ -2,13 +2,13 @@
 # AcornFox 卸载脚本（Linux 服务器）
 #
 # 做什么：停止并删除 acornfox-server、acornfox-runner 服务，删除 AcornFox 创建的容器
-#         （应用、附加服务、Caddy 容器 acornfox-caddy）和网络，删除 /usr/local/bin/acornfox。
+#         （应用、附加服务、入口容器，即带 acornfox.edge=1 标签的容器）和网络，删除 /usr/local/bin/acornfox。
 #         默认保留数据：/var/lib/acornfox、数据卷、镜像，重新安装后应用和数据库还在；保留数据时
 #         在 /var/lib/acornfox/installed-version 记下版本号，之后不能装比它旧的版本。
 # 用法：  sudo bash uninstall.sh            卸载，保留数据
 #         sudo bash uninstall.sh --purge    连同数据卷、数据目录、镜像、系统账号一起删除（不可恢复）
 #         加 -y 不再询问确认。
-# 不动：  Docker 本身、v0.3.x 留在宿主机上的 Caddy 程序文件（/usr/bin/caddy，已停用）。
+# 不动：  Docker 本身。
 # 验证：  systemctl status acornfox-server 显示 not found；docker ps -a --filter label=acornfox.managed=1 为空
 # 故障编号（输出最后一行“故障编号: …”，退出码 1）：
 #   UNINSTALL-TTY-01  没有终端、没法询问确认（例如经 ssh 执行、没分配终端），又没加 -y；什么都没改
@@ -60,16 +60,20 @@ systemctl daemon-reload
 echo "[2/4] 删除容器和网络"
 if command -v docker >/dev/null 2>&1; then
     ids=$( { docker ps -aq --filter label=acornfox.managed=1; docker ps -aq --filter label=acornfox.edge=1; } | sort -u)
+    # 入口容器挂的数据卷（证书、入口设置；升级以后可能还是旧版本建的卷名）：删容器之前先记下，--purge 时一起删
+    edge_ids=$(docker ps -aq --filter label=acornfox.edge=1)
+    edge_vols=""
+    [ -n "$edge_ids" ] && edge_vols=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' $edge_ids 2>/dev/null || true)
     [ -n "$ids" ] && docker rm -f $ids >/dev/null
     nets=$( { docker network ls -q --filter label=acornfox.managed=1; docker network ls -q --filter label=acornfox.edge=1; } | sort -u)
     [ -n "$nets" ] && docker network rm $nets >/dev/null 2>&1 || true
     echo "  容器 $(echo $ids | wc -w) 个，网络 $(echo $nets | wc -w) 个"
     if $PURGE; then
-        vols=$(docker volume ls -q | grep -E '^(af-|acornfox-caddy-)' || true)
+        vols=$( { docker volume ls -q | grep -E '^(af-|acornfox-edge-)'; for v in $edge_vols; do echo "$v"; done; } | sort -u || true)
         [ -n "$vols" ] && docker volume rm $vols >/dev/null
         imgs=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^acornfox/' || true)
         [ -n "$imgs" ] && docker rmi -f $imgs >/dev/null 2>&1 || true
-        echo "  数据卷 $(echo $vols | wc -w) 个，镜像 $(echo $imgs | wc -w) 个（附加服务用的公共镜像 postgres/mysql/redis/caddy 保留，可用 docker image prune -a 清理）"
+        echo "  数据卷 $(echo $vols | wc -w) 个，镜像 $(echo $imgs | wc -w) 个（附加服务用的公共镜像 postgres、mysql、redis 等保留，可用 docker image prune -a 清理）"
     fi
 fi
 

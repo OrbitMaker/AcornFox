@@ -27,7 +27,10 @@ const (
 const (
 	clientDefaultTimeout = 60 * time.Second
 	buildTimeout         = 25 * time.Minute
-	pullTimeout          = 10 * time.Minute
+	// pullTimeout: the runner bounds a pull to pullMaxTotal itself and then
+	// answers with a classified failure; the caller waits a minute longer
+	// so that answer arrives instead of a bare "runner: unavailable".
+	pullTimeout = pullMaxTotal + time.Minute
 )
 
 // Client implements API by calling a runner Server over a peer Unix socket.
@@ -36,6 +39,7 @@ type Client struct {
 	peerUID  uint32
 	standard *peer.Client // for ordinary short requests
 	long     *peer.Client // for long build requests (25 min)
+	pull     *peer.Client // for image pulls (pullTimeout plus a minute)
 }
 
 // NewClient returns a Client for the runner socket at path, whose server must
@@ -46,6 +50,7 @@ func NewClient(path string, peerUID uint32) *Client {
 		peerUID:  peerUID,
 		standard: peer.NewClient(path, peerUID, clientDefaultTimeout),
 		long:     peer.NewClient(path, peerUID, buildTimeout),
+		pull:     peer.NewClient(path, peerUID, pullTimeout+time.Minute),
 	}
 }
 
@@ -144,18 +149,27 @@ func (c *Client) Build(ctx context.Context, req BuildRequest) (BuildResponse, er
 	return out, err
 }
 
-// PullImage implements API. The runner bounds a pull to 10 minutes itself and
-// then answers with a classified failure ("pull timed out, configure a
-// mirror"); the caller waits one minute longer so that answer arrives instead
-// of the caller giving up first with a bare "runner: unavailable" (as
-// EnsureContainer does for add-ons). The peer client used for builds (25 min)
-// safely bounds it, and a large response bound leaves room for a classified
-// failure log excerpt.
+// PullImage implements API. The runner bounds a pull to pullMaxTotal
+// (50 minutes over all sources, as long as it keeps moving) itself and then
+// answers with a classified failure naming what each source did; the caller
+// waits one minute longer (pullTimeout) so that answer arrives instead of
+// the caller giving up first with a bare "runner: unavailable" (as
+// EnsureContainer does for add-ons). Its own peer client bounds it a minute
+// later still, and a large response bound leaves room for the per-source
+// report.
+//
+// A caller with a deadline of its own (an app install is cancelled after 60
+// minutes) sends it along: the runner stops the pull a little before it and
+// answers why (Failure.Reason "caller_deadline").
 func (c *Client) PullImage(ctx context.Context, app, deploymentID, ref string) (PullResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, pullTimeout+time.Minute)
+	req := PullRequest{App: app, DeploymentID: deploymentID, Ref: ref}
+	if dl, ok := ctx.Deadline(); ok {
+		req.Deadline = dl
+	}
+	ctx, cancel := context.WithTimeout(ctx, pullTimeout)
 	defer cancel()
 	var out PullResponse
-	err := c.call(ctx, c.long, PathImagePull, PullRequest{App: app, DeploymentID: deploymentID, Ref: ref}, clientLargeBound, &out)
+	err := c.call(ctx, c.pullClient(), PathImagePull, req, clientLargeBound, &out)
 	return out, err
 }
 
@@ -185,9 +199,9 @@ func (c *Client) EnsureContainer(ctx context.Context, req EnsureContainerRequest
 	pc := c.standard
 	if req.Role == RoleAddon {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, pullTimeout+time.Minute)
+		ctx, cancel = context.WithTimeout(ctx, pullTimeout)
 		defer cancel()
-		pc = c.long
+		pc = c.pullClient()
 	}
 	err := c.call(ctx, pc, PathContainerEnsure, req, clientDefaultBound, &out)
 	return out, err
@@ -269,3 +283,12 @@ var (
 	_ API = (*Client)(nil)
 	_ API = (*Docker)(nil)
 )
+
+// pullClient is the peer client for pulls (a Client built as a struct
+// literal in tests has none: the long one then).
+func (c *Client) pullClient() *peer.Client {
+	if c.pull != nil {
+		return c.pull
+	}
+	return c.long
+}

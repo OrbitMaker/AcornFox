@@ -8,6 +8,7 @@ package appinstall
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -300,15 +301,16 @@ func TestArchPrivatePerArchThroughGateway(t *testing.T) {
 	}
 }
 
-// perArchHermes is the published Hermes manifest in the per-architecture
-// form: an archive for each of archs (sizes as given, else the test bodies),
-// min_platform 0.5.1.
+// perArchHermes is the test material's agent manifest in the
+// per-architecture form: an archive for each of archs (sizes as given, else
+// the test bodies). Its min_platform stays the material's 0.6.0, which
+// covers the form (0.5.1).
 func perArchHermes(t *testing.T, sizes map[string]int64, archs ...string) string {
 	t.Helper()
-	m := withMinPlatform(t, publishedManifest(t, "hermes-agent"), "0.5.1")
+	m := goodManifest(t, "hermes-agent")
 	const old = "      artifact: hermes-agent-v0.23.0-image\n      artifact_sha256: d356bba314af272039743d82123bf57a38e67696d69558a6871c4b999700df45\n      artifact_size: 1120227840\n"
 	if !strings.Contains(m, old) {
-		t.Fatal("the published Hermes manifest no longer has the archive lines to rewrite")
+		t.Fatal("the agent manifest no longer has the archive lines to rewrite")
 	}
 	var b strings.Builder
 	b.WriteString("      artifacts:\n")
@@ -321,7 +323,22 @@ func perArchHermes(t *testing.T, sizes map[string]int64, archs ...string) string
 	return strings.Replace(m, old, b.String(), 1)
 }
 
-var archOwnLLM = map[string]any{"llm": map[string]any{"source": "own", "base_url": "https://api.example.com/v1", "api_key": "sk-test", "model": "m"}}
+// perArchCatalog is a catalog of perArchHermes with the model API's service
+// type: the app needs one, which addOwnLLM registers.
+func perArchCatalog(t *testing.T, serial int64, sizes map[string]int64, archs ...string) fs.FS {
+	t.Helper()
+	return bundleFS(withServiceTypes(t, fixtureBundle(t, serial, catalog.PublicCatalog, []fixApp{{manifest: perArchHermes(t, sizes, archs...)}}, nil, nil), goodDir))
+}
+
+// addOwnLLM registers the user's own model API, which the agent's need is
+// plugged into.
+func addOwnLLM(t *testing.T, v *env) {
+	t.Helper()
+	if _, err := v.e.AddService(context.Background(), AddServiceRequest{Name: "my-upstream", Kind: "llm_gateway",
+		Values: map[string]string{"base_url": "https://api.example.com/v1", "api_key": "sk-test-000000", "model": "m"}}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func imageStep(tv TaskView) StepView {
 	for _, s := range tv.Steps {
@@ -336,12 +353,13 @@ func imageStep(tv TaskView) StepView {
 // form: the strict check accepts it, amd64 loads the amd64 archive from the
 // gateway, arm64 (no archive) pulls from the public sources and says why.
 func TestArchInstallPerArchManifest(t *testing.T) {
-	snap := bundleFS(fixtureBundle(t, 50, catalog.PublicCatalog, []fixApp{{manifest: perArchHermes(t, nil, "amd64")}}, nil, nil))
+	snap := perArchCatalog(t, 50, nil, "amd64")
 	for _, arch := range []string{"amd64", "arm64"} {
 		t.Run(arch, func(t *testing.T) {
 			gw := newArchGateway(t, map[string][]byte{"hermes-amd64": amd64Archive})
-			v, _ := setupSnapshot(t, snap, func(c *Config) { c.Version, c.Arch, c.Gateway = "0.5.1", arch, gw })
-			tv := v.install(t, Request{App: "hermes-agent", Params: archOwnLLM})
+			v, _ := setupSnapshot(t, snap, func(c *Config) { c.Version, c.Arch, c.Gateway = "0.6.0", arch, gw })
+			addOwnLLM(t, v)
+			tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
 			if tv.Status != state.TaskSucceeded {
 				t.Fatalf("install: %+v", tv.Fault)
 			}
@@ -361,13 +379,13 @@ func TestArchInstallPerArchManifest(t *testing.T) {
 	}
 }
 
-// A platform older than 0.5.1 does not install a manifest in the new form:
-// the index says 0.5.1 (CAT-INST-08), before anything is downloaded.
+// A platform older than the manifest asks for does not install it: the index
+// says so (CAT-INST-08), before anything is downloaded.
 func TestArchPerArchManifestNeedsNewerPlatform(t *testing.T) {
-	snap := bundleFS(fixtureBundle(t, 51, catalog.PublicCatalog, []fixApp{{manifest: perArchHermes(t, nil, "amd64")}}, nil, nil))
-	v, hits := setupSnapshot(t, snap, func(c *Config) { c.Version = "0.5.0" })
-	_, err := v.e.StartInstall(context.Background(), Request{App: "hermes-agent", Params: archOwnLLM})
-	if f := faultOf(t, err); f.Code != CodeTooOld || f.NeedsPlatform != "0.5.1" {
+	snap := perArchCatalog(t, 51, nil, "amd64")
+	v, hits := setupSnapshot(t, snap, func(c *Config) { c.Version = "0.5.9" })
+	_, err := v.e.StartInstall(context.Background(), Request{App: "hermes-agent", Params: hermesModel()})
+	if f := faultOf(t, err); f.Code != CodeTooOld || f.NeedsPlatform != "0.6.0" {
 		t.Fatalf("fault %+v", f)
 	}
 	if hits.Load() != 0 {
@@ -380,15 +398,16 @@ func TestArchPerArchManifestNeedsNewerPlatform(t *testing.T) {
 // downloads: a huge amd64 archive refuses the install on amd64 (CAT-INST-27)
 // and does not count on arm64, which downloads none.
 func TestArchDiskCountsOnlyThisMachinesArchive(t *testing.T) {
-	snap := bundleFS(fixtureBundle(t, 52, catalog.PublicCatalog, []fixApp{{manifest: perArchHermes(t, map[string]int64{"amd64": 50 << 30}, "amd64")}}, nil, nil))
+	snap := perArchCatalog(t, 52, map[string]int64{"amd64": 50 << 30}, "amd64")
 	disk := func(context.Context) (DiskSpace, error) {
 		return DiskSpace{DockerFree: 100 << 30, DockerPath: "/var/lib/docker", UploadFree: 10 << 30, UploadPath: "/data/uploads"}, nil
 	}
 	for arch, wantRefused := range map[string]bool{"amd64": true, "arm64": false} {
 		t.Run(arch, func(t *testing.T) {
 			gw := newArchGateway(t, nil)
-			v, _ := setupSnapshot(t, snap, func(c *Config) { c.Version, c.Arch, c.Gateway, c.DiskFree = "0.5.1", arch, gw, disk })
-			tv, err := v.e.StartInstall(context.Background(), Request{App: "hermes-agent", Params: archOwnLLM})
+			v, _ := setupSnapshot(t, snap, func(c *Config) { c.Version, c.Arch, c.Gateway, c.DiskFree = "0.6.0", arch, gw, disk })
+			addOwnLLM(t, v)
+			tv, err := v.e.StartInstall(context.Background(), Request{App: "hermes-agent", Params: hermesModel()})
 			if wantRefused {
 				if f := faultOf(t, err); f.Code != CodeNoDisk || !strings.Contains(f.Message, "镜像包") {
 					t.Fatalf("fault %+v", f)

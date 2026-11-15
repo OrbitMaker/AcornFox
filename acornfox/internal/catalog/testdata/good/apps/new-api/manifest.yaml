@@ -1,6 +1,23 @@
-# New API：大模型接口网关。原样安装上游镜像，不改代码。
+# New API, written in manifest format 3. A draft: not published yet. The
+# platform has no code of its own for this app: the steps below (init, and
+# provides' issue, revoke and check) are all it does in New API. The real-app
+# test in internal/appinstall runs these very steps against the image named
+# below.
+#
+# New API v1.0.0-rc.48, as measured:
+#   - POST /api/user/login answers data.access_token (a 15-minute token) and
+#     data.user.id. Management calls need "Authorization: Bearer <token>" and
+#     "New-Api-User: <id>"; the login cookie alone is refused (401).
+#   - POST /api/token/ answers without the new token's id. Names are at most
+#     50 characters ("Token name is too long").
+#   - GET /api/token/search?keyword=<name> finds a token by its exact name;
+#     GET /api/token/{id} shows one with its value masked; POST
+#     /api/token/{id}/key gives the value without "sk-" (clients may send it
+#     with or without).
+#   - Asking for (GET /api/token/{id}) or deleting a token that is not there
+#     answers HTTP 200 with success false, message "record not found".
 id: new-api
-schema: 2
+schema: 3
 source: upstream
 maintainer: acornfox
 
@@ -12,17 +29,15 @@ app:
   icon: icon.svg
   homepage: https://github.com/QuantumNous/new-api
   license: AGPL-3.0-only
-  # AGPL：原样分发，镜像内自带 LICENSE、NOTICE；源码地址如下。不得去掉页面里的原项目署名。
   source_code: https://github.com/QuantumNous/new-api
 
 lifecycle:
-  min_platform: "0.5.0"
+  min_platform: "0.6.0"
   status: active
 
 resources:
   memory_mb: { min: 256, recommended: 512 }
   cpu: { min: 0.5 }
-  # 实测镜像在 Docker 里占 327 MB（containerd 镜像存储），加上数据
   disk_mb: { min: 512 }
   platforms: [linux/amd64, linux/arm64]
   gpu: none
@@ -46,7 +61,6 @@ endpoints:
       expect_json: { success: true }
       timeout_s: 60
 
-# 它保存上游 Key 和计费数据：默认只本机能打开，用户要对外时提示走 HTTPS。
 exposure:
   default: local
 
@@ -77,11 +91,11 @@ params:
 env:
   - { key: SESSION_SECRET, from: params.session_secret, secret: true }
   - { key: SQLITE_PATH, value: /data/one-api.db }
-  # 时区、下载源这类底层的东西不写死，用平台变量（acornfox catalog platform-vars）
   - { key: TZ, from: platform.tz }
 
-# 新版第一次打开网页时走初始化向导，接口匿名可调：谁先打开谁当管理员。
-# 所以健康检查通过后，安装任务立刻替用户初始化，再调一次会被拒绝。
+# The setup wizard's API is open to anyone until it has been run once: set it
+# up right after the health check. Then turn off self-service sign-up, which
+# upstream leaves on (anyone who reaches the page could make an account).
 init:
   - name: setup-admin
     when: after_healthy
@@ -95,25 +109,128 @@ init:
         SelfUseModeEnabled: true
         DemoSiteEnabled: false
       expect_json: { success: true }
+  - name: login
+    when: after_healthy
+    http:
+      method: POST
+      path: /api/user/login
+      json: { username: "{{params.admin_username}}", password: "{{params.admin_password}}" }
+      expect_json: { success: true }
+      save:
+        access_token: { path: data.access_token, secret: true }
+        user_id: data.user.id
+  - name: close-sign-up
+    when: after_healthy
+    http:
+      method: PUT
+      path: /api/option/
+      headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+      json: { key: RegisterEnabled, value: false }
+      expect_json: { success: true }
 
 first_login:
   - { label: 账号, from: params.admin_username }
   - { label: 密码, from: params.admin_password, secret: true }
 
-# 本机其他应用可以把它当作大模型网关用（例如 Hermes 智能体）。
-# 发令牌的具体步骤由平台内置的 new-api 适配器完成：登录拿访问令牌 → 建令牌 → 取令牌值。
+# Other apps on this machine can use it as their model API: each one gets a
+# token of its own, named after it and this issue's number.
 provides:
   - kind: llm_gateway
-    adapter: new-api
     endpoint: web
-    base_path: /v1
+    values:
+      base_url: "{{self.internal_url}}/v1"
+      api_key: { issued: api_key, secret: true }
+      model: { ask: 可以不填；要填的话，先在 New API 里加好一个能调通的渠道，再填这个渠道里的一个模型名 }
+    issue:
+      - name: login
+        http:
+          method: POST
+          path: /api/user/login
+          json: { username: "{{params.admin_username}}", password: "{{params.admin_password}}" }
+          expect_json: { success: true }
+          save:
+            access_token: { path: data.access_token, secret: true }
+            user_id: data.user.id
+      - name: create
+        http:
+          method: POST
+          path: /api/token/
+          headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+          json: { name: "acornfox-{{consumer.name}}-{{issue.id}}", remain_quota: 0, unlimited_quota: true, expired_time: -1 }
+          expect_json: { success: true }
+      # The create answer has no id: find the token by its name, which no
+      # other token has. Asked again a moment later if it is not listed yet.
+      - name: find
+        http:
+          method: GET
+          path: /api/token/search?keyword=acornfox-{{consumer.name}}-{{issue.id}}
+          headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+          expect_json: { success: true }
+          retry: { times: 3, delay_s: 1 }
+          save:
+            token_id:
+              list: data.items
+              where: { name: "acornfox-{{consumer.name}}-{{issue.id}}" }
+              field: id
+      - name: key
+        http:
+          method: POST
+          path: /api/token/{{saved.token_id}}/key
+          headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+          expect_json: { success: true }
+          save:
+            api_key: { path: data.key, prefix: "sk-", secret: true }
+    # Deleted only while the number is still this issue's token: a New API set
+    # up anew numbers tokens from 1 again. A token that is not there any more
+    # (removed by hand, or by an earlier revoke) counts as taken back.
+    revoke:
+      - name: login
+        http:
+          method: POST
+          path: /api/user/login
+          json: { username: "{{params.admin_username}}", password: "{{params.admin_password}}" }
+          expect_json: { success: true }
+          save:
+            access_token: { path: data.access_token, secret: true }
+            user_id: data.user.id
+      - name: same-token
+        http:
+          method: GET
+          path: /api/token/{{issued.token_id}}
+          headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+          finish_if: { json: { success: false, message: record not found } }
+          expect_json: { success: true, data: { id: "{{issued.token_id}}", name: "acornfox-{{consumer.name}}-{{issued.issue_id}}" } }
+      - name: delete
+        http:
+          method: DELETE
+          path: /api/token/{{issued.token_id}}
+          headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+          finish_if: { json: { success: false, message: record not found } }
+          expect_json: { success: true }
+    # Still the token handed out, whether the user has turned it off or not
+    # (turning it on again is the user's call).
+    check:
+      - name: login
+        http:
+          method: POST
+          path: /api/user/login
+          json: { username: "{{params.admin_username}}", password: "{{params.admin_password}}" }
+          expect_json: { success: true }
+          save:
+            access_token: { path: data.access_token, secret: true }
+            user_id: data.user.id
+      - name: same-token
+        http:
+          method: GET
+          path: /api/token/{{issued.token_id}}
+          headers: { Authorization: "Bearer {{saved.access_token}}", New-Api-User: "{{saved.user_id}}" }
+          expect_json: { success: true, data: { id: "{{issued.token_id}}", name: "acornfox-{{consumer.name}}-{{issued.issue_id}}" } }
 
 delivery:
   tier: auto
   minutes: 1
   user_steps:
     - 登录后在“渠道”里新建一个渠道，填上游的 Key 和模型，点“测试”
-    - 在“令牌”里新建一把令牌，客户端的接口地址填 http://服务器:端口/v1
 
 upgrade:
   from: ">=v1.0.0-rc.40"

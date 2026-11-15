@@ -3,20 +3,28 @@ package catalog
 import "sort"
 
 // Platform variables are what the platform knows about the machine and hands
-// to every app: the model gateway, the time zone, the download mirrors, the
+// to every app: the time zone, the download mirrors, the network region, the
 // app's own address. A manifest refers to them as {{platform.<name>}} in
 // file templates and init bodies, and as "from: platform.<name>" in env, so
-// that it never hard-codes them (Asia/Shanghai, a mirror address, a model).
+// that it never hard-codes them (Asia/Shanghai, a mirror address).
 //
 // This table is the single source of the variables: catalog lint accepts no
 // other names, the install engine fills exactly these, and the docs refer to
 // it. The standalone edition fills them from this machine's settings; the
 // cloud edition fills the same names from the cluster and the business
-// system, so one manifest works on both.
+// system, so one manifest works on both. What one app offers another (a
+// model API, a mail server) is no platform variable but a service (uses,
+// provides).
 //
-// Adding a variable: add it here (with both editions' sources and Since, the
-// platform version that first ships it), fill it in
-// internal/appinstall/platform.go, then use it in manifests.
+// Values come from one interface only (internal/platformvar): its standalone
+// implementation fills them from this machine's settings, and the install
+// engine, the API (the console's pages) and the command line take them from
+// there and nowhere else.
+//
+// Adding a variable: add it here (with both editions' sources, when it is
+// worked out, the rule a user's value must follow, and Since, the platform
+// version that first ships it), fill it in internal/platformvar, then use it
+// in manifests.
 
 // PlatformVar describes one platform variable.
 type PlatformVar struct {
@@ -30,53 +38,81 @@ type PlatformVar struct {
 	// platform must control (keys, its own address) cannot be changed.
 	UserCanSet bool `json:"user_can_set"`
 	Secret     bool `json:"secret,omitempty"`
-	// Issued: handed out per app at install time and taken back on
-	// uninstall (a token), not read from a setting.
-	Issued bool `json:"issued,omitempty"`
-	// ViaParam: templates do not use it directly; it is what an
-	// llm_provider parameter gets when the user picks the platform as the
-	// source, so manifests keep referring to params.<llm param>.*.
-	ViaParam bool `json:"via_param,omitempty"`
 	// Since is the first platform version that has the variable. A manifest
 	// that refers to it needs at least that version (see features.go).
 	Since string `json:"since"`
+	// Refresh says when the value is worked out: RefreshInstall, once when
+	// the app is installed (and when it is reinstalled on its old data),
+	// kept from then on.
+	Refresh string `json:"refresh"`
+	// Editions lists the editions that give the variable a value
+	// (EditionStandalone, EditionCloud).
+	Editions []string `json:"editions"`
+	// Rule is what a value the user sets must be, besides one non-empty line
+	// of at most 500 characters: RuleTZ, RuleURL, or "" (no more). Only for
+	// UserCanSet variables; RuleLabel says it in words.
+	Rule      string `json:"rule,omitempty"`
+	RuleLabel string `json:"rule_label,omitempty"`
 }
 
-// Names of the platform variables (first batch, 2026-11-07).
+// When a platform variable's value is worked out (PlatformVar.Refresh).
 const (
-	PVLLMBaseURL   = "llm.base_url"
-	PVLLMAPIKey    = "llm.api_key"
-	PVLLMModelChat = "llm.model.chat"
-	PVTZ           = "tz"
-	PVRegion       = "region"
-	PVMirrorPyPI   = "mirror.pypi"
-	PVMirrorNPM    = "mirror.npm"
-	PVAppURL       = "app.url"
+	// RefreshInstall: when the app is installed or reinstalled on its old
+	// data; kept from then on. Every variable is so for now.
+	RefreshInstall = "install"
 )
 
-// PlatformVars is the table.
+// Editions that give platform variables values (PlatformVar.Editions).
+const (
+	EditionStandalone = "standalone"
+	EditionCloud      = "cloud"
+)
+
+// Rules a value the user sets must follow (PlatformVar.Rule).
+const (
+	RuleTZ  = "tz"  // an IANA time zone name the program knows
+	RuleURL = "url" // an http:// or https:// address without credentials
+)
+
+var bothEditions = []string{EditionStandalone, EditionCloud}
+
+// Names of the platform variables.
+const (
+	PVTZ         = "tz"
+	PVRegion     = "region"
+	PVMirrorPyPI = "mirror.pypi"
+	PVMirrorNPM  = "mirror.npm"
+	PVAppURL     = "app.url"
+	PVAppScheme  = "app.scheme"
+	PVAppHost    = "app.host"
+)
+
+// PlatformVars is the table. Every variable is there from BasePlatform, the
+// first platform version that installs the current manifest format.
 var PlatformVars = []PlatformVar{
-	{Name: PVLLMBaseURL, Label: "平台模型接口地址",
-		Standalone: "平台 Key 开放后为 https://api.acornfox.com/v1；现在不可用", Cloud: "https://api.acornfox.com/v1",
-		ViaParam: true, Since: v050},
-	{Name: PVLLMAPIKey, Label: "平台为这个应用发的 Key",
-		Standalone: "平台 Key 开放后由平台签发；现在不可用", Cloud: "每个应用实例一把，默认每天 ¥20 上限",
-		Secret: true, Issued: true, ViaParam: true, Since: v050},
-	{Name: PVLLMModelChat, Label: "默认对话模型",
-		Standalone: "程序内置的默认模型（用本机 New API 又没指定模型时也用它）", Cloud: "经营系统配置表",
-		UserCanSet: true, Since: v050},
 	{Name: PVTZ, Label: "时区",
-		Standalone: "本机时区（读不到时为 UTC）", Cloud: "用户账号的时区", UserCanSet: true, Since: v050},
+		Standalone: "本机时区（读不到时为 UTC）", Cloud: "用户账号的时区", UserCanSet: true, Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions, Rule: RuleTZ, RuleLabel: "标准时区名，例如 Asia/Shanghai（拼写要和 IANA 时区库一致）"},
 	{Name: PVRegion, Label: "网络区域（cn 或 global）",
-		Standalone: "安装时的选择（install.env 或 network.json）", Cloud: "按集群", Since: v050},
+		Standalone: "安装时的选择（install.env 或 network.json）", Cloud: "按集群", Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions},
 	{Name: PVMirrorPyPI, Label: "Python 包下载源",
 		Standalone: "国内用国内镜像（在国内云上用该厂商的公开镜像），海外用官方源", Cloud: "云内网源",
-		UserCanSet: true, Since: v050},
+		UserCanSet: true, Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions, Rule: RuleURL, RuleLabel: "http:// 或 https:// 开头的地址，不能带账号密码"},
 	{Name: PVMirrorNPM, Label: "Node 包下载源",
 		Standalone: "国内用国内镜像（在国内云上用该厂商的公开镜像），海外用官方源", Cloud: "云内网源",
-		UserCanSet: true, Since: v050},
+		UserCanSet: true, Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions, Rule: RuleURL, RuleLabel: "http:// 或 https:// 开头的地址，不能带账号密码"},
 	{Name: PVAppURL, Label: "这个应用的访问地址",
-		Standalone: "按应用装好时的对外方式算（默认只本机）", Cloud: "https://<应用名>.app.acornfox.com", Since: v050},
+		Standalone: "装好时算：绑了域名是 https://第一个域名；没绑按对外方式，只本机是 http://127.0.0.1:端口，局域网、公网是 http://服务器地址:端口（和 acornfox status 里的地址同一个算法）", Cloud: "https://<应用名>.app.acornfox.com", Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions},
+	{Name: PVAppScheme, Label: "这个应用的访问方式（http 或 https）",
+		Standalone: "装好时算：绑了域名是 https，否则是 http（和 app.url 一起算）", Cloud: "https", Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions},
+	{Name: PVAppHost, Label: "这个应用访问地址里的主机（不带端口）",
+		Standalone: "装好时算：app.url 里的主机，例如域名、服务器地址或 127.0.0.1", Cloud: "<应用名>.app.acornfox.com", Since: BasePlatform,
+		Refresh: RefreshInstall, Editions: bothEditions},
 }
 
 var platformVarByName = func() map[string]PlatformVar {
@@ -94,28 +130,13 @@ func LookupPlatformVar(name string) (PlatformVar, bool) {
 }
 
 // PlatformRefs lists the platform variables the manifest refers to (env
-// "from", file templates, init bodies, first_login "from"), sorted, each once.
+// "from", file templates, init steps, first_login "from", provided services'
+// value templates and steps), sorted, each once.
 func PlatformRefs(m *Manifest) []string {
 	seen := map[string]bool{}
-	add := func(ref string) {
-		if name, ok := cutPlatform(ref); ok {
+	for _, r := range manifestRefs(m) {
+		if name, ok := cutPlatform(r.Ref); ok {
 			seen[name] = true
-		}
-	}
-	for _, e := range m.Env {
-		add(e.From)
-	}
-	for _, lf := range m.FirstLogin {
-		add(lf.From)
-	}
-	for _, f := range m.Files {
-		for _, r := range TemplateRefs(f.Template) {
-			add(r)
-		}
-	}
-	for _, s := range m.Init {
-		for _, r := range jsonRefs(s.HTTP.JSON) {
-			add(r)
 		}
 	}
 	out := make([]string, 0, len(seen))
@@ -134,21 +155,15 @@ func cutPlatform(ref string) (string, bool) {
 	return "", false
 }
 
-// TemplateRefs returns the references ("params.x", "platform.mirror.pypi")
-// in a template, in order.
-func TemplateRefs(tmpl string) []string {
-	var out []string
-	for _, r := range templateRef.FindAllStringSubmatch(tmpl, -1) {
-		out = append(out, r[1]+"."+r[2])
-	}
-	return out
-}
+// TemplateRefs and TemplatePlaceholders are in template.go.
 
-func jsonRefs(v any) []string {
+// jsonStrings lists the strings of a JSON-like value (the values of maps, by
+// key, and the items of lists; never the keys), in a fixed order.
+func jsonStrings(v any) []string {
 	var out []string
 	switch x := v.(type) {
 	case string:
-		out = append(out, TemplateRefs(x)...)
+		out = append(out, x)
 	case map[string]any:
 		keys := make([]string, 0, len(x))
 		for k := range x {
@@ -156,11 +171,11 @@ func jsonRefs(v any) []string {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			out = append(out, jsonRefs(x[k])...)
+			out = append(out, jsonStrings(x[k])...)
 		}
 	case []any:
 		for _, e := range x {
-			out = append(out, jsonRefs(e)...)
+			out = append(out, jsonStrings(e)...)
 		}
 	}
 	return out

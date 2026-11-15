@@ -94,7 +94,9 @@ func TestBuildDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if idx.Serial != 3 || len(idx.Apps) != 2 || len(idx.Recipes) != 3 || idx.Apps[0].ID != "hermes-agent" {
+	// Every recipe of format 3 needs more than the first catalog release:
+	// all of them are under recipes_v2.
+	if idx.Serial != 3 || len(idx.Apps) != 2 || len(idx.Recipes) != 0 || len(idx.AllRecipes()) != 3 || idx.Apps[0].ID != "hermes-agent" {
 		t.Fatalf("index = %+v", idx)
 	}
 	var na IndexApp
@@ -422,44 +424,6 @@ func TestFaultsCoverEveryCode(t *testing.T) {
 		CodePkgAllFailed, CodePkgMismatch, CodePkgWrite, CodePkgPath} {
 		if !seen[c] {
 			t.Fatalf("%s 没写进 Faults", c)
-		}
-	}
-}
-
-// TestBuildMatchesPublishedIndex rebuilds the catalog that was published as
-// serial 3 and compares index.json byte for byte with what was published
-// then. The index carries each package's sha256 and size, so the packages
-// are covered too. A catalog that uses nothing new must keep building to
-// the same bytes: published packages never change and older clients read
-// this exact format.
-func TestBuildMatchesPublishedIndex(t *testing.T) {
-	root := filepath.Join("testdata", "published-3")
-	want, err := os.ReadFile(filepath.Join(root, "index.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := Build(filepath.Join(root, "src"), 3)
-	if err != nil {
-		var e *Error
-		if errorsAs(err, &e) {
-			t.Fatalf("已发布的目录现在打不了包：%v %+v", err, e.Problems)
-		}
-		t.Fatal(err)
-	}
-	if !bytes.Equal(b.Index, want) {
-		t.Fatalf("index.json 和序号 3 发布的不一样了：\n%s", b.Index)
-	}
-	if bytes.Contains(b.Index, []byte("recipes_v2")) || bytes.Contains(b.Index, []byte(`"min_platform": ""`)) {
-		t.Fatal("没有新写法的目录，index.json 里不该出现新字段")
-	}
-	// The embedded snapshot holds the very packages that were published.
-	idx, err := ParseIndex(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, a := range idx.Apps {
-		if sha256Hex(b.Packages[a.Package.Path]) != a.Package.SHA256 || int64(len(b.Packages[a.Package.Path])) != a.Package.Size {
-			t.Fatalf("%s 打出来的包和发布的不一样", a.Package.Path)
 		}
 	}
 }

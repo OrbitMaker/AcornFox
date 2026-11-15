@@ -48,7 +48,16 @@ type CatalogAppView struct {
 	// can be installed here ("0.6.0"); "" when this version can install it.
 	// From the index's min_platform, so the list still downloads nothing.
 	NeedsPlatform string `json:"needs_platform"`
+	// Former: the catalog still lists the app in a manifest format before
+	// the current one. This version cannot install it (CAT-INST-36) until
+	// it is published again in the current format; Note says so.
+	Former bool   `json:"former,omitempty"`
+	Note   string `json:"note,omitempty"`
 }
+
+// FormerNote is the Note of an app or recipe the catalog still lists in a
+// former manifest format.
+const FormerNote = "这是旧格式的清单，这一版装不了，等这个应用按新格式重新上架"
 
 // RecipeView is one recipe in the list.
 type RecipeView struct {
@@ -58,6 +67,10 @@ type RecipeView struct {
 	// NeedsPlatform as in CatalogAppView: the highest of the recipe's own
 	// min_platform and its apps', when this AcornFox is older than it.
 	NeedsPlatform string `json:"needs_platform"`
+	// Former and Note as in CatalogAppView: one of its apps is listed in a
+	// former manifest format.
+	Former bool   `json:"former,omitempty"`
+	Note   string `json:"note,omitempty"`
 }
 
 // catalogFlag is the --catalog part of an install command ("" for public).
@@ -95,25 +108,35 @@ func (e *Engine) List(ctx context.Context) (CatalogView, error) {
 				}
 			}
 			icon, iconType := e.cfg.Catalog.listIcon(cv, a)
-			v.Apps = append(v.Apps, CatalogAppView{
+			av := CatalogAppView{
 				ID: a.ID, Version: a.Version, Name: a.Name, Summary: a.Summary, Category: a.Category,
 				Keywords: a.Keywords, Tags: a.Tags, MemoryMB: a.MemoryMB, Platforms: a.Platforms, SizeMB: a.SizeMB,
 				Delivery: a.Delivery, Uses: a.Uses, Provides: a.Provides, Supported: e.archSupported(a.Platforms),
 				Installed: names, Source: src, Command: "acornfox install " + a.ID + catalogFlag(cv.origin),
 				Icon: icon, IconType: iconType, NeedsPlatform: e.needsPlatform(a.MinPlatform),
-			})
+			}
+			if av.NeedsPlatform == "" && catalog.FormerIndexApp(a) {
+				av.Former, av.Note = true, FormerNote
+			}
+			v.Apps = append(v.Apps, av)
 		}
-		appMin := map[string]string{}
+		byID := map[string]catalog.IndexApp{}
 		for _, a := range cv.idx.Apps {
-			appMin[a.ID] = a.MinPlatform
+			byID[a.ID] = a
 		}
 		for _, r := range cv.idx.AllRecipes() {
 			mins := []string{r.MinPlatform}
+			former := false
 			for _, ra := range r.Apps {
-				mins = append(mins, appMin[ra.App])
+				mins = append(mins, byID[ra.App].MinPlatform)
+				former = former || catalog.FormerIndexApp(byID[ra.App])
 			}
-			v.Recipes = append(v.Recipes, RecipeView{Recipe: r, Source: src, Command: "acornfox install --recipe " + r.ID + catalogFlag(cv.origin),
-				NeedsPlatform: e.needsPlatform(mins...)})
+			rv := RecipeView{Recipe: r, Source: src, Command: "acornfox install --recipe " + r.ID + catalogFlag(cv.origin),
+				NeedsPlatform: e.needsPlatform(mins...)}
+			if rv.NeedsPlatform == "" && former {
+				rv.Former, rv.Note = true, FormerNote
+			}
+			v.Recipes = append(v.Recipes, rv)
 		}
 	}
 	return v, nil
@@ -145,50 +168,32 @@ type AppDetail struct {
 	Params     []ParamView      `json:"params"`
 	// Platform is the platform variables this app uses with this
 	// machine's values; the user_can_set ones go in the advanced settings.
-	Platform  []PlatformVarView `json:"platform"`
-	Provides  []string          `json:"provides"`
-	Uses      []catalog.Use     `json:"uses"`
-	Installed []string          `json:"installed"`
-	Source    SourceRef         `json:"source"`
-	Command   string            `json:"command"`
+	Platform []PlatformVarView `json:"platform"`
+	Provides []string          `json:"provides"`
+	// Uses is the manifest's needs as before, each with what it is called
+	// (use), its kind's label and whether it is required.
+	Uses []UseView `json:"uses"`
+	// ProvidesDetail is Provides with each kind's label.
+	ProvidesDetail []PlanProvide `json:"provides_detail"`
+	Installed      []string      `json:"installed"`
+	Source         SourceRef     `json:"source"`
+	Command        string        `json:"command"`
 	// NeedsPlatform as in CatalogAppView ("" when installable here).
 	NeedsPlatform string `json:"needs_platform"`
 }
 
 // ParamView is one form field.
 type ParamView struct {
-	Key       string      `json:"key"`
-	Type      string      `json:"type"`
-	Label     string      `json:"label,omitempty"`
-	Hint      string      `json:"hint,omitempty"`
-	Default   any         `json:"default,omitempty"`
-	Options   []any       `json:"options,omitempty"`
-	Pattern   string      `json:"pattern,omitempty"`
-	Required  bool        `json:"required"`
-	Generated bool        `json:"generated"` // left empty, the platform generates it
-	Editable  string      `json:"editable,omitempty"`
-	LLM       *LLMSources `json:"llm,omitempty"`
-}
-
-// LLMSources says which model sources can be chosen now.
-type LLMSources struct {
-	MinContext int          `json:"min_context,omitempty"`
-	Own        SourceState  `json:"own"`
-	Local      LocalSources `json:"local_gateway"`
-	Platform   SourceState  `json:"platform"`
-}
-
-// SourceState is one model source.
-type SourceState struct {
-	Available bool   `json:"available"`
-	Code      string `json:"code,omitempty"`
-	Message   string `json:"message,omitempty"`
-}
-
-// LocalSources lists the local gateways that can be used.
-type LocalSources struct {
-	SourceState
-	Apps []string `json:"apps"`
+	Key       string `json:"key"`
+	Type      string `json:"type"`
+	Label     string `json:"label,omitempty"`
+	Hint      string `json:"hint,omitempty"`
+	Default   any    `json:"default,omitempty"`
+	Options   []any  `json:"options,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
+	Required  bool   `json:"required"`
+	Generated bool   `json:"generated"` // left empty, the platform generates it
+	Editable  string `json:"editable,omitempty"`
 }
 
 // Detail returns one app's detail from the first catalog that has it
@@ -200,13 +205,26 @@ func (e *Engine) Detail(ctx context.Context, id string) (AppDetail, error) {
 // DetailIn returns one app's detail from catalog from ("" any, "public", or
 // a private catalog id).
 func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, error) {
+	// An app listed in a former manifest format has no detail this version
+	// can show (its manifest does not decode to the current format): say
+	// why, before anything is downloaded.
+	if _, ia, ferr := e.cfg.Catalog.find(from, id); ferr == nil && e.needsPlatform(ia.MinPlatform) == "" && catalog.FormerIndexApp(ia) {
+		return AppDetail{}, formerApp(ia, 0, false)
+	}
 	a, err := e.cfg.Catalog.AppIn(ctx, from, id)
 	if err != nil {
 		// A package made for a newer platform may not even be readable here:
 		// say "upgrade first", not "the package is broken".
-		if _, ia, ferr := e.cfg.Catalog.find(from, id); ferr == nil {
+		if v, ia, ferr := e.cfg.Catalog.find(from, id); ferr == nil {
 			if need := e.needsPlatform(ia.MinPlatform); need != "" {
 				return AppDetail{}, e.tooOld(ia.ID, need)
+			}
+			// The index did not say, the manifest is of a former format:
+			// the same answer as an install gives (CAT-INST-36).
+			if files, lerr := e.cfg.Catalog.loadPackage(ctx, v, ia); lerr == nil {
+				if n, former := catalog.FormerManifest(files[manifestFile]); former {
+					return AppDetail{}, formerApp(ia, n, true)
+				}
 			}
 		}
 		return AppDetail{}, err
@@ -216,7 +234,7 @@ func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, erro
 	if err != nil {
 		return AppDetail{}, fault(CodeInternal, err, "读应用列表失败")
 	}
-	providers, _ := e.gatewayProviders(ctx)
+	kinds := e.planKinds()
 	ep := primaryEndpoint(m)
 	exposure := m.Exposure.Default
 	if exposure == "" {
@@ -227,9 +245,9 @@ func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, erro
 		Category: m.App.Category, Homepage: m.App.Homepage, License: m.App.License, SourceCode: m.App.SourceCode,
 		MemoryMB: m.Resources.MemoryMB, DiskMB: m.Resources.DiskMB, Platforms: m.Resources.Platforms,
 		Supported: e.archSupported(m.Resources.Platforms), SizeMB: a.Index.SizeMB, Exposure: exposure,
-		Delivery: m.Delivery, Provides: a.Index.Provides, Uses: m.Uses, Installed: []string{},
+		Delivery: m.Delivery, Provides: a.Index.Provides, Uses: useViews(m, kinds), ProvidesDetail: provideViews(m, kinds), Installed: []string{},
 		Command: "acornfox install " + m.ID + catalogFlag(a.Origin), Params: []ParamView{}, Source: a.Source(),
-		Platform:      e.appPlatformViews(m),
+		Platform:      e.appPlatformViews(ctx, m),
 		NeedsPlatform: e.needsPlatform(a.Index.MinPlatform, m.Lifecycle.MinPlatform),
 	}
 	if icon, ok := a.Files[m.App.Icon]; ok && m.App.Icon != "" {
@@ -252,27 +270,6 @@ func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, erro
 		}
 		pv := ParamView{Key: p.Key, Type: p.Type, Label: p.Label, Hint: p.Hint, Default: p.Default, Options: p.Options,
 			Pattern: p.Pattern, Required: p.Required, Generated: p.Generate != nil, Editable: p.Editable}
-		if p.Type == "llm_provider" {
-			src := &LLMSources{Own: SourceState{Available: true}, Local: LocalSources{Apps: []string{}}}
-			if p.LLM != nil {
-				src.MinContext = p.LLM.MinContext
-			}
-			src.Platform = SourceState{Code: CodePlatformLLM, Message: "即将开放"}
-			if p.LLM != nil && p.LLM.Platform == "off" {
-				src.Platform.Message = "这个应用不能用平台 Key"
-			}
-			if p.LLM == nil || !p.LLM.LocalGateway {
-				src.Local.Message = "这个应用不能用本机网关"
-			} else if len(providers) == 0 {
-				src.Local.Code, src.Local.Message = CodeNoGateway, "先装 New API"
-			} else {
-				src.Local.Available = true
-				for _, pa := range providers {
-					src.Local.Apps = append(src.Local.Apps, pa.Name)
-				}
-			}
-			pv.LLM = src
-		}
 		d.Params = append(d.Params, pv)
 	}
 	return d, nil

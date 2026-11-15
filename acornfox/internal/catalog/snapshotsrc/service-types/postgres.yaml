@@ -1,0 +1,18 @@
+# PostgreSQL 数据库：一个库加一个只能用这个库的账号。
+# 提供它的应用（例如 apps/postgres16）给每个使用方单独开一个库和账号；
+# 用户也可以把自己已有的 PostgreSQL 库登记成一条。
+# host、port、sslmode 是这台数据库共用的；database、username、password、url 是按使用方单独发的。
+schema: 1
+kind: postgres
+label: PostgreSQL 数据库
+summary: 一个 PostgreSQL 库和能用它的账号，给要存数据的应用用
+fields:
+  - { key: host, label: 地址, type: string, required: true, hint: 数据库服务器的主机名或 IP，不带端口 }
+  - { key: port, label: 端口, type: int, default: 5432 }
+  - { key: database, label: 库名, type: string, required: true }
+  - { key: username, label: 账号, type: string, required: true }
+  - { key: password, label: 密码, type: string, required: true, secret: true }
+  - { key: sslmode, label: 加密连接, type: enum, options: [disable, require, verify-full], default: disable, hint: 同一台机器上的数据库选 disable；连外面的云数据库一般选 require }
+  - { key: url, label: 连接串, type: string, secret: true, hint: 形如 postgres://账号:密码@地址:端口/库名，可以不填 }
+test:
+  tcp: { host: "{{host}}", port: "{{port}}" }

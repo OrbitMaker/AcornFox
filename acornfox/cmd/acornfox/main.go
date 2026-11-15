@@ -65,6 +65,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runIdentity(cmdArgs, stdout, stderr)
 		case "faults":
 			return runFaults(cmdArgs, stdout, stderr)
+		case "sources":
+			return runSources(cmdArgs, stdout, stderr)
 		}
 	}
 	// The default connector wraps client.Connect so internal/cli stays
@@ -95,7 +97,7 @@ func cliStopSignals(ignored func(os.Signal) bool) []os.Signal {
 var mainCommands = map[string]bool{
 	"server": true, "serve": true, "install": true, "uninstall": true, "doctor": true, "runner": true,
 	"proxy": true, "version": true, "init": true, "migrate": true, "admin-token": true, "identity": true,
-	"faults": true,
+	"faults": true, "sources": true,
 }
 
 // noJSONCommands are user-facing commands handled here that have no JSON
@@ -146,7 +148,7 @@ func mustGetwd() string {
 
 // isCatalogInstall reports whether an "install" command line installs an app
 // from the catalog (`install <app>`, `install --recipe …`, `install status …`,
-// `--set`, `--llm`…) rather than installing AcornFox itself on this computer
+// `--set`, `--use`…) rather than installing AcornFox itself on this computer
 // (`install [--china|--global|--no-setup]`, no positional
 // argument). Asking for help (`install -h`) goes to the catalog install too:
 // installing apps is what users look for, and its usage ends with a line on

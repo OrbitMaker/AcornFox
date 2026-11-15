@@ -16,10 +16,10 @@ type Fetcher func(ctx context.Context, url string) (string, error)
 // MetadataIPv4URLs are cloud metadata endpoints that return this instance's
 // public IPv4, tried in order. They only answer from inside the instance.
 var MetadataIPv4URLs = []string{
-	"http://100.100.100.200/latest/meta-data/eipv4",                // 阿里云（弹性公网 IP）
-	"http://100.100.100.200/latest/meta-data/public-ipv4",          // 阿里云（固定公网 IP）
-	"http://metadata.tencentyun.com/latest/meta-data/public-ipv4",  // 腾讯云
-	"http://100.96.0.96/latest/eip_address",                        // 火山引擎
+	"http://100.100.100.200/latest/meta-data/eipv4",               // 阿里云（弹性公网 IP）
+	"http://100.100.100.200/latest/meta-data/public-ipv4",         // 阿里云（固定公网 IP）
+	"http://metadata.tencentyun.com/latest/meta-data/public-ipv4", // 腾讯云
+	"http://100.96.0.96/latest/eip_address",                       // 火山引擎
 }
 
 // PublicIPv4URLs and PublicIPv6URLs are public "what is my IP" services used

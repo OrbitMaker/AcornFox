@@ -34,6 +34,7 @@ import (
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/acornfox/acornfox/internal/client"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/setup"
@@ -477,14 +478,14 @@ func cleanupDocker(ctx context.Context, dc *dockerclient.Client, purge bool, std
 		res, err := dc.VolumeList(ctx, dockerclient.VolumeListOptions{})
 		if err == nil {
 			for _, v := range res.Items {
-				if v.Labels[runner.LabelManaged] == "1" || strings.HasPrefix(v.Name, "af-") || v.Name == runner.EdgeDataVolume || v.Name == runner.EdgeConfigVolume {
+				if v.Labels[runner.LabelManaged] == "1" || strings.HasPrefix(v.Name, "af-") || v.Name == runner.EdgeDataVolume || v.Name == runner.EdgeSettingsVolume {
 					if _, err := dc.VolumeRemove(ctx, v.Name, dockerclient.VolumeRemoveOptions{Force: true}); err == nil {
 						nv++
 					}
 				}
 			}
 		}
-		// Only AcornFox's own images (acornfox/<app>:<id> and the local Caddy
+		// Only AcornFox's own images (acornfox/<app>:<id> and the entry proxy
 		// image). Public images such as postgres:16-alpine stay: other
 		// projects on the same Docker may use them.
 		imgs, err := dc.ImageList(ctx, dockerclient.ImageListOptions{All: true})
@@ -648,7 +649,13 @@ func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 	}
 	arch := strings.ToLower(info.Info.Architecture)
 	if arch == "aarch64" || arch == "arm64" {
-		r.warn("", "苹果芯片 / ARM：只有 amd64 镜像的应用也能装，靠转译运行，可能较慢")
+		if platform.DesktopMode() {
+			r.warn("", "苹果芯片 / ARM：只有 amd64 镜像的应用也能装，靠转译运行，可能较慢")
+		} else {
+			// A Linux ARM server has no translation unless the user installed
+			// one (qemu with binfmt): an amd64-only image does not start there.
+			r.warn("", "ARM 服务器：只能运行有 arm64 版的镜像；只有 amd64（x86）版的镜像在这台机器上启动不了，除非另外装了转译（qemu）")
+		}
 	}
 	if !platform.DesktopMode() {
 		if platform.GOOS == "linux" {
@@ -667,13 +674,12 @@ func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 	d := runner.NewDocker(dc)
 	if d.EdgeImagePresent(ctx) {
 		if res, err := dc.ContainerInspect(ctx, runner.EdgeContainerName, dockerclient.ContainerInspectOptions{}); err == nil && res.Container.State != nil && res.Container.State.Running {
-			r.add(true, "SETUP-EDGE-01", "网关组件（Caddy）：镜像已就绪，容器运行中")
+			r.add(true, "SETUP-EDGE-01", "入口代理：镜像已就绪，容器运行中")
 		} else {
-			r.add(false, "SETUP-EDGE-01", "网关组件（Caddy）：镜像已就绪，但容器没有运行（后台服务启动后会自动创建；查看 docker logs %s）", runner.EdgeContainerName)
+			r.add(false, "SETUP-EDGE-01", "入口代理：镜像已就绪，但容器没有运行（后台服务启动后会自动创建；查看 docker logs %s；故障编号 %s）", runner.EdgeContainerName, edge.FaultNotRunning)
 		}
 	} else {
-		netcfg := platform.LoadNetwork(paths.DataDir)
-		r.add(false, "SETUP-EDGE-01", "网关组件（Caddy）：镜像还没下载好（%s）；运行 acornfox setup --resume 会重新下载", map[bool]string{true: "从国内源拉", false: "从 Docker Hub 拉"}[netcfg.China])
+		r.add(false, "SETUP-EDGE-01", "入口代理：本机没有入口镜像 %s（准备运行环境时从发行版的入口包导入：运行 acornfox setup 重试；故障编号 %s）", edge.Image, edge.FaultImageMissing)
 	}
 	lan := platform.LANAddress()
 	if lan == "" {

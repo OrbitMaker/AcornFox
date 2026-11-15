@@ -91,6 +91,13 @@ type AppVars struct {
 		Editable      string `json:"editable"`
 		EditableLabel string `json:"editable_label"`
 		Used          *bool  `json:"used"`
+		// ValueNow, Differs, Code, Fix: a platform variable's value now
+		// next to the one given at install time (APP-VARS-01 when they
+		// differ).
+		ValueNow *string `json:"value_now"`
+		Differs  bool    `json:"differs"`
+		Code     string  `json:"code"`
+		Fix      string  `json:"fix"`
 	} `json:"vars"`
 	Notes []string        `json:"notes"`
 	Raw   json.RawMessage `json:"-"`
@@ -110,8 +117,6 @@ type PlatformVar struct {
 	Cloud      string `json:"cloud"`
 	UserCanSet bool   `json:"user_can_set"`
 	Secret     bool   `json:"secret,omitempty"`
-	Issued     bool   `json:"issued,omitempty"`
-	ViaParam   bool   `json:"via_param,omitempty"`
 	Since      string `json:"since,omitempty"`
 	Value      string `json:"value,omitempty"`
 	Available  bool   `json:"available"`
@@ -181,6 +186,10 @@ type CatalogList struct {
 		// NeedsPlatform: upgrade AcornFox to this version before installing
 		// ("" when this server can install it).
 		NeedsPlatform string `json:"needs_platform"`
+		// Former: listed in a former manifest format, not installable until
+		// published again; Note says so to the user.
+		Former bool   `json:"former"`
+		Note   string `json:"note"`
 	} `json:"apps"`
 	Recipes []struct {
 		ID      string `json:"id"`
@@ -192,6 +201,8 @@ type CatalogList struct {
 		Source        SourceRef `json:"source"`
 		Command       string    `json:"command"`
 		NeedsPlatform string    `json:"needs_platform"`
+		Former        bool      `json:"former"`
+		Note          string    `json:"note"`
 	} `json:"recipes"`
 	Raw json.RawMessage `json:"-"`
 }
@@ -236,18 +247,6 @@ type CatalogApp struct {
 		Default   any    `json:"default"`
 		Required  bool   `json:"required"`
 		Generated bool   `json:"generated"`
-		LLM       *struct {
-			Own   struct{ Available bool } `json:"own"`
-			Local struct {
-				Available bool     `json:"available"`
-				Message   string   `json:"message"`
-				Apps      []string `json:"apps"`
-			} `json:"local_gateway"`
-			Platform struct {
-				Available bool   `json:"available"`
-				Message   string `json:"message"`
-			} `json:"platform"`
-		} `json:"llm"`
 	} `json:"params"`
 	Raw json.RawMessage `json:"-"`
 }
@@ -265,6 +264,71 @@ type InstallRequest struct {
 	Version              string            `json:"version,omitempty"`
 	KeepVolumesOnFailure bool              `json:"keep_volumes_on_failure,omitempty"`
 	ReuseData            bool              `json:"reuse_data,omitempty"` // take over the data volumes an earlier app of this name left
+	// Expose is the exposure the apps get instead of their manifest's
+	// default: local, lan or public (--expose).
+	Expose string `json:"expose,omitempty"`
+	// Use names the service a need is plugged into ({"<need>": "<service>"},
+	// or {"<app>.<need>": …}; --use).
+	Use map[string]string `json:"use,omitempty"`
+}
+
+// PlanAPI is implemented by *Client: the plan of an install, read-only
+// (separate interface so existing fakes keep compiling).
+type PlanAPI interface {
+	InstallPlan(ctx context.Context, req InstallRequest) (InstallPlan, error) // POST /v1/catalog/plan
+}
+
+// InstallPlan mirrors POST /v1/catalog/plan (--json prints the server's
+// answer as is).
+type InstallPlan struct {
+	CanInstall bool   `json:"can_install"`
+	Say        string `json:"say"`
+	Steps      []struct {
+		App     string `json:"app"`
+		Name    string `json:"name"`
+		Action  string `json:"action"`
+		Because string `json:"because"`
+	} `json:"steps"`
+	Apps []struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Needs   []struct {
+			Use         string   `json:"use"`
+			Kind        string   `json:"kind"`
+			KindLabel   string   `json:"kind_label"`
+			Required    bool     `json:"required"`
+			Status      string   `json:"status"`
+			Service     string   `json:"service"`
+			PendingFrom string   `json:"pending_from"`
+			Candidates  []string `json:"candidates"`
+			Without     string   `json:"without"`
+			How         []string `json:"how"`
+			Tell        []string `json:"tell,omitempty"`
+		} `json:"needs"`
+		ParamsMissing []struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		} `json:"params_missing"`
+		Provides []struct {
+			Kind      string `json:"kind"`
+			KindLabel string `json:"kind_label"`
+		} `json:"provides"`
+	} `json:"apps"`
+	Problems []struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Hint    string `json:"hint,omitempty"`
+	} `json:"problems"`
+	Raw json.RawMessage `json:"-"`
+}
+
+// InstallPlan calls POST /v1/catalog/plan.
+func (c *Client) InstallPlan(ctx context.Context, req InstallRequest) (InstallPlan, error) {
+	var v InstallPlan
+	raw, err := c.getRaw(ctx, http.MethodPost, "/v1/catalog/plan", req, &v)
+	v.Raw = raw
+	return v, err
 }
 
 // InstallTask mirrors an install task.
@@ -293,21 +357,21 @@ type InstallTask struct {
 		Created   bool     `json:"created"`
 		URL       string   `json:"url,omitempty"`
 		Volumes   []string `json:"volumes,omitempty"`
-		// GatewayToken: this task issued the app a token in a local model
-		// gateway (New API); the token has no quota and no expiry.
-		GatewayToken *struct {
-			Provider string `json:"provider"`
-		} `json:"gateway_token,omitempty"`
-		// Installed on old data (reuse_data): the old volumes taken over,
-		// what was carried over, one line each (also, after any install,
-		// what became of tokens an old app of the name left), and the old
-		// app's gateway token when it was taken over (also no quota and no
-		// expiry).
+		// Internal: reached over the app network only (for other apps): no
+		// URL, nothing to open.
+		Internal bool `json:"internal,omitempty"`
+		// Installed on old data (reuse_data): the old volumes taken over.
+		// Carried: what was carried over, one line each; after any install
+		// also lines beginning with CAT-INST-35, a credential not taken
+		// back, which the user must hear about.
 		ReusedVolumes []string `json:"reused_volumes,omitempty"`
 		Carried       []string `json:"carried,omitempty"`
-		TakenToken    *struct {
-			Provider string `json:"provider"`
-		} `json:"taken_gateway_token,omitempty"`
+		// Tell: what the providers of the services the app was plugged into
+		// wrote for the user, as they are (also in timing.must_tell).
+		Tell []string `json:"tell,omitempty"`
+		// OpenHint (a succeeded task, an app that only opens on the server):
+		// the same as the app's open_hint in GET /v1/apps.
+		OpenHint *OpenHint `json:"open_hint,omitempty"`
 	} `json:"apps"`
 	Fault *struct {
 		Code          string `json:"code"`
@@ -328,9 +392,12 @@ type InstallTask struct {
 
 // FirstLogin mirrors the first-login information of one app.
 type FirstLogin struct {
-	App    string `json:"app"`
-	URL    string `json:"url,omitempty"`
-	Fields []struct {
+	App string `json:"app"`
+	URL string `json:"url,omitempty"`
+	// URLNote: URL only opens on the server itself (how to open it from
+	// the user's own computer is the app's open_hint).
+	URLNote string `json:"url_note,omitempty"`
+	Fields  []struct {
 		Label  string `json:"label"`
 		Value  string `json:"value"`
 		Secret bool   `json:"secret,omitempty"`
@@ -452,4 +519,5 @@ var (
 	_ AppCenterAPI      = (*Client)(nil)
 	_ PrivateCatalogAPI = (*Client)(nil)
 	_ AppVarsAPI        = (*Client)(nil)
+	_ PlanAPI           = (*Client)(nil)
 )

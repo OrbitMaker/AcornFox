@@ -5,7 +5,7 @@ import { App } from './App'
 import { Tile } from './components/bits'
 import { OpenHintBlock } from './pages/apps/open-hint'
 import { ToastProvider } from './components/ui/toast'
-import { NEEDS, app, catalog, catalogNeedsUpgrade, hermesDetail, newApiDetail, resources, task } from './test/fixtures'
+import { FORMER_NOTE, NEEDS, app, catalog, catalogFormer, catalogNeedsUpgrade, hermesDetail, hermesWithModel, newApiDetail, resources, task } from './test/fixtures'
 import type { TaskView } from './lib/types'
 
 type Handler = (url: string, init?: RequestInit) => unknown
@@ -26,7 +26,7 @@ beforeEach(() => {
     'GET /v1/resources': () => resources,
     'GET /v1/status': () => ({ runner: 'ok', docker_version: '27.3' }),
     'GET /v1/catalog/apps/new-api': () => newApiDetail,
-    'GET /v1/catalog/apps/hermes-agent': () => hermesDetail(false),
+    'GET /v1/catalog/apps/hermes-agent': () => hermesDetail,
   }
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     const method = init?.method || 'GET'
@@ -81,6 +81,36 @@ describe('应用中心', () => {
     expect(document.querySelector('a[href^="javascript"]')).toBeNull()
     expect(screen.queryByText('看视频（新窗口打开）')).toBeNull()
     expect(screen.queryByText('主页')).toBeNull()
+  })
+
+  it('详情页：它需要的服务、它能提供的服务都用接口给的中文名，可选的写没有时会怎样；不提示先装哪个应用', async () => {
+    routes['GET /v1/catalog/apps/hermes-agent'] = () => ({
+      ...hermesDetail,
+      uses: [
+        ...(hermesDetail.uses || []),
+        { name: 'mail', kind: 'smtp', optional: true, without: '能用，但发不了通知邮件', use: 'mail', kind_label: '邮箱（发信）', required: false },
+      ],
+    })
+    location.hash = '#item-hermes-agent'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Hermes 智能体' })
+    const uses = screen.getByTestId('item-uses')
+    expect(within(uses).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['大模型接口必须有', '邮箱（发信）可选没有时：能用，但发不了通知邮件'])
+    expect(screen.queryByTestId('item-provides')).toBeNull()
+    expect(screen.getByTestId('item-services').textContent).not.toMatch(/llm_gateway|smtp|先装|New API/)
+  })
+
+  it('详情页：能提供服务的应用列出它能提供的服务；两样都没有时不显示这一块', async () => {
+    location.hash = '#item-new-api'
+    const { unmount } = render(<App />)
+    await screen.findByRole('heading', { name: 'New API' })
+    expect(within(screen.getByTestId('item-provides')).getByText('大模型接口')).toBeTruthy()
+    expect(screen.queryByTestId('item-uses')).toBeNull()
+    unmount()
+    routes['GET /v1/catalog/apps/new-api'] = () => ({ ...newApiDetail, provides: [], provides_detail: [] })
+    render(<App />)
+    await screen.findByRole('heading', { name: 'New API' })
+    expect(screen.queryByTestId('item-services')).toBeNull()
   })
 
   it('PNG 图标按 base64 显示', async () => {
@@ -143,30 +173,31 @@ describe('应用中心', () => {
     expect(within(dialog).getByText(/127.0.0.1:18810（只本机）/)).toBeTruthy()
   })
 
-  it('装好后只本机：服务器在局域网时确认后一键改成局域网，给局域网地址；用本机 New API 的提示不限额令牌', async () => {
-    const hint = { lan_address: '192.168.1.20', lan_url: 'http://192.168.1.20:18811', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open hermes-agent' }
+  it('装好后只本机：服务器在局域网时确认后一键改成局域网，给局域网地址', async () => {
+    const hint = { lan_address: '192.168.1.20', lan_url_after_expose: 'http://192.168.1.20:18811', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open hermes-agent',
+      tunnel_command: 'ssh -N -L 18811:127.0.0.1:18811 用户@服务器地址', tunnel_url: 'http://127.0.0.1:18811' }
     routes['GET /v1/apps'] = () => ({ apps: [app({ name: 'hermes-agent', catalog_id: 'hermes-agent', url: 'http://127.0.0.1:18811', local_only: true, open_hint: hint })] })
     routes['PATCH /v1/apps/hermes-agent'] = () => app({ name: 'hermes-agent', exposure: 'lan' })
     routes['POST /v1/catalog/install'] = () => json(202, task({ target: 'hermes-agent' }))
     routes['GET /v1/catalog/install/t123'] = (): TaskView => task({
       target: 'hermes-agent', status: 'succeeded',
       steps: task().steps.map((s) => ({ ...s, app: 'hermes-agent', status: 'done' })),
-      apps: [{ app: 'hermes-agent', catalog_id: 'hermes-agent', version: 'v0.23.0', reused: false, created: true, url: 'http://127.0.0.1:18811', gateway_token: { provider: 'new-api' } }],
+      apps: [{ app: 'hermes-agent', catalog_id: 'hermes-agent', version: 'v0.23.0', reused: false, created: true, url: 'http://127.0.0.1:18811' }],
     })
     await openStore()
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[0]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    fireEvent.click(await within(dialog).findByRole('tab', { name: '自己的 Key' }))
-    fireEvent.change(within(dialog).getByLabelText('接口地址'), { target: { value: 'https://api.example.com/v1' } })
-    fireEvent.change(within(dialog).getByLabelText('Key'), { target: { value: 'sk-test' } })
-    fireEvent.change(within(dialog).getByLabelText('模型名'), { target: { value: 'm' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
+    fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
     const box = await within(dialog).findByTestId('open-hint', undefined, { timeout: 3000 })
-    expect(within(dialog).getByTestId('token-note').textContent).toContain('hermes-agent 用的是 new-api 里一把不限额的令牌')
     expect(within(dialog).queryByRole('link', { name: /打开/ })).toBeNull()
+    // 改之前局域网地址打不开，不当成地址给出来；没有命令行时给 SSH 隧道那一行
+    expect(box.textContent).not.toContain('http://192.168.1.20:18811')
+    expect(within(box).getByTestId('open-ssh').textContent).toContain('ssh -N -L 18811:127.0.0.1:18811 用户@服务器地址')
+    expect(within(box).getByTestId('open-ssh').textContent).toContain('http://127.0.0.1:18811')
     fireEvent.click(within(box).getByRole('button', { name: '让局域网里的电脑能打开' }))
     expect(calls.some((c) => c.method === 'PATCH')).toBe(false) // 先确认
     expect(within(box).getByText(/要用它自己的账号密码登录/)).toBeTruthy()
+    expect(within(box).getByText(/所有网卡上开放端口 18811/)).toBeTruthy()
     fireEvent.click(within(box).getByRole('button', { name: '确认改成局域网' }))
     const done = await within(box).findByTestId('open-lan-done')
     expect(within(done).getByRole('link').getAttribute('href')).toBe('http://192.168.1.20:18811')
@@ -174,7 +205,7 @@ describe('应用中心', () => {
   })
 
   it('装好后改成局域网、应用列表刷新以后：说明块原位显示完成态和怎么改回，首次登录地址和“打开”都用应用列表里的新地址', async () => {
-    const hint = { lan_address: '192.168.1.20', lan_url: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
+    const hint = { lan_address: '192.168.1.20', lan_url_after_expose: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
     let exposure = 'local'
     routes['GET /v1/apps'] = () => ({
       apps: [exposure === 'local'
@@ -304,16 +335,16 @@ describe('应用中心', () => {
     expect(within(dialog).getByRole('button', { name: /复制诊断给 AI/ })).toBeTruthy()
   })
 
-  it('Hermes：选平台 Key 提示即将开放，不能提交', async () => {
+  it('需要大模型接口的应用：弹窗里没有大模型来源的选择，也不提示先装别的应用；请求和命令都只有应用名', async () => {
+    routes['POST /v1/catalog/install'] = () => json(202, task({ target: 'hermes-agent' }))
     await openStore()
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[0]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    fireEvent.click(await within(dialog).findByRole('tab', { name: '平台 Key' }))
-    expect(await screen.findByText('平台 Key 即将开放')).toBeTruthy()
-    expect(within(dialog).getByText('登录后可用')).toBeTruthy()
+    await within(dialog).findByText('acornfox install hermes-agent')
+    expect(within(dialog).queryByRole('tab')).toBeNull()
+    expect(within(dialog).queryByText(/平台 Key|自己的 Key|先装|模型名|--llm/)).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
-    await within(dialog).findAllByText(/即将开放，请先用自己的 Key/)
-    expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
+    await vi.waitFor(() => expect(calls.filter((c) => c.method === 'POST' && c.url === '/v1/catalog/install').map((c) => c.body)).toEqual([{ app: 'hermes-agent' }]))
   })
 
   it('安装任务找不到（404）时停止轮询，提示去我的应用看', async () => {
@@ -344,7 +375,7 @@ describe('应用中心', () => {
 
 describe('要先升级 AcornFox 才能装的应用', () => {
   const SENTENCE = '要先把 AcornFox 升级到 0.6.0 才能装'
-  const upgradeLines = (root: HTMLElement) => within(root).queryAllByText(/upgrade\.sh \| sudo bash/, { selector: 'code' })
+  const upgradeLines = (root: HTMLElement) => within(root).queryAllByText(/get\.sh \| sudo bash -s -- upgrade/, { selector: 'code' })
 
   it('应用卡片：说明要升到哪个版本，安装按钮不可点，“怎么升级”进设置的升级分区；别的应用不受影响', async () => {
     routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
@@ -382,7 +413,7 @@ describe('要先升级 AcornFox 才能装的应用', () => {
   it('详情页：安装按钮不可点，说明要升到哪个版本、现在是哪个版本，给国内和海外两条升级命令', async () => {
     routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
     routes['GET /v1/status'] = () => ({ runner: 'ok', version: '0.5.1' })
-    routes['GET /v1/catalog/apps/hermes-agent'] = () => ({ ...hermesDetail(false), needs_platform: NEEDS })
+    routes['GET /v1/catalog/apps/hermes-agent'] = () => ({ ...hermesDetail, needs_platform: NEEDS })
     location.hash = '#item-hermes-agent'
     render(<App />)
     await screen.findByRole('heading', { name: 'Hermes 智能体' })
@@ -391,8 +422,8 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     await within(note).findByText('0.5.1')
     const lines = upgradeLines(note).map((x) => x.textContent || '')
     expect(lines.length).toBe(2)
-    expect(lines[0]).toContain('gitee.com/VIP13390/AcornFox/raw/main/scripts/install/upgrade.sh')
-    expect(lines[1]).toContain('github.com/OrbitMaker/AcornFox/releases/latest/download/upgrade.sh')
+    expect(lines[0]).toContain('gitee.com/VIP13390/AcornFox/raw/main/get.sh')
+    expect(lines[1]).toContain('github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh')
     expect((screen.getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -615,9 +646,9 @@ describe('我的应用', () => {
     expect(within(pub).getByRole('link', { name: /打开/ }).getAttribute('href')).toBe('http://203.0.113.7:18811')
   })
 
-  it('应用详情：只本机的给怎么打开（公网服务器只有 acornfox open），用了本机 New API 的提示令牌不限额', async () => {
+  it('应用详情：只本机的给怎么打开（公网服务器只有 acornfox open）', async () => {
     routes['GET /v1/apps/hermes-agent'] = () => app({
-      name: 'hermes-agent', catalog_id: 'hermes-agent', url: 'http://127.0.0.1:18811', local_only: true, gateway_token_from: 'new-api',
+      name: 'hermes-agent', catalog_id: 'hermes-agent', url: 'http://127.0.0.1:18811', local_only: true,
       open_hint: { has_login: true, can_lan: false, recommend: 'tunnel', command: 'acornfox open hermes-agent' },
     })
     location.hash = '#app-hermes-agent'
@@ -625,9 +656,21 @@ describe('我的应用', () => {
     const box = await screen.findByTestId('open-hint')
     expect(within(box).getByText('acornfox open hermes-agent')).toBeTruthy()
     expect(within(box).queryByRole('button', { name: '让局域网里的电脑能打开' })).toBeNull()
-    expect(screen.getByTestId('token-note').textContent).toContain('在 new-api 后台的令牌里给它设上限')
     expect(screen.queryByRole('link', { name: /打开/ })).toBeNull()
     expect(screen.getByRole('button', { name: '怎么打开' })).toBeTruthy()
+  })
+
+  it('应用详情：用旧格式清单装的应用，详情带 legacy_note 时原样显示成一条提示；没有或不是字符串时不显示', async () => {
+    const NOTE = '这个应用是用旧格式的清单装的：照常运行，能启停和删除，但不接服务'
+    routes['GET /v1/apps/old-app'] = () => app({ name: 'old-app', catalog_id: 'old-app', legacy_note: NOTE })
+    location.hash = '#app-old-app'
+    const { unmount } = render(<App />)
+    expect((await screen.findByTestId('legacy-note')).textContent).toBe(NOTE)
+    unmount()
+    routes['GET /v1/apps/old-app'] = () => ({ ...app({ name: 'old-app', catalog_id: 'old-app' }), legacy_note: true })
+    render(<App />)
+    await screen.findByText('来源')
+    expect(screen.queryByTestId('legacy-note')).toBeNull()
   })
 
   it('我的应用：命令行部署的应用在列表里显示当前是第几版（列表接口没有完整的 live，只有 live_seq）', async () => {
@@ -656,7 +699,7 @@ describe('我的应用', () => {
   })
 
   it('应用详情：在概览里改成局域网后说明块显示完成态，首次登录地址跟着变', async () => {
-    const hint = { lan_address: '192.168.1.20', lan_url: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
+    const hint = { lan_address: '192.168.1.20', lan_url_after_expose: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
     let exposure = 'local'
     routes['GET /v1/apps/new-api'] = () => exposure === 'local'
       ? app({ name: 'new-api', catalog_id: 'new-api', url: 'http://127.0.0.1:18810', local_only: true, open_hint: hint })
@@ -678,6 +721,7 @@ describe('我的应用', () => {
   })
 
   it('说明块：改成局域网后 hint 没了仍显示完成态；应用又被改回只本机时回到“怎么打开”', async () => {
+    // 旧服务端把改成局域网以后的地址放在 open_hint.lan_url 里，照样认
     const hint = { lan_address: '192.168.1.20', lan_url: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
     routes['PATCH /v1/apps/new-api'] = () => ({ app: app({ name: 'new-api', exposure: 'lan' }) })
     const onChanged = vi.fn()
@@ -774,6 +818,150 @@ describe('我的应用', () => {
     render(<App />)
     await screen.findByText('需要重新登录')
     expect(screen.getByText('acornfox open')).toBeTruthy()
+  })
+})
+
+describe('旧格式的清单和空目录', () => {
+  const MSG36 = 'hermes-agent v0.23.0 是旧格式（第 2 版）的清单，这一版平台装不了：要等这个应用按新格式重新上架。不是你的操作不对；什么都没建、没下载'
+  const former = () => json(409, { error: { code: 'CAT-INST-36', message: MSG36, hint: '要等重新上架后才能装' } })
+  const upgradeLines = (root: HTMLElement) => within(root).queryAllByText(/get\.sh \| sudo bash -s -- upgrade/, { selector: 'code' })
+
+  it('应用卡片：原样显示服务端的那句话，“安装”不可点；别的应用照常能装', async () => {
+    routes['GET /v1/catalog'] = () => catalogFormer
+    await openStore()
+    const [hermes, newApi] = screen.getAllByTestId('catalog-app')
+    expect(within(hermes).getByTestId('former-note').textContent).toBe(FORMER_NOTE)
+    expect((within(hermes).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(hermes).queryByTestId('needs-platform')).toBeNull()
+    expect(within(newApi).queryByTestId('former-note')).toBeNull()
+    expect((within(newApi).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(false)
+    // 点了不可点的按钮不会开弹窗
+    fireEvent.click(within(hermes).getByRole('button', { name: '安装' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('应用卡片：已经装过的旧应用照常给“已安装 · 管理”，不显示那句话', async () => {
+    routes['GET /v1/catalog'] = () => ({ ...catalogFormer, apps: catalogFormer.apps.map((a) => (a.id === 'hermes-agent' ? { ...a, installed: ['hermes-agent'] } : a)) })
+    await openStore()
+    const hermes = screen.getAllByTestId('catalog-app')[0]
+    expect(within(hermes).getByRole('button', { name: '已安装 · 管理' })).toBeTruthy()
+    expect(within(hermes).queryByTestId('former-note')).toBeNull()
+  })
+
+  it('配方卡片：配方里有旧格式的应用时原样显示那句话，“开始”不可点；别的配方不受影响', async () => {
+    routes['GET /v1/catalog'] = () => catalogFormer
+    await openStore()
+    const cards = screen.getAllByTestId('catalog-recipe')
+    // 配方卡片上第一行是标题（应用名的标签里也可能有同样的字）
+    const byTitle = (t: string) => cards.find((c) => c.querySelector('.font-medium')?.textContent === t)!
+    for (const t of ['Hermes 智能体', 'Hermes 智能体 + New API']) {
+      const c = byTitle(t)
+      expect(within(c).getByTestId('former-note').textContent).toBe(FORMER_NOTE)
+      expect((within(c).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true)
+    }
+    const ok = byTitle('New API 模型网关')
+    expect(within(ok).queryByTestId('former-note')).toBeNull()
+    expect((within(ok).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('详情页：409 CAT-INST-36 时用列表里的基本信息，服务端的话原样显示，安装不可点，不给升级命令和安装命令', async () => {
+    routes['GET /v1/catalog'] = () => catalogFormer
+    routes['GET /v1/catalog/apps/hermes-agent'] = former
+    location.hash = '#item-hermes-agent'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Hermes 智能体' })
+    const page = screen.getByTestId('item-limited-former')
+    expect(within(page).getByTestId('item-former').textContent).toContain(FORMER_NOTE)
+    expect(within(page).getByTestId('item-former-message').textContent).toBe(MSG36)
+    // 照着跑只会被拒，所以不给可复制的安装命令
+    expect(within(page).queryByText(/acornfox install/)).toBeNull()
+    expect(within(page).queryByRole('button', { name: '复制命令' })).toBeNull()
+    expect((within(page).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(page).queryByTestId('needs-platform')).toBeNull()
+    expect(within(page).queryByTestId('upgrade-commands')).toBeNull()
+    expect(upgradeLines(page).length).toBe(0)
+    expect(page.textContent).not.toMatch(/升级/)
+    expect(screen.queryByTestId('item-limited')).toBeNull()
+  })
+
+  it('详情页：列表里没标 former、读了应用包才知道是旧格式时，也照样说明，不当成加载失败', async () => {
+    routes['GET /v1/catalog/apps/hermes-agent'] = former
+    location.hash = '#item-hermes-agent'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Hermes 智能体' })
+    expect(screen.getByTestId('item-former').textContent).toContain('这是旧格式的清单，这一版装不了')
+    expect(screen.getByTestId('item-former-message').textContent).toBe(MSG36)
+    expect(upgradeLines(document.body).length).toBe(0)
+    expect(screen.queryByText(/acornfox install/)).toBeNull()
+  })
+
+  it('安装弹窗：读详情被拒（CAT-INST-36）时服务端的说明原样显示，不给升级命令，没有安装按钮', async () => {
+    routes['GET /v1/catalog/apps/hermes-agent'] = former
+    await openStore()
+    fireEvent.click(within(screen.getAllByTestId('catalog-app')[0]).getByRole('button', { name: '安装' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByText(MSG36)
+    expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
+    expect(upgradeLines(dialog).length).toBe(0)
+    expect(within(dialog).queryByRole('button', { name: '安装' })).toBeNull()
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
+  })
+
+  it('提交后被拒（CAT-INST-36）：说明原样显示，不提升级、不给升级命令', async () => {
+    routes['POST /v1/catalog/install'] = former
+    await openStore()
+    fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByText('acornfox install new-api')
+    fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
+    await within(dialog).findByText('CAT-INST-36 · ' + MSG36)
+    expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
+    expect(upgradeLines(dialog).length).toBe(0)
+  })
+
+  it('目录里一个应用都没有、没在搜索：说“还没有可以安装的应用”，不说“没找到”', async () => {
+    routes['GET /v1/catalog'] = () => ({ ...catalog, apps: [], recipes: [] })
+    render(<App />)
+    await screen.findByRole('heading', { name: '应用中心' })
+    const empty = await screen.findByTestId('store-empty')
+    expect(empty.getAttribute('data-searching')).toBe('false')
+    expect(within(empty).getByText('还没有可以安装的应用')).toBeTruthy()
+    expect(within(empty).getByText('应用按新格式上架后会出现在这里')).toBeTruthy()
+    expect(screen.queryByText(/没找到/)).toBeNull()
+    // 空目录里搜东西：仍说没找到
+    fireEvent.change(screen.getByLabelText('搜索应用'), { target: { value: 'abc' } })
+    expect(screen.getByTestId('store-empty').getAttribute('data-searching')).toBe('true')
+    expect(screen.getByText('没找到“abc”')).toBeTruthy()
+    expect(screen.queryByText('还没有可以安装的应用')).toBeNull()
+  })
+
+  it('有应用时搜不到：仍是原来的“没找到”说法', async () => {
+    await openStore()
+    fireEvent.change(screen.getByLabelText('搜索应用'), { target: { value: '不存在的东西' } })
+    expect(screen.getByText('没找到“不存在的东西”')).toBeTruthy()
+    expect(screen.queryByText('还没有可以安装的应用')).toBeNull()
+  })
+})
+
+describe('应用自己的必填设置项（例如模型名）', () => {
+  it('和别的设置项一样：不填点安装在页面上拦下并提示；填了进请求的 params，命令行跟着变', async () => {
+    routes['GET /v1/catalog/apps/hermes-agent'] = () => hermesWithModel
+    routes['POST /v1/catalog/install'] = () => json(202, task({ target: 'hermes-agent' }))
+    await openStore()
+    fireEvent.click(within(screen.getAllByTestId('catalog-app')[0]).getByRole('button', { name: '安装' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByText('acornfox install hermes-agent')
+    // 必填的放在外面，不收进“更多设置”；有星号和提示
+    const input = within(dialog).getByLabelText('模型名 *') as HTMLInputElement
+    expect(input.closest('details')).toBeNull()
+    expect(within(dialog).getByText('要调用的模型，上下文要不少于 64K，例如 qwen-plus')).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
+    expect(await within(dialog).findByText('请填写模型名')).toBeTruthy()
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
+    fireEvent.change(input, { target: { value: 'qwen-plus' } })
+    expect(within(dialog).getByText('acornfox install hermes-agent --set model=qwen-plus')).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
+    await vi.waitFor(() => expect(calls.filter((c) => c.method === 'POST' && c.url === '/v1/catalog/install').map((c) => c.body)).toEqual([{ app: 'hermes-agent', params: { model: 'qwen-plus' } }]))
   })
 })
 

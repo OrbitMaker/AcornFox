@@ -344,7 +344,26 @@ func (c *Catalog) find(from, id string) (catalogView, catalog.IndexApp, error) {
 	if from != "" && from != PublicSource {
 		return catalogView{}, catalog.IndexApp{}, fault(CodeUnknown, nil, "私有目录 %s 里没有应用 %s", from, id)
 	}
+	if f := nothingToInstall(vs, "应用 "+id); f != nil {
+		return catalogView{}, catalog.IndexApp{}, f
+	}
 	return catalogView{}, catalog.IndexApp{}, fault(CodeUnknown, nil, "目录里没有应用 %s", id)
+}
+
+// nothingToInstall is the CAT-INST-01 for what (an app or a recipe) that is
+// not in catalogs vs when none of them has an app this platform could
+// install (catalog.NothingToInstall): it says so instead of "not in the
+// catalog, sync it", which cannot help then. nil when some app could be
+// installed.
+func nothingToInstall(vs []catalogView, what string) *Fault {
+	for _, v := range vs {
+		if v.idx != nil && catalog.HasInstallable(v.idx.Apps) {
+			return nil
+		}
+	}
+	f := fault(CodeUnknown, nil, "%s（目录里也没有%s）", catalog.NothingToInstall, what)
+	f.Hint = catalog.NothingToInstallHint
+	return f
 }
 
 func (c *Catalog) loadApp(ctx context.Context, v catalogView, ia catalog.IndexApp) (*App, error) {
@@ -421,6 +440,11 @@ func (c *Catalog) RecipeIn(from, id string) (*catalog.Recipe, string, error) {
 			if r.ID == id {
 				return &r, v.origin, nil
 			}
+		}
+	}
+	if from == "" || from == PublicSource {
+		if f := nothingToInstall(vs, "配方 "+id); f != nil {
+			return nil, "", f
 		}
 	}
 	return nil, "", fault(CodeUnknown, nil, "目录里没有配方 %s", id)

@@ -19,6 +19,8 @@ type fakeVarsAPI struct {
 	raw        string
 	err        error
 	installErr error
+	// catalogRaw, when set, is the catalog list the server answers.
+	catalogRaw string
 }
 
 const varsAnswer = `{"app":"new-api","from_catalog":true,"catalog_id":"new-api","version":"v1.0.0-rc.48","source":{"id":"public","name":"公共目录"},
@@ -42,6 +44,12 @@ func (f *fakeVarsAPI) AppVars(_ context.Context, app string, reveal bool) (clien
 }
 
 func (f *fakeVarsAPI) Catalog(context.Context) (client.CatalogList, error) {
+	if f.catalogRaw != "" {
+		var v client.CatalogList
+		err := json.Unmarshal([]byte(f.catalogRaw), &v)
+		v.Raw = json.RawMessage(f.catalogRaw)
+		return v, err
+	}
 	raw := json.RawMessage(`{"serial":7,"origin":"cache","sync":{"ok":true,"message":"目录已是最新"},
 "apps":[{"id":"new-api","version":"v1","name":"New API","summary":"网关","supported":true,"installed":[],"source":{"id":"public","name":"公共目录"},"memory_mb":{"min":256},"needs_platform":""},
 {"id":"dify","version":"v2","name":"Dify","summary":"应用平台","supported":true,"installed":[],"source":{"id":"public","name":"公共目录"},"memory_mb":{"min":2048},"needs_platform":"0.6.0"}],
@@ -101,7 +109,7 @@ func TestAppsVarsCommand(t *testing.T) {
 	if code, _, _ := h.run("apps", "vars"); code != exitUsage {
 		t.Fatalf("no name: exit %d", code)
 	}
-	if code, out, _ := h.run("apps", "vars", "-h"); code != exitOK || !strings.Contains(out, "只读") || !strings.Contains(out, "acornfox apps vars new-api") || !strings.Contains(out, "--reveal") {
+	if code, out, _ := h.run("apps", "vars", "-h"); code != exitOK || !strings.Contains(out, "只读") || !strings.Contains(out, "acornfox apps vars demo-app") || !strings.Contains(out, "--reveal") {
 		t.Fatalf("help %d %s", code, out)
 	}
 	if code, out, _ := h.run("apps", "-h"); code != exitOK || !strings.Contains(out, "apps vars 应用") {
@@ -192,5 +200,57 @@ func TestCatalogShowsUpgradeFirst(t *testing.T) {
 		if _, ok := d[k]; !ok {
 			t.Fatalf("--json 的 diagnosis 少了 %s：%s", k, out)
 		}
+	}
+}
+
+// An app the catalog still lists in a former manifest format is marked with
+// the server's note (published again, it can be installed); a catalog with
+// no apps says there is nothing to install yet, and is no error.
+func TestCatalogListFormerAndEmpty(t *testing.T) {
+	h, f := varsHarness(t)
+	f.catalogRaw = `{"serial":5,"origin":"cache","sync":{"ok":true,"message":"目录已是最新"},
+"apps":[{"id":"old-app","version":"v1","name":"旧应用","summary":"旧格式上架的","supported":true,"installed":[],"source":{"id":"cat-x","name":"私有目录"},"memory_mb":{"min":256},"needs_platform":"","former":true,"note":"这是旧格式的清单，这一版装不了，等这个应用按新格式重新上架"},
+{"id":"new-app","version":"v2","name":"新应用","summary":"新格式","supported":true,"installed":[],"source":{"id":"public","name":"公共目录"},"memory_mb":{"min":256},"needs_platform":""}],
+"recipes":[{"id":"old-pair","title":"旧套装","summary":"x","apps":[{"app":"old-app"}],"source":{"id":"cat-x","name":"私有目录"},"command":"acornfox install --recipe old-pair --catalog cat-x","needs_platform":"","former":true,"note":"这是旧格式的清单，这一版装不了，等这个应用按新格式重新上架"}]}`
+	code, out, _ := h.run("catalog", "list")
+	if code != exitOK || strings.Count(out, "这是旧格式的清单，这一版装不了，等这个应用按新格式重新上架") != 2 || strings.Contains(out, "反馈") {
+		t.Fatalf("list: exit %d\n%s", code, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "new-app") && strings.Contains(line, "旧格式") {
+			t.Fatalf("an app of the current format is marked: %s", line)
+		}
+	}
+	if _, out, _ = h.run("--json", "catalog", "list"); decodeJSON(t, out)["apps"].([]any)[0].(map[string]any)["former"] != true {
+		t.Fatalf("list json: %s", out)
+	}
+
+	f.catalogRaw = `{"serial":4,"origin":"snapshot","sync":{"ok":true,"message":"目录已是最新"},"apps":[],"recipes":[]}`
+	code, out, errOut := h.run("catalog", "list")
+	if code != exitOK || !strings.Contains(out, "还没有可以安装的应用") || errOut != "" {
+		t.Fatalf("empty: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// install list (ls, tasks …) is taken for an app called list and the server
+// answers CAT-INST-01: the hint says how install tasks are looked at. An
+// app of any other name keeps the server's hint as it is.
+func TestInstallTaskWordHint(t *testing.T) {
+	h, f := varsHarness(t)
+	f.installErr = &client.Error{Status: http.StatusNotFound, Diag: client.Diagnosis{Stage: "server", Code: "CAT-INST-01",
+		Message: "目录里没有应用 list", Hint: "acornfox catalog list 看有哪些应用"}}
+	code, out, _ := h.run("--json", "install", "list")
+	d, _ := decodeJSON(t, out)["diagnosis"].(map[string]any)
+	if code != exitServerError || d["code"] != "CAT-INST-01" || d["hint"] != taskWordHint+"；acornfox catalog list 看有哪些应用" {
+		t.Fatalf("exit %d out %s", code, out)
+	}
+	f.installErr = &client.Error{Status: http.StatusNotFound, Diag: client.Diagnosis{Stage: "server", Code: "CAT-INST-01", Message: "目录里没有应用 tasks"}}
+	if _, _, errOut := h.run("install", "tasks", "--no-wait"); !strings.Contains(errOut, "acornfox install status 任务号") {
+		t.Fatalf("human: %s", errOut)
+	}
+	f.installErr = &client.Error{Status: http.StatusNotFound, Diag: client.Diagnosis{Stage: "server", Code: "CAT-INST-01", Message: "目录里没有应用 nope", Hint: "原来的提示"}}
+	_, out, _ = h.run("--json", "install", "nope")
+	if d, _ := decodeJSON(t, out)["diagnosis"].(map[string]any); d["hint"] != "原来的提示" {
+		t.Fatalf("other app: %s", out)
 	}
 }

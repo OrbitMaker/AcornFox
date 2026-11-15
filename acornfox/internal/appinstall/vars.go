@@ -2,7 +2,8 @@ package appinstall
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -27,7 +28,7 @@ import (
 // Where a value came from (AppVar.Origin).
 const (
 	OriginUser         = "user"          // the user gave it in the install request
-	OriginRecipe       = "recipe"        // the recipe preset it (or wired the model source)
+	OriginRecipe       = "recipe"        // the recipe preset it
 	OriginDefault      = "default"       // the manifest's default
 	OriginGenerated    = "generated"     // the platform generated it (passwords, keys)
 	OriginPlatform     = "platform"      // the platform worked it out for this machine
@@ -56,15 +57,11 @@ var OriginLabels = map[string]string{
 // parameters ("@" can never start a parameter key).
 const originsKey = "@origins"
 
-// paramOrigins says, for every plain parameter of m, where resolveParams
-// takes its value from, given the user's values and which of them the recipe
-// preset. llm_provider parameters are filled in by resolveLLM.
+// paramOrigins says, for every parameter of m, where resolveParams takes its
+// value from, given the user's values and which of them the recipe preset.
 func paramOrigins(m *catalog.Manifest, user map[string]any, preset map[string]bool) map[string]string {
 	out := map[string]string{}
 	for _, p := range m.Params {
-		if p.Type == "llm_provider" {
-			continue
-		}
 		s, origin := "", OriginUnset
 		if raw, given := user[p.Key]; given && raw != nil {
 			s, _ = scalarText(raw)
@@ -103,7 +100,27 @@ type AppVars struct {
 	// the install yet.
 	CanChange bool     `json:"can_change"`
 	Vars      []AppVar `json:"vars"`
-	Notes     []string `json:"notes"`
+	// Env is what the app's environment variables hold now, as the platform
+	// wrote them: the manifest's values rendered (references filled in,
+	// transforms done, ifs applied). A checker compares these instead of
+	// working the templates out again.
+	Env   []AppEnvVar `json:"env"`
+	Notes []string    `json:"notes"`
+}
+
+// AppEnvVar is one environment variable of an installed app.
+type AppEnvVar struct {
+	Key string `json:"key"`
+	// Value is masked like a parameter (Masked) for a secret one unless
+	// revealed; SHA256 is then the fingerprint of the whole value (hex), to
+	// compare with what was expected without showing it.
+	Value  string `json:"value"`
+	Secret bool   `json:"secret"`
+	Masked bool   `json:"masked"`
+	SHA256 string `json:"sha256,omitempty"`
+	// FromManifest: the manifest writes this key (false: set by hand with
+	// acornfox env set, or an older manifest's).
+	FromManifest bool `json:"from_manifest"`
 }
 
 // ManifestRef says whether the manifest the app was installed with is saved,
@@ -118,8 +135,8 @@ type ManifestRef struct {
 
 // AppVar is one variable of an installed app.
 type AppVar struct {
-	// Name is params.<key> (params.<key>.<field> for a model parameter) or
-	// platform.<name>.
+	// Name is params.<key> or platform.<name> (params.<key>.<field> for a
+	// value of an app installed with a manifest of the former format).
 	Name       string `json:"name"`
 	Layer      string `json:"layer"` // system | custom
 	LayerLabel string `json:"layer_label"`
@@ -143,6 +160,15 @@ type AppVar struct {
 	// Used: the manifest refers to this platform variable (only for system
 	// rows of an app whose manifest is saved).
 	Used *bool `json:"used,omitempty"`
+	// For a platform variable: ValueNow is what the platform would give
+	// the app now (Value is what it was given at install time and still
+	// uses). Differs: the two are not the same (the exposure changed, a
+	// domain was bound …); Code is then CodeVarsStale and Fix says what can
+	// be done. Nothing is rewritten in this version.
+	ValueNow *string `json:"value_now,omitempty"`
+	Differs  bool    `json:"differs,omitempty"`
+	Code     string  `json:"code,omitempty"`
+	Fix      string  `json:"fix,omitempty"`
 }
 
 const (
@@ -221,7 +247,7 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 	if err != nil {
 		return AppVars{}, fault(CodeInternal, err, "读应用失败")
 	}
-	out := AppVars{App: app, Vars: []AppVar{}, Notes: []string{}, Revealed: reveal, Source: sourceRef("", "")}
+	out := AppVars{App: app, Vars: []AppVar{}, Env: []AppEnvVar{}, Notes: []string{}, Revealed: reveal, Source: sourceRef("", "")}
 	if a.CatalogID == "" {
 		out.Source = SourceRef{}
 		out.Notes = append(out.Notes, app+" 不是从应用中心装的，没有应用中心的变量。它的环境变量用 acornfox env list --app "+app+" 看")
@@ -246,6 +272,7 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 
 	// The manifest the app was installed with, when it is saved and intact.
 	var m *catalog.Manifest
+	_, legacy := e.installedWith(ctx, app)
 	if cm, err := e.cfg.Store.GetCatalogManifest(ctx, app); err == nil {
 		if state.ManifestSHA256(cm.Manifest) != cm.SHA256 {
 			out.Notes = append(out.Notes, "保存的清单和它的校验值对不上，这次不用它")
@@ -259,6 +286,9 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 	} else if !errors.Is(err, state.ErrNotFound) {
 		return AppVars{}, fault(CodeInternal, err, "读保存的清单失败")
 	}
+	if legacy {
+		out.Notes = append(out.Notes, LegacyAppNote)
+	}
 	if m == nil {
 		out.Manifest.SourceLabel = "没存"
 		out.Notes = append(out.Notes, "清单没存，分不出类别：这个应用装的时候还不保存清单，本机的目录里也找不到它那一版的应用包。下面只列保存的值，自定义变量分不出哪些是密码，一律按密码遮住（--reveal 显示）")
@@ -270,6 +300,12 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 	if !haveOrigins || !haveUser {
 		out.Notes = append(out.Notes, "这个应用是旧版本装的，那时不记每个值是谁给的：分不出哪些是用户改的，这些值标成“装时的值”")
 	}
+	// What the platform would give it now, with the user's changes: next to
+	// what it was given at install time.
+	now, nerr := e.pv().Values(ctx, e.appContext(ctx, a, platformUser))
+	if nerr != nil {
+		now = nil
+	}
 
 	rows := map[string]*AppVar{}
 	add := func(v AppVar) {
@@ -279,6 +315,10 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 		v.EditableLabel = editableLabel(v.Editable, m != nil)
 		if v.Secret && !reveal && v.Value != "" {
 			v.Value, v.Masked = maskSecret(v.Value), true
+		}
+		if v.Secret && !reveal && v.ValueNow != nil && *v.ValueNow != "" {
+			masked := maskSecret(*v.ValueNow)
+			v.ValueNow = &masked
 		}
 		rows[v.Name] = &v
 	}
@@ -291,40 +331,19 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 		}
 		return OriginInstallTime
 	}
-	// llmRows adds one row per field of a model parameter.
-	llmRows := func(key, class, label, editable string, raw any) {
-		b, _ := json.Marshal(raw)
-		var c LLMChoice
-		if json.Unmarshal(b, &c) != nil {
-			return
+	// mapRows adds one row per field of a value that is an object (a setting
+	// of the built-in model kind, which a manifest of the former format had).
+	// Which of its fields are secret is not known: all are masked.
+	mapRows := func(key, class, label, editable string, raw map[string]any) {
+		fields := make([]string, 0, len(raw))
+		for f := range raw {
+			fields = append(fields, f)
 		}
-		src := originOf(key)
-		// With the local gateway the address and the key are the platform's
-		// doing (the gateway's address inside Docker, a token issued in it).
-		issued := src
-		if haveOrigins && c.Source == LLMLocalGateway {
-			issued = OriginPlatform
-		}
-		model := src
-		if o := origins[key+".model"]; haveOrigins && o != "" {
-			model = o
-		}
-		fields := []struct {
-			name, value, origin string
-			secret              bool
-		}{
-			{"source", c.Source, src, false},
-			{"app", c.App, src, false},
-			{"base_url", c.BaseURL, issued, false},
-			{"api_key", c.APIKey, issued, true},
-			{"model", c.Model, model, false},
-		}
+		sort.Strings(fields)
 		for _, f := range fields {
-			if f.name == "app" && f.value == "" {
-				continue // only the local gateway names an app
-			}
-			add(AppVar{Name: "params." + key + "." + f.name, Layer: catalog.LayerCustom, Class: class, Label: label,
-				Value: f.value, Secret: f.secret || m == nil, Origin: f.origin, Editable: editable})
+			v, _ := scalarText(raw[f])
+			add(AppVar{Name: "params." + key + "." + f, Layer: catalog.LayerCustom, Class: class, Label: label,
+				Value: v, Secret: true, Origin: originOf(key), Editable: editable})
 		}
 	}
 
@@ -344,12 +363,8 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 				}
 			}
 			raw, have := saved[key]
-			if prm.Type == "llm_provider" {
-				if have && raw != nil {
-					llmRows(key, r.Class, r.Label, prm.Editable, raw)
-				} else {
-					add(AppVar{Name: r.Name, Layer: r.Layer, Class: r.Class, Label: r.Label, Origin: OriginUnset, Editable: prm.Editable})
-				}
+			if obj, isMap := raw.(map[string]any); isMap {
+				mapRows(key, r.Class, r.Label, prm.Editable, obj)
 				continue
 			}
 			v := AppVar{Name: r.Name, Layer: r.Layer, Class: r.Class, Label: r.Label, Secret: r.Secret || secretRefs[key], Editable: prm.Editable}
@@ -368,13 +383,6 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 			}
 			add(v)
 		}
-		// The default chat model is used without being referred to: a model
-		// parameter that can take the local gateway falls back to it.
-		for _, p := range m.Params {
-			if p.Type == "llm_provider" && p.LLM != nil && p.LLM.LocalGateway {
-				used["platform."+catalog.PVLLMModelChat] = true
-			}
-		}
 		names := map[string]bool{}
 		for n := range used {
 			if rest, ok := strings.CutPrefix(n, "platform."); ok {
@@ -386,22 +394,22 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 		}
 		for n := range names {
 			u := used["platform."+n]
-			add(e.platformRow(n, platform, platformUser, haveUser, catalog.ClassSystem, &u))
+			add(e.platformRow(n, platform, now, platformUser, haveUser, catalog.ClassSystem, &u))
 		}
 	} else {
 		for k, raw := range saved {
 			if internalKey(k) {
 				continue
 			}
-			if _, isMap := raw.(map[string]any); isMap {
-				llmRows(k, "", "", "", raw)
+			if obj, isMap := raw.(map[string]any); isMap {
+				mapRows(k, "", "", "", obj)
 				continue
 			}
 			s, _ := raw.(string)
 			add(AppVar{Name: "params." + k, Layer: catalog.LayerCustom, Value: s, Secret: true, Origin: OriginInstallTime})
 		}
 		for n := range platform {
-			add(e.platformRow(n, platform, platformUser, haveUser, "", nil))
+			add(e.platformRow(n, platform, now, platformUser, haveUser, "", nil))
 		}
 	}
 
@@ -410,9 +418,21 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	var stale []string
 	for _, n := range names {
 		out.Vars = append(out.Vars, *rows[n])
+		if rows[n].Differs {
+			stale = append(stale, n)
+		}
 	}
+	if len(stale) > 0 {
+		out.Notes = append(out.Notes, CodeVarsStale+" "+strings.Join(stale, "、")+" 装时的值和现在算出来的不一样（value 是装时的、应用现在用的，value_now 是现在的）："+varsStaleAction)
+	}
+	env, err := e.appEnv(ctx, app, m, reveal)
+	if err != nil {
+		return AppVars{}, err
+	}
+	out.Env = env
 	out.Notes = append(out.Notes, "改设置的功能还没有：这里只能看，不能改。能改的平台变量只在安装时用 --set platform.名字=值 改")
 	if !reveal {
 		out.Notes = append(out.Notes, "密码和 Key 只显示后 4 位（不到 12 个字符的全遮）；要看全加 --reveal（接口 ?reveal=true）")
@@ -420,14 +440,69 @@ func (e *Engine) AppVars(ctx context.Context, app string, reveal bool) (AppVars,
 	return out, nil
 }
 
-// platformRow is the row of platform variable name.
-func (e *Engine) platformRow(name string, platform, user map[string]string, haveUser bool, class string, used *bool) AppVar {
+// appEnv lists app's environment variables as stored (rendered at install
+// time), sorted by key; m (may be nil) says which keys its manifest writes.
+func (e *Engine) appEnv(ctx context.Context, app string, m *catalog.Manifest, reveal bool) ([]AppEnvVar, error) {
+	list, err := e.cfg.Store.ListEnv(ctx, app)
+	if err != nil {
+		return nil, fault(CodeInternal, err, "读环境变量失败")
+	}
+	written := map[string]bool{}
+	if m != nil {
+		for _, ev := range m.Env {
+			written[ev.Key] = true
+		}
+	}
+	out := make([]AppEnvVar, 0, len(list))
+	for _, ev := range list {
+		v := AppEnvVar{Key: ev.Key, Value: ev.Value, Secret: ev.Secret, FromManifest: written[ev.Key]}
+		if ev.Secret {
+			sum := sha256.Sum256([]byte(ev.Value))
+			v.SHA256 = hex.EncodeToString(sum[:])
+			if !reveal && v.Value != "" {
+				v.Value, v.Masked = maskSecret(v.Value), true
+			}
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// LegacyAppNote is what `apps vars` (and the delete of such an app) says
+// about an app installed with a manifest of the former format.
+const LegacyAppNote = "这个应用是用旧格式的清单装的：照常运行、能启停和删除，但不在服务登记表里，用不上“需要的服务”这些新功能；等它按新格式重新上架后，删了重装才能用"
+
+// legacyValues reports whether saved parameters are an app's that was
+// installed with a manifest of the former format: a value that is an object
+// (a setting of the built-in model kind) or the record of the credentials
+// the platform got for it in another app (legacyCredentialsKey).
+func legacyValues(saved map[string]any) bool {
+	if _, ok := saved[legacyCredentialsKey]; ok {
+		return true
+	}
+	for k, v := range saved {
+		if _, isMap := v.(map[string]any); isMap && !internalKey(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// platformRow is the row of platform variable name: platform is what the
+// app was given at install time, now what the provider gives it now (nil
+// when it could not say).
+func (e *Engine) platformRow(name string, platform, now, user map[string]string, haveUser bool, class string, used *bool) AppVar {
 	v := AppVar{Name: "platform." + name, Layer: catalog.LayerSystem, Class: class, Used: used, Editable: editNever}
 	if pv, ok := catalog.LookupPlatformVar(name); ok {
 		v.Label, v.Secret = pv.Label, pv.Secret
 		if pv.UserCanSet {
 			v.Editable = editInstallOnly
 		}
+	} else {
+		// Not on this version's table (one an older version saved): what
+		// it holds cannot be told, so it is shown masked.
+		v.Secret = true
 	}
 	val, have := platform[name]
 	v.Value = val
@@ -440,6 +515,14 @@ func (e *Engine) platformRow(name string, platform, user map[string]string, have
 		v.Origin = OriginPlatform
 		if _, changed := user[name]; changed {
 			v.Origin = OriginPlatformUser
+		}
+	}
+	if nv, ok := now[name]; ok {
+		v.ValueNow = &nv
+		// Only where it matters: the app's manifest uses it (or the
+		// manifest is not saved and nobody can tell).
+		if have && nv != val && (used == nil || *used) {
+			v.Differs, v.Code, v.Fix = true, CodeVarsStale, varsStaleAction
 		}
 	}
 	return v
@@ -457,6 +540,9 @@ func secretParams(m *catalog.Manifest) map[string]bool {
 	}
 	for _, ev := range m.Env {
 		mark(ev.From, ev.Secret)
+		for _, r := range catalog.TemplateRefs(ev.Value) {
+			mark(r, ev.Secret)
+		}
 	}
 	for _, lf := range m.FirstLogin {
 		mark(lf.From, lf.Secret)

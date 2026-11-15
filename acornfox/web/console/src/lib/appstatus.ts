@@ -95,11 +95,6 @@ export function openableAddress(app: AppView): string {
   return isLoopbackURL(u) ? '' : u
 }
 
-// gatewayTokenText：应用经本机 New API 连模型时拿到的令牌不限额、不过期，提示用户去哪里设上限。
-export function gatewayTokenText(app: string, provider: string): string {
-  return `${app} 用的是 ${provider} 里一把不限额的令牌；要控制花费，可在 ${provider} 后台的令牌里给它设上限。`
-}
-
 // loginAddress：首次登录卡片上的地址。任务结果和首次登录接口给的是当时的地址，改了对外方式不会跟着变；
 // 知道应用现在的样子时用它现在的地址（和“打开”同一来源；只本机时是 127.0.0.1，卡片上标“只本机”），
 // 原地址里的路径照留。

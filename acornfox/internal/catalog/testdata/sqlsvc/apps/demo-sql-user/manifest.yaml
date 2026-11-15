@@ -1,0 +1,65 @@
+# Test material: an app that needs the database-shaped service, each item
+# taken by an env entry, and an init step run in its own container. Not a
+# real app.
+id: demo-sql-user
+schema: 3
+source: official
+maintainer: acornfox
+
+app:
+  name: 样例数据库使用方
+  summary: 需要样例数据库服务，只为测试清单格式
+  category: dev
+  icon: icon.svg
+  homepage: https://example.com/demo-sql-user
+  license: MIT
+
+lifecycle:
+  min_platform: "0.6.0"
+  status: active
+
+resources:
+  memory_mb: { min: 64 }
+  platforms: [linux/amd64]
+
+release:
+  version: v1.0.0
+  images:
+    - name: app
+      repository: example/demo-sql-user
+      tag: v1.0.0
+      digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+
+endpoints:
+  - name: web
+    port: 8090
+    protocol: http
+    primary: true
+    health:
+      path: /healthz
+
+uses:
+  - { name: db, kind: demo_sql }
+
+env:
+  - { key: DB_HOST, from: uses.db.host }
+  - { key: DB_PORT, from: uses.db.port }
+  - { key: DB_NAME, from: uses.db.database }
+  - { key: DB_USER, from: uses.db.username }
+  - { key: DB_PASSWORD, from: uses.db.password, secret: true }
+  - { key: DB_URL, from: uses.db.url, secret: true }
+
+init:
+  - name: migrate
+    when: after_healthy
+    exec:
+      command: [demo-app, migrate, --host, "{{uses.db.host}}", --user, "{{uses.db.username}}"]
+      env: { DB_PASSWORD: "{{uses.db.password}}" }
+      timeout_s: 300
+
+delivery:
+  tier: auto
+  minutes: 1
+
+uninstall:
+  data: []

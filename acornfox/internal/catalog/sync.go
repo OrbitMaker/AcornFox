@@ -258,7 +258,9 @@ var (
 )
 
 // ParseIndex decodes index.json and checks the parts a client relies on:
-// schema 1, a positive serial and well-formed package references.
+// schema 1, a positive serial and well-formed package references. Service
+// types never make it fail: the ones this program cannot use are left out
+// (ServiceTypeList).
 func ParseIndex(b []byte) (*Index, error) {
 	var idx Index
 	if err := json.Unmarshal(b, &idx); err != nil {

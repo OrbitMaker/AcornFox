@@ -112,8 +112,8 @@ func TestLocalOnlyAppShowsLoopback(t *testing.T) {
 }
 
 // A local-only app on a Linux server carries an open hint: the command for
-// an SSH tunnel always; the LAN address and the URL after switching when
-// the server has one. Without its own login (not from the catalog) the LAN
+// an SSH tunnel always; the LAN address when the server has one (the URL
+// after switching only when the switch is offered). Without its own login (not from the catalog) the LAN
 // switch is not offered. Other exposures have no hint; neither does the
 // desktop, where localhost opens on the same computer.
 func TestLocalOnlyOpenHint(t *testing.T) {
@@ -136,13 +136,18 @@ func TestLocalOnlyOpenHint(t *testing.T) {
 	}
 	v := get()
 	hint := v.OpenHint
-	if hint == nil || hint.Command != "acornfox open web" || hint.LANAddress != lan ||
-		hint.LANURL != "http://192.168.1.20:"+itoa(a.PublicPort) || hint.HasLogin || hint.CanLAN || hint.Recommend != "tunnel" {
+	port := itoa(a.PublicPort)
+	// No login of its own: the LAN switch is not offered, so there is no
+	// address after switching and no question; the tunnel is the way, with
+	// the real port filled in.
+	if hint == nil || hint.Command != "acornfox open web" || hint.LANAddress != lan || hint.LANURL != "" ||
+		hint.LANURLAfterExpose != "" || hint.Ask != "" || hint.HasLogin || hint.CanLAN || hint.Recommend != "tunnel" ||
+		hint.TunnelCommand != "ssh -N -L "+port+":127.0.0.1:"+port+" 用户@服务器地址" || hint.TunnelURL != "http://127.0.0.1:"+port {
 		t.Fatalf("hint %+v", hint)
 	}
 	// A cloud server: no LAN address, the tunnel is the way.
 	lan = ""
-	if hint := get().OpenHint; hint == nil || hint.LANAddress != "" || hint.LANURL != "" || hint.CanLAN || hint.Recommend != "tunnel" {
+	if hint := get().OpenHint; hint == nil || hint.LANAddress != "" || hint.LANURL != "" || hint.LANURLAfterExpose != "" || hint.CanLAN || hint.Recommend != "tunnel" {
 		t.Fatalf("cloud hint %+v", hint)
 	}
 	if w := do(t, h, "PATCH", "/v1/apps/web", []byte(`{"exposure":"lan"}`), nil); w.Code != http.StatusOK {

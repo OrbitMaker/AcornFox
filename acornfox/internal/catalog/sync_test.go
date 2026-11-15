@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"io/fs"
@@ -417,18 +418,40 @@ func TestFetchPackage(t *testing.T) {
 	}
 }
 
+// The built-in snapshot is, for now, a catalog with no apps: the service
+// types alone, at serial 4. It is exactly what its source (snapshotsrc/)
+// builds to at that serial, so go generate reproduces it; and 4 is above the
+// last catalog published in the former manifest format (3), so a sync never
+// brings that one over it.
 func TestSnapshotEmbedded(t *testing.T) {
 	snap := Snapshot()
 	idx, from, err := LoadWith("", snap, nil)
-	if err != nil || from != FromSnapshot || len(idx.Apps) == 0 {
-		t.Fatalf("内置快照读不出：%v %s", err, from)
+	if err != nil || from != FromSnapshot || idx.Apps == nil || len(idx.Apps) != 0 || len(idx.AllRecipes()) != 0 {
+		t.Fatalf("内置快照：%+v %v %s", idx, err, from)
 	}
 	ver, err := fs.ReadFile(snap, VersionFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := parseSerial(ver); n != idx.Serial {
+	if n, _ := parseSerial(ver); n != idx.Serial || idx.Serial != 4 {
 		t.Fatalf("快照 version.txt=%q，index serial=%d", ver, idx.Serial)
+	}
+	if localSerial("", snap, nil) <= 3 {
+		t.Fatal("快照的序号要比线上旧格式的目录（3）大")
+	}
+	var kinds []string
+	for _, st := range KnownServiceTypes(idx) {
+		kinds = append(kinds, st.Kind)
+	}
+	if strings.Join(kinds, ",") != "llm_gateway,mysql,postgres,redis,smtp" {
+		t.Fatalf("快照的服务类型 %v", kinds)
+	}
+	b, err := Build("snapshotsrc", idx.Serial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fs.ReadFile(snap, IndexFile); !bytes.Equal(got, b.Index) {
+		t.Fatalf("快照和 snapshotsrc 按序号 %d 打出来的不一样（改了 snapshotsrc 要 go generate）", idx.Serial)
 	}
 	for _, a := range idx.Apps {
 		b, err := fs.ReadFile(snap, a.Package.Path)

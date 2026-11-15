@@ -152,7 +152,9 @@ func (c *Client) doWithKey(ctx context.Context, method, path string, body io.Rea
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp.StatusCode, c.serverError(resp)
 	}
-	if out != nil {
+	// 204 No Content has no body to decode (DELETE /v1/services/{name} with
+	// nothing to say): the call succeeded, out stays as it was.
+	if out != nil && resp.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			return resp.StatusCode, err
 		}

@@ -58,8 +58,15 @@ func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
 			"域名不合法：需为小写、合法主机名、至少含一个点、非 IP、长度不超过 253")
 		return
 	}
-	if _, err := s.store.GetApp(ctx, app); err != nil {
+	cur, err := s.store.GetApp(ctx, app)
+	if err != nil {
 		s.mapStoreError(w, err)
+		return
+	}
+	if cur.Internal {
+		// An internal app (a database) has no entry route: a domain for it
+		// could never be opened.
+		writeError(w, http.StatusConflict, "internal_app", app+" "+internalNote+"，不能绑定域名：它没有网页可以打开，别的应用按它的名字在内部网络里连它")
 		return
 	}
 	if body.Name == s.publicConsoleDomain(ctx) {

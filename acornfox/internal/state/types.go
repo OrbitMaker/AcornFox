@@ -43,7 +43,7 @@ const (
 	StatusBuilding   = "building"   // image being built (or resolved for image sources)
 	StatusStarting   = "starting"   // container being created and started
 	StatusChecking   = "checking"   // health check in progress
-	StatusRouting    = "routing"    // switching Caddy to the new container
+	StatusRouting    = "routing"    // switching the entry proxy to the new container
 	StatusLive       = "live"       // currently serving (at most one per app)
 	StatusRetired    = "retired"    // previously live, replaced by a newer deployment
 	StatusFailed     = "failed"     // stopped with a diagnosis; the previous live version keeps serving
@@ -84,21 +84,31 @@ type App struct {
 	Desired           string `json:"desired"`            // DesiredRunning | DesiredStopped
 	Port              int    `json:"port"`               // container port; 0 = detect from image EXPOSE, else 8080
 	HealthPath        string `json:"health_path"`        // default "/"
-	PublicPort        int    `json:"public_port"`        // host port Caddy listens on for this app; unique per host
+	PublicPort        int    `json:"public_port"`        // host port the entry proxy listens on for this app; unique per host
 	CurrentDeployment string `json:"current_deployment"` // ID of the live deployment, "" if none
 	MemoryMB          int    `json:"memory_mb"`          // default DefaultMemoryMB
 	CPUMilli          int    `json:"cpu_milli"`          // default DefaultCPUMilli (1000 = 1 CPU)
 	Exposure          string `json:"exposure"`           // "" (platform default) | Exposure* below
 	// Set for apps installed from the app catalog (all empty otherwise).
-	Command        []string  `json:"command,omitempty"`         // container start command; empty = the image's default
-	PidsLimit      int       `json:"pids_limit,omitempty"`      // 0 = the runner default (512)
-	Links          []string  `json:"links,omitempty"`           // other apps whose network the container joins
-	CatalogID      string    `json:"catalog_id,omitempty"`      // app id in the catalog
-	CatalogVersion string    `json:"catalog_version,omitempty"` // release.version installed
-	CatalogSource  string    `json:"catalog_source,omitempty"`  // "catalog" or "recipe:<id>"
-	CatalogOrigin  string    `json:"catalog_origin,omitempty"`  // "" = public catalog, else the private catalog id
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	Command        []string `json:"command,omitempty"`         // container start command; empty = the image's default
+	PidsLimit      int      `json:"pids_limit,omitempty"`      // 0 = the runner default (512)
+	Links          []string `json:"links,omitempty"`           // other apps whose network the container joins
+	CatalogID      string   `json:"catalog_id,omitempty"`      // app id in the catalog
+	CatalogVersion string   `json:"catalog_version,omitempty"` // release.version installed
+	CatalogSource  string   `json:"catalog_source,omitempty"`  // "catalog" or "recipe:<id>"
+	CatalogOrigin  string   `json:"catalog_origin,omitempty"`  // "" = public catalog, else the private catalog id
+	// Internal: the app is reached over the app network only (a catalog app
+	// whose manifest says exposure internal, such as a database). Its port is
+	// not published on the host, it gets no entry route and nothing to open;
+	// Exposure is then not used (its effective exposure is ExposureInternal)
+	// and cannot be changed. Set at install, never changed afterwards.
+	Internal bool `json:"internal,omitempty"`
+	// HealthCheck is how the reconciler tells a new container is up when it
+	// is not a GET to HealthPath (a catalog app whose primary endpoint says
+	// exec or tcp); nil keeps the HTTP check.
+	HealthCheck *HealthCheck `json:"health_check,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
 // How an app is reachable. AFX Cloud ("afx_cloud": a public address under
@@ -110,6 +120,27 @@ const (
 	ExposurePublic   = "public"    // every interface plus domains with automatic certificates
 	ExposureAFXCloud = "afx_cloud" // reserved
 )
+
+// ExposureInternal is the effective exposure the API reports for an app with
+// Internal set (reached over the app network only). It is never stored in
+// App.Exposure and cannot be chosen.
+const ExposureInternal = "internal"
+
+// HealthCheck is a health check that is not an HTTP GET: exactly one of Exec
+// (a command run in the app's own container, as written; exit code 0, and
+// the trimmed stdout equal to ExpectStdout when that is not "", means up)
+// and TCP (the app's port accepts a connection). TimeoutS is how long a new
+// container may take to pass (0 = the reconciler's default; a longer value
+// wins over the default).
+type HealthCheck struct {
+	Exec         []string `json:"exec,omitempty"`
+	ExpectStdout string   `json:"expect_stdout,omitempty"`
+	TCP          bool     `json:"tcp,omitempty"`
+	TimeoutS     int      `json:"timeout_s,omitempty"`
+}
+
+// MaxHealthTimeoutS bounds HealthCheck.TimeoutS.
+const MaxHealthTimeoutS = 3600
 
 // ValidExposure reports whether e can be stored ("" is the platform default).
 func ValidExposure(e string) bool {
@@ -287,6 +318,19 @@ exactly these signatures):
 	// Server-wide resource caps
 	GetResourceLimits(ctx) (ResourceLimits, error) // zero value when never set
 	SetResourceLimits(ctx, l ResourceLimits) error // negative values are ErrInvalid
+
+	// Service registry (service_store.go); ciphertext columns are stored as given
+	CreateService(ctx, sv Service) (Service, error)                  // ErrServiceNameTaken: name in use; ErrServiceEntryTaken: the app already has a service for that provides entry (both ErrConflict)
+	UpdateService(ctx, name string, fn func(*Service) error) (Service, error) // only ValuesEnc and ProvideIndex change; fn must not call the store
+	GetService(ctx, name string) (Service, error)
+	ListServices(ctx, f ServiceFilter) ([]Service, error)            // by name; filter by kind and/or providing app
+	DeleteService(ctx, name string) error                            // *ServiceInUseError while apps are plugged into it
+	DeleteAppServices(ctx, app string) ([]Service, error)            // all or nothing; *ServiceInUseError while other apps use any of them
+	SetServiceBinding(ctx, b ServiceBinding) (ServiceBinding, error) // insert or replace per (app, use_name), overwriting what was issued before; ErrNotFound when the service is missing
+	GetServiceBinding(ctx, app, useName string) (ServiceBinding, error)
+	ListServiceBindings(ctx, f BindingFilter) ([]ServiceBinding, error) // by app, use_name; filter by consuming app and/or service
+	DeleteServiceBinding(ctx, app, useName string) (bool, error)     // bool = there was one
+	DeleteAppBindings(ctx, app string) (int, error)                  // how many were removed
 
 	// Events
 	AddEvent(ctx, e Event) error

@@ -3,7 +3,7 @@ package main
 // "acornfox serve": the single-process server for macOS and Windows
 // (three-platform architecture, 2026-11-01). It runs as the logged-in user,
 // calls the runner in-process (no second account, no peer socket), finds
-// Docker through internal/platform and runs Caddy as a container on a bridge
+// Docker through internal/platform and runs the entry proxy as a container on a bridge
 // network. The autostart entry written by "acornfox install" runs it with
 // --background.
 //
@@ -25,8 +25,8 @@ import (
 
 	dockerclient "github.com/moby/moby/client"
 
-	"github.com/acornfox/acornfox/internal/caddyroute"
 	"github.com/acornfox/acornfox/internal/cli"
+	"github.com/acornfox/acornfox/internal/edge"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/setup"
@@ -44,10 +44,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	var (
 		dataDir       = fs.String("data-dir", paths.DataDir, "数据目录")
 		consoleListen = fs.String("console-listen", defaultConsoleListen, "控制台监听地址（只允许本机回环）")
-		edgeMode      = fs.String("edge", runner.EdgeModeBridge, "Caddy 容器的网络方式：bridge（默认）或 host（仅 Linux）")
-		edgeAdminPort = fs.Int("edge-admin-port", defaultEdgeAdminPort, "Caddy 管理网关的本机端口")
+		edgeMode      = fs.String("edge", runner.EdgeModeBridge, "入口代理容器的网络方式：bridge（默认）或 host（仅 Linux）")
+		edgeAdminPort = fs.Int("edge-admin-port", defaultEdgeAdminPort, "入口代理容器管理口的本机端口")
 		publicPortMin = fs.Int("public-port-min", 18810, "应用端口范围下限")
-		publicPortMax = fs.Int("public-port-max", 18859, "应用端口范围上限（Mac/Windows 预留 50 个，Caddy 容器一次映射好）")
+		publicPortMax = fs.Int("public-port-max", 18859, "应用端口范围上限（Mac/Windows 预留 50 个，入口代理容器一次映射好）")
 		exposure      = fs.String("default-exposure", platform.DefaultExposure(), "应用默认暴露方式：lan、local、public")
 		lanPort       = fs.Int("lan-console-port", 0, "局域网控制台端口（默认 18802）")
 		background    = fs.Bool("background", false, "后台运行：输出写入日志文件（开机自启用）")
@@ -109,7 +109,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		PublicHost:      "localhost",
 		PublicPortMin:   *publicPortMin,
 		PublicPortMax:   *publicPortMax,
-		HTTPS:           caddyroute.HTTPSConfig{HTTPPort: 80, HTTPSPort: 443},
+		HTTPS:           edge.HTTPS{HTTPPort: 80, HTTPSPort: 443},
 		EdgeMode:        *edgeMode,
 		EdgeAdminPort:   *edgeAdminPort,
 		DefaultExposure: *exposure,

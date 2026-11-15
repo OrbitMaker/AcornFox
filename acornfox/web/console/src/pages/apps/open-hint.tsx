@@ -22,6 +22,11 @@ function portOf(u?: string): string {
   }
 }
 
+// lanAfter：改成局域网以后的地址（改之前打不开）。旧服务端把它放在 lan_url 里，新的放在 lan_url_after_expose。
+function lanAfter(h: OpenHint): string {
+  return h.lan_url_after_expose || h.lan_url || ''
+}
+
 export function OpenHintBlock({ name, hint, openURL, onChanged, className }: {
   name: string
   // 只本机时服务端给的说明；不是只本机（或已经改成局域网）时是 undefined。
@@ -52,7 +57,7 @@ export function OpenHintBlock({ name, hint, openURL, onChanged, className }: {
     try {
       await api.patch(appPath(name), { exposure: 'lan' })
       setConfirm(false)
-      setDone({ url: hint.lan_url || '' })
+      setDone({ url: lanAfter(hint) })
       toast('已改成局域网可访问', name)
       await onChanged?.()
     } catch (e) {
@@ -86,6 +91,12 @@ export function OpenHintBlock({ name, hint, openURL, onChanged, className }: {
       <div className="flex items-center gap-1.5 text-xs font-medium"><Laptop className="size-3.5" />在你自己的电脑上运行这条命令打开</div>
       <CopyLine text={h.command} />
       <p className="text-2xs text-muted-foreground">它像 acornfox open 打开控制台一样开一条 SSH 隧道，自动打开浏览器，看完按 Ctrl+C 关闭。不用放行安全组。</p>
+      {h.tunnel_command && (
+        <div className="flex flex-col gap-1.5" data-testid="open-ssh">
+          <p className="text-2xs text-muted-foreground">电脑上没有 acornfox 命令行：运行下面这一行并保持不关（“用户@服务器地址”换成你登录这台服务器用的），再用浏览器打开 <span className="mono">{h.tunnel_url}</span>。</p>
+          <CopyLine text={h.tunnel_command} />
+        </div>
+      )}
     </div>
   )
   return (
@@ -97,7 +108,7 @@ export function OpenHintBlock({ name, hint, openURL, onChanged, className }: {
             <Button size="sm" className="self-start" onClick={() => setConfirm(true)}><Wifi className="size-3.5" />让局域网里的电脑能打开</Button>
           ) : (
             <div className="flex flex-col gap-2 rounded-md bg-muted/50 p-2.5 text-xs">
-              <span>会在服务器的所有网卡上开放端口 {portOf(h.lan_url)}：同一局域网（{h.lan_address}）里的电脑都能访问 {name}，要用它自己的账号密码登录。服务器如果还有公网地址、防火墙或安全组又放行了这个端口，公网也能访问到。改完马上生效，以后可以在“高级”里改回只本机。</span>
+              <span>会在服务器的所有网卡上开放端口 {portOf(lanAfter(h))}：同一局域网（{h.lan_address}）里的电脑都能访问 {name}，要用它自己的账号密码登录。服务器如果还有公网地址、防火墙或安全组又放行了这个端口，公网也能访问到。改完马上生效，以后可以在“高级”里改回只本机。</span>
               <div className="flex gap-2">
                 <Button size="sm" onClick={toLAN} disabled={busy}>{busy && <Spinner />}确认改成局域网</Button>
                 <Button size="sm" variant="ghost" onClick={() => setConfirm(false)}>取消</Button>

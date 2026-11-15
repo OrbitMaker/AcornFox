@@ -210,7 +210,7 @@ type Container struct {
 type Owner struct {
 	Ours    bool
 	Unknown bool   // the process could not be identified (not root)
-	Desc    string // "nginx（PID 812）", "容器 web-1（进程 caddy）"
+	Desc    string // "nginx（PID 812）", "容器 web-1（进程 nginx）"
 }
 
 // Classify decides who holds listener l. containers nil means the container

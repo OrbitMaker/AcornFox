@@ -45,6 +45,12 @@ type LANManager struct {
 
 	mu  sync.Mutex
 	srv *http.Server
+	// ln is srv's listener and served is closed once srv.Serve has
+	// returned: stopping closes ln itself and waits for that, so the port
+	// is free when Disable (or Close) returns and an Enable right after can
+	// listen on it again.
+	ln     net.Listener
+	served chan struct{}
 }
 
 // NewLANManager returns a manager; call Apply once at startup.
@@ -75,12 +81,7 @@ func (m *LANManager) Apply() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if c == nil {
-		if m.srv != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = m.srv.Shutdown(ctx)
-			cancel()
-			m.srv = nil
-		}
+		m.stopLocked(true)
 		return nil
 	}
 	if m.srv != nil {
@@ -91,9 +92,11 @@ func (m *LANManager) Apply() error {
 		return fmt.Errorf("局域网控制台监听 %d 端口失败：%w", m.cfg.Port, err)
 	}
 	srv := &http.Server{Handler: m.handler, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10}
-	m.srv = srv
+	served := make(chan struct{})
+	m.srv, m.ln, m.served = srv, ln, served
 	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		defer close(served)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			m.cfg.Logger.Error("lan console", "err", err)
 		}
 	}()
@@ -105,10 +108,31 @@ func (m *LANManager) Apply() error {
 func (m *LANManager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.srv != nil {
-		_ = m.srv.Close()
-		m.srv = nil
+	m.stopLocked(false)
+}
+
+// stopLocked stops the listener, if any (m.mu held): graceful lets requests
+// under way finish (up to 3 seconds), otherwise they are cut. Either way
+// the listener itself is closed here, not left to the Serve goroutine (it
+// may not have started yet, and would then hold the port a little longer),
+// and Serve is waited for, briefly.
+func (m *LANManager) stopLocked(graceful bool) {
+	if m.srv == nil {
+		return
 	}
+	if graceful {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = m.srv.Shutdown(ctx)
+		cancel()
+	} else {
+		_ = m.srv.Close()
+	}
+	_ = m.ln.Close()
+	select {
+	case <-m.served:
+	case <-time.After(3 * time.Second):
+	}
+	m.srv, m.ln, m.served = nil, nil, nil
 }
 
 func (m *LANManager) url() string {

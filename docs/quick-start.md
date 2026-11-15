@@ -38,9 +38,9 @@ ssh user@your-server-ip
 执行安装命令：
 
 ```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash
 # 中国大陆服务器改用 Gitee 镜像：
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.sh | sudo bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash
 ```
 
 **国内服务器**会自动使用镜像加速，无需额外配置。
@@ -53,7 +53,7 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install.
 服务状态:
   • acornfox-server: active
   • acornfox-runner: active
-  • Caddy 容器 acornfox-caddy: running
+  • 入口容器 acornfox-edge: running
 
 管理员令牌:
 acf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -71,9 +71,9 @@ acf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 在你的本地电脑（macOS 或 Linux）执行：
 
 ```bash
-curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/install-cli.sh | bash
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 # 中国大陆改用 Gitee 镜像：
-curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/scripts/install/install-cli.sh | bash
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 ```
 
 **Windows 用户**：跳过这一步和下一步，`ssh user@your-server-ip` 登录服务器，在服务器上执行 `acornfox target add local --url unix:///run/acornfox/api.sock` 登记本机，之后的命令都在服务器上运行。
@@ -190,22 +190,29 @@ acornfox faults 编号
 
 ## 从应用中心装一个应用
 
-应用中心里是预先配好的应用，不用写 Dockerfile。下面装 New API（大模型接口网关）：
+应用中心里是预先配好的应用，不用写 Dockerfile。把下面的“应用”换成 `catalog list` 里列出的名字：
 
 ```bash
-acornfox catalog list        # 看目录里有哪些应用和配方
-acornfox install new-api     # 约 1 分钟，装好后显示首次登录的账号，密码默认遮住
+acornfox catalog list          # 看目录里有哪些应用和配方
+acornfox install 应用 --plan   # 先看计划：它需要的服务这台机器上有没有、还缺什么（只读，什么都不装）
+acornfox install 应用          # 装，装好后显示首次登录的账号，密码默认遮住
 ```
+
+v0.6.0 换了应用清单的格式，应用目录已按新格式发布，联网的服务器会自动取到；应用中心里有哪些应用，以 `catalog list` 和控制台里看到的为准。以前按旧格式上架的应用，要等按新格式重新上架后才能再装。`catalog list` 里一个可以装的应用都没有、或者装应用时说“应用中心现在还没有可以安装的应用，要等应用按新格式重新上架”，多半是这台服务器还没同步到新目录（例如连不上外网）：不是你的操作有问题，能联网后运行 `acornfox catalog sync` 再看。
+
+计划里有“必须的，没有”的服务（例如一个要调大模型的应用需要“大模型接口”），照计划写的做：登记一条你已有的（`acornfox services add …`，密码、Key 写成 `项=-`，命令会让你输入），或者让这台机器上已有、但现在用不了的那条能用（启动提供它的应用、填上还差的项、用旧数据把删掉的提供方装回来）。AcornFox 不会替你装别的应用来提供它。几个应用要一起装好并接上，装配方（`acornfox install --recipe 配方`）。
+
+安装时的密码这类保密设置项不要写在命令行里，写成 `--set 设置项=-`，命令会让你输入；不填的密码由平台生成。
 
 要显示密码，用输出里的任务编号运行 `acornfox install status 任务编号 --show-secrets`，或在控制台“我的应用”里点开应用查看。用 `--no-wait` 只提交时，`acornfox install status 任务编号 --wait` 会等到装好或失败再返回（最多等 90 秒，没装完再运行一次）。
 
 从应用中心装的应用默认只有服务器本机能打开。在你自己的电脑上运行下面的命令打开它（经 SSH 隧道，不用放行安全组），看完按 Ctrl+C 关闭：
 
 ```bash
-acornfox open new-api
+acornfox open 应用
 ```
 
-也可以在控制台（`acornfox open`）左侧的“应用中心”里点“安装”。Hermes 智能体、配方、局域网访问和令牌额度见 [使用手册的“应用中心”](user-guide.md#应用中心)。
+也可以在控制台（`acornfox open`）左侧的“应用中心”里点“安装”。服务怎么登记、配方、局域网访问见 [使用手册的“应用中心”](user-guide.md#应用中心)。
 
 ## Dockerfile 模板
 
@@ -296,7 +303,7 @@ CMD ["./main"]
    - 通过自然语言部署
 
 5. **从应用中心装应用**
-   - New API、Hermes 智能体
+   - 先看计划，缺的服务照计划给的命令登记或补上
    - 见上面“从应用中心装一个应用”
 
 详细文档：

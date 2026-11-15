@@ -1,13 +1,20 @@
 {
   "scenario": "recipe-hermes-with-new-api",
   "request": {
-    "recipe": "hermes-with-new-api"
+    "recipe": "hermes-with-new-api",
+    "params": {
+      "hermes-agent.model": "qwen-plus"
+    }
   },
   "platform": {
     "China": true,
     "Cloud": "",
     "TZ": "Asia/Shanghai",
-    "ChatModel": "qwen-plus"
+    "Host": {
+      "PublicHost": "server.example",
+      "Desktop": false,
+      "HTTPSPort": 0
+    }
   },
   "apps": [
     {
@@ -47,11 +54,29 @@
           "path": "/api/setup",
           "content_type": "application/json",
           "body": "{\"DemoSiteEnabled\":false,\"SelfUseModeEnabled\":true,\"confirmPassword\":\"ziYTAwtHwfmVQ47fNg4Z\",\"password\":\"ziYTAwtHwfmVQ47fNg4Z\",\"username\":\"admin\"}"
+        },
+        {
+          "method": "POST",
+          "path": "/api/user/login",
+          "content_type": "application/json",
+          "body": "{\"password\":\"ziYTAwtHwfmVQ47fNg4Z\",\"username\":\"admin\"}"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/option/",
+          "content_type": "application/json",
+          "body": "{\"key\":\"RegisterEnabled\",\"value\":false}"
+        },
+        {
+          "method": "POST",
+          "path": "/api/user/login",
+          "content_type": "application/json",
+          "body": "{\"password\":\"ziYTAwtHwfmVQ47fNg4Z\",\"username\":\"admin\"}"
         }
       ],
       "first_login": {
         "app": "new-api",
-        "url": "http://server.example:8080/new-api",
+        "url": "http://server.example:18810",
         "fields": [
           {
             "label": "账号",
@@ -139,7 +164,7 @@
       "init": [],
       "first_login": {
         "app": "hermes-agent",
-        "url": "http://server.example:8080/hermes-agent",
+        "url": "http://server.example:18811",
         "fields": [
           {
             "label": "账号",
@@ -150,6 +175,13 @@
             "value": "8CPMzmp6dUPYvkbxjsDqXSet",
             "secret": true
           }
+        ]
+      },
+      "credentials": {
+        "llm → new-api": [
+          "api_key",
+          "issue_id",
+          "token_id"
         ]
       }
     }

@@ -8,13 +8,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acornfox/acornfox/internal/catalog"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
 // Deleting an app with its data kept and installing it again on that data
 // (--reuse-data) brings back what it was set up with: its config files in the
-// data, the platform variables the user had changed, and its model source
-// with its gateway token. See reuse.go.
+// data, the platform variables the user had changed, and the services its
+// needs were plugged into, with the credentials that still pass the
+// provider's check. See reuse.go and connect.go.
 
 const marker = "# changed by the user\n"
 
@@ -27,8 +29,8 @@ func hermesVol(t *testing.T, v *env) string {
 	return vols[0]
 }
 
-// keepData deletes app with its data kept, the way the API server does it
-// now: the gateway tokens stay with the kept parameters.
+// keepData deletes app with its data kept, the way the API server does it:
+// its bindings (and credentials) stay in the registry.
 func keepData(t *testing.T, v *env, app string) {
 	t.Helper()
 	if err := v.w.delete(context.Background(), app, false); err != nil {
@@ -36,8 +38,13 @@ func keepData(t *testing.T, v *env, app string) {
 	}
 }
 
-func ownLLM() map[string]any {
-	return map[string]any{"llm": map[string]any{"source": "own", "base_url": "https://llm.example/v1", "api_key": "sk-own-0123456789", "model": "m1"}}
+// addOwnService registers the user's own model API (my-upstream).
+func addOwnService(t *testing.T, v *env) {
+	t.Helper()
+	if _, err := v.e.AddService(context.Background(), AddServiceRequest{Name: "my-upstream", Kind: "llm_gateway",
+		Values: map[string]string{"base_url": "https://llm.example/v1", "api_key": "sk-own-0123456789", "model": "m1"}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func varOf(t *testing.T, v *env, app, name string) AppVar {
@@ -69,13 +76,18 @@ func envOf(t *testing.T, v *env, app, key string) string {
 	return ""
 }
 
+func hasLine(lines []string, part string) bool {
+	return slices.ContainsFunc(lines, func(c string) bool { return strings.Contains(c, part) })
+}
+
 // A fresh install writes config.yaml as before; an install on the old data
 // with the same settings keeps the file the user changed, and says so.
 func TestReuseKeepsChangedConfigFile(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
+	addOwnService(t, v)
 	v.w.adopted[hermesDigestForTest] = true
-	tv := v.install(t, Request{App: "hermes-agent", Params: ownLLM()})
+	tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
@@ -84,6 +96,9 @@ func TestReuseKeepsChangedConfigFile(t *testing.T) {
 	}
 	vol := hermesVol(t, v)
 	orig, _ := v.w.volFile(vol, "config.yaml")
+	if !strings.Contains(orig, "sk-own-0123456789") {
+		t.Fatalf("config.yaml:\n%s", orig)
+	}
 	v.w.editVolFile(vol, "config.yaml", orig+marker)
 	keepData(t, v, "hermes-agent")
 
@@ -102,20 +117,17 @@ func TestReuseKeepsChangedConfigFile(t *testing.T) {
 		t.Fatalf("app %+v", a)
 	}
 	create := stepOf(tv, "hermes-agent", "create").Message
-	for _, want := range []string{"接上了旧数据", "恢复了删除时保留的参数", "大模型沿用原来的：自己的 Key（llm.example）"} {
-		if !strings.Contains(create, want) || !slices.ContainsFunc(a.Carried, func(c string) bool { return strings.Contains(c, want) }) {
+	for _, want := range []string{"接上了旧数据", "恢复了删除时保留的参数"} {
+		if !strings.Contains(create, want) || !hasLine(a.Carried, want) {
 			t.Fatalf("create step %q / carried %v: want %q", create, a.Carried, want)
 		}
 	}
 	if strings.Contains(create, "sk-own") {
 		t.Fatal("the key is in the progress")
 	}
-	// the model source came back as it was, and says where from
-	if x := varOf(t, v, "hermes-agent", "params.llm.api_key"); x.Value != "sk-own-0123456789" || x.Origin != OriginRestored {
-		t.Fatalf("llm key %+v", x)
-	}
-	if x := varOf(t, v, "hermes-agent", "params.llm.model"); x.Value != "m1" || x.Origin != OriginRestored {
-		t.Fatalf("llm model %+v", x)
+	// plugged into the same service again
+	if b, err := registry(t, v).GetBinding(ctx, "hermes-agent", "llm"); err != nil || b.Service != "my-upstream" || len(a.Bindings) != 1 || !a.Bindings[0].Reused {
+		t.Fatalf("binding %+v %v (%+v)", b, err, a.Bindings)
 	}
 	if _, err := v.w.st.GetKeptCatalogSecrets(ctx, "hermes-agent"); err == nil {
 		t.Fatal("kept record left behind")
@@ -183,68 +195,60 @@ func TestReuseOldRecordWithoutPlatformUser(t *testing.T) {
 	}
 }
 
-// Hermes on the local New API: deleted with its data kept, its token stays;
-// installed again on the data (without --llm, or with --llm local) it gets
-// the same gateway and the same token back, so its config.yaml stays as the
-// user left it and no new token is issued. Deleting it with its data then
-// revokes that token.
-func TestReuseLocalGatewayTakesOverToken(t *testing.T) {
-	for _, llm := range []any{nil, "local"} {
-		v := setup(t)
-		ctx := context.Background()
-		first := installHermes(t, v)
-		old := *first.Apps[0].GatewayToken
-		vol := hermesVol(t, v)
-		orig, _ := v.w.volFile(vol, "config.yaml")
-		if !strings.Contains(orig, "sk-K1") {
-			t.Fatalf("config.yaml without the token:\n%s", orig)
-		}
-		v.w.editVolFile(vol, "config.yaml", orig+marker)
-		keepData(t, v, "hermes-agent")
-		if len(v.newapi.deleted) != 0 || len(v.newapi.tokens) != 1 {
-			t.Fatalf("token revoked on delete with data kept: %v %v", v.newapi.deleted, v.newapi.tokens)
-		}
+// The consumer of a provided service: deleted with its data kept, its
+// binding and credential stay; installed again on the data it is plugged
+// into the same service, the credential passes the provider's check and is
+// used again (no new one is made), so its config.yaml stays as the user
+// left it. Deleting it with its data then takes that credential back.
+func TestReuseKeepsCredentialThatPassesCheck(t *testing.T) {
+	v := setup(t)
+	ctx := context.Background()
+	installHermes(t, v)
+	vol := hermesVol(t, v)
+	orig, _ := v.w.volFile(vol, "config.yaml")
+	v.w.editVolFile(vol, "config.yaml", orig+marker)
+	before, _ := registry(t, v).GetBinding(ctx, "hermes-agent", "llm")
+	keepData(t, v, "hermes-agent")
+	if v.tokens.tokenCount() != 1 {
+		t.Fatalf("the credential went with the delete: %v", v.tokens.tokens)
+	}
 
-		req := Request{App: "hermes-agent", ReuseData: true}
-		if llm != nil {
-			req.Params = map[string]any{"llm": llm}
-		}
-		tv := v.install(t, req)
-		if tv.Status != state.TaskSucceeded {
-			t.Fatalf("llm=%v: %+v", llm, tv.Fault)
-		}
-		a := tv.Apps[0]
-		if a.GatewayToken != nil || a.TakenToken == nil || *a.TakenToken != old || v.newapi.nextID != 1 {
-			t.Fatalf("llm=%v: token issued again: %+v (tokens made %d)", llm, a, v.newapi.nextID)
-		}
-		if got, _ := v.w.volFile(vol, "config.yaml"); got != orig+marker {
-			t.Fatalf("llm=%v: config.yaml replaced:\n%s", llm, got)
-		}
-		if !slices.ContainsFunc(a.Carried, func(c string) bool {
-			return strings.Contains(c, "接着用以前在 new-api 里给它的令牌（编号 1）")
-		}) {
-			t.Fatalf("llm=%v: carried %v", llm, a.Carried)
-		}
-		if llm == nil && !slices.ContainsFunc(a.Carried, func(c string) bool { return c == "大模型沿用原来的：本机的 new-api" }) {
-			t.Fatalf("carried %v", a.Carried)
-		}
-		toks, err := v.e.GatewayTokens(ctx, "hermes-agent")
-		if err != nil || !slices.Equal(toks, []TokenRef{old}) {
-			t.Fatalf("saved tokens %v %v", toks, err)
-		}
-		// deleted with its data now: the API server revokes the token
-		if err := v.w.delete(ctx, "hermes-agent", true); err != nil {
-			t.Fatal(err)
-		}
-		if err := v.e.RevokeGatewayTokens(ctx, "hermes-agent", toks); err != nil || !slices.Equal(v.newapi.deleted, []int{1}) {
-			t.Fatalf("revoke %v %v", err, v.newapi.deleted)
-		}
+	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
+	if tv.Status != state.TaskSucceeded {
+		t.Fatal(tv.Fault)
+	}
+	a := tv.Apps[0]
+	if v.tokens.tokenCount() != 1 || len(a.Bindings) != 1 || !a.Bindings[0].Reused || a.Bindings[0].Issued {
+		t.Fatalf("tokens %v, bindings %+v", v.tokens.tokens, a.Bindings)
+	}
+	after, _ := registry(t, v).GetBinding(ctx, "hermes-agent", "llm")
+	if after.Issued["token_id"] != before.Issued["token_id"] || after.Issued["issue_id"] != before.Issued["issue_id"] {
+		t.Fatalf("credential changed: %v → %v", before.Issued, after.Issued)
+	}
+	if !hasLine(a.Carried, "接着用以前 new-api 发给它的凭据（检查过还能用）") {
+		t.Fatalf("carried %v", a.Carried)
+	}
+	if got, _ := v.w.volFile(vol, "config.yaml"); got != orig+marker || !slices.Equal(a.KeptFiles, []string{"config.yaml"}) {
+		t.Fatalf("config.yaml:\n%s", got)
+	}
+	// Deleted with its data: taken back.
+	if err := v.w.st.DeleteApp(ctx, "hermes-agent", false); err != nil {
+		t.Fatal(err)
+	}
+	if w := v.e.ReleaseServices(ctx, "hermes-agent", true); len(w) != 0 {
+		t.Fatalf("warnings %q", w)
+	}
+	if v.tokens.tokenCount() != 0 {
+		t.Fatalf("not taken back: %v", v.tokens.tokens)
 	}
 }
 
-// The old gateway is gone: without a model source in the request the
-// install is refused (CAT-INST-02) and says which one it was.
-func TestReuseGatewayGoneRefused(t *testing.T) {
+// The provider deleted with its data: its service is gone, and with it the
+// binding the consumer (deleted with its data kept) had to it, which the
+// delete says. The consumer installed again on its data needs a model API
+// this machine no longer has: refused before anything is created
+// (CAT-INST-31), with how to register one.
+func TestReuseProviderGoneRefused(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
 	installHermes(t, v)
@@ -252,63 +256,73 @@ func TestReuseGatewayGoneRefused(t *testing.T) {
 	if err := v.w.delete(ctx, "new-api", true); err != nil {
 		t.Fatal(err)
 	}
+	w := v.e.ReleaseServices(ctx, "new-api", true)
+	if len(w) != 1 || !strings.Contains(w[0], "hermes-agent") || !strings.Contains(w[0], "重新接服务") {
+		t.Fatalf("warnings %q", w)
+	}
 	_, err := v.e.StartInstall(ctx, Request{App: "hermes-agent", ReuseData: true})
-	if code(err) != CodeBadParams || !strings.Contains(err.Error(), "原来用本机的 new-api") {
+	var f *Fault
+	if !errors.As(err, &f) || f.Code != CodeNoService || !strings.Contains(f.Message, "acornfox services add llm_gateway") || strings.Contains(f.Message, "new-api") {
 		t.Fatalf("got %v", err)
 	}
-	// choosing one now goes ahead
-	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: ownLLM()})
-	if tv.Status != state.TaskSucceeded {
-		t.Fatal(tv.Fault)
+	if _, err := v.w.st.GetApp(ctx, "hermes-agent"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatal("a refused install created the app")
 	}
 }
 
-// What v0.5.0 did on delete (revoke the token) or another model chosen now:
-// the platform's part of config.yaml changed, so it is written anew and the
-// old file is copied aside first; a token of the old app that is not taken
-// over is revoked once the install succeeded.
+// What the old app's config file holds changed: it is written anew and the
+// old file is copied aside first, naming what changed.
 func TestReuseChangedSettingsRewriteWithBackup(t *testing.T) {
-	t.Run("old token revoked", func(t *testing.T) {
+	t.Run("old credential no longer passes the check", func(t *testing.T) {
 		v := setup(t)
-		ctx := context.Background()
 		installHermes(t, v)
 		vol := hermesVol(t, v)
 		orig, _ := v.w.volFile(vol, "config.yaml")
 		v.w.editVolFile(vol, "config.yaml", orig+marker)
-		toks, _ := v.e.GatewayTokens(ctx, "hermes-agent")
-		if err := v.e.RevokeGatewayTokens(ctx, "hermes-agent", toks); err != nil { // as v0.5.0 deleted it
-			t.Fatal(err)
-		}
+		b, _ := registry(t, v).GetBinding(context.Background(), "hermes-agent", "llm")
+		// The user deleted the token in the provider.
+		v.tokens.mu.Lock()
+		delete(v.tokens.tokens, 1)
+		v.tokens.mu.Unlock()
 		keepData(t, v, "hermes-agent")
 		tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
 		if tv.Status != state.TaskSucceeded {
 			t.Fatal(tv.Fault)
 		}
 		a := tv.Apps[0]
-		if a.GatewayToken == nil || a.GatewayToken.ID != 2 || a.TakenToken != nil {
-			t.Fatalf("app %+v", a)
+		if len(a.Bindings) != 1 || !a.Bindings[0].Issued || v.tokens.tokenCount() != 1 {
+			t.Fatalf("app %+v tokens %v", a, v.tokens.tokens)
 		}
-		checkBackup(t, v, tv, vol, orig+marker, "params.llm.api_key")
-		if !slices.ContainsFunc(a.Carried, func(c string) bool { return strings.Contains(c, "已经没有了") }) {
+		// Only the key differs from what the old file was written with.
+		checkBackup(t, v, tv, vol, orig+marker, "uses.llm.api_key")
+		notes := carriedRevoke(tv, "hermes-agent")
+		if len(notes) != 1 || !strings.Contains(notes[0], "没通过检查，已经换了一份新的") || !strings.Contains(notes[0], b.Issued["issue_id"]) || !strings.Contains(notes[0], "new-api 里看") {
 			t.Fatalf("carried %v", a.Carried)
 		}
+		// The credential not taken back is to be told; the item the
+		// provider's manifest asks the user to fill in there (its default
+		// model) is not, since Hermes does not use it.
+		if tm := tv.Timing; tm == nil || len(tm.MustTell) != 1 || tm.MustTell[0] != notes[0] {
+			t.Fatalf("must_tell %+v", tv.Timing)
+		}
 	})
-	t.Run("own key chosen now", func(t *testing.T) {
+	t.Run("another service chosen now", func(t *testing.T) {
 		v := setup(t)
 		installHermes(t, v)
+		addOwnService(t, v)
 		vol := hermesVol(t, v)
 		orig, _ := v.w.volFile(vol, "config.yaml")
 		v.w.editVolFile(vol, "config.yaml", orig+marker)
 		keepData(t, v, "hermes-agent")
-		tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: ownLLM()})
+		tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Use: map[string]string{"llm": "my-upstream"}})
 		if tv.Status != state.TaskSucceeded {
 			t.Fatal(tv.Fault)
 		}
-		checkBackup(t, v, tv, vol, orig+marker, "params.llm.api_key、params.llm.base_url、params.llm.model")
-		if !slices.Equal(v.newapi.deleted, []int{1}) {
-			t.Fatalf("the old token not revoked: %v", v.newapi.deleted)
+		checkBackup(t, v, tv, vol, orig+marker, "uses.llm.api_key、uses.llm.base_url")
+		if !slices.Equal(v.tokens.deleted, []int{1}) {
+			t.Fatalf("the old credential not taken back: %v", v.tokens.deleted)
 		}
-		if !slices.ContainsFunc(tv.Apps[0].Carried, func(c string) bool { return strings.Contains(c, "不再用了，已吊销") }) {
+		if !hasLine(tv.Apps[0].Carried, "已经收回") || len(carriedRevoke(tv, "hermes-agent")) != 0 {
 			t.Fatalf("carried %v", tv.Apps[0].Carried)
 		}
 	})
@@ -333,8 +347,10 @@ func checkBackup(t *testing.T, v *env, tv TaskView, vol, old, changed string) {
 }
 
 // A fresh install of a name whose old data is gone drops the stale kept
-// record and revokes its token; a token number the gateway now uses for
-// another value (set up anew) is left alone.
+// record. Its kept binding is checked like any other: the credential still
+// there is used again; a number the provider now uses for something else (it
+// was set up anew) does not pass, a new one is issued, and the thing under
+// the old number is left alone.
 func TestFreshInstallDropsStaleKeptRecord(t *testing.T) {
 	for _, reinstalled := range []bool{false, true} {
 		v := setup(t)
@@ -346,23 +362,26 @@ func TestFreshInstallDropsStaleKeptRecord(t *testing.T) {
 			t.Fatal(err)
 		}
 		if reinstalled {
-			v.newapi.mu.Lock()
-			v.newapi.salt = "-new"
-			v.newapi.mu.Unlock()
+			v.tokens.mu.Lock()
+			v.tokens.tokens[1] = "someone-else"
+			v.tokens.mu.Unlock()
 		}
-		tv := v.install(t, Request{App: "hermes-agent", Params: map[string]any{"llm": "local"}})
+		tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()})
 		if tv.Status != state.TaskSucceeded {
 			t.Fatal(tv.Fault)
 		}
 		if _, err := v.w.st.GetKeptCatalogSecrets(ctx, "hermes-agent"); err == nil {
 			t.Fatal("stale kept record left")
 		}
-		want := []int{1}
-		if reinstalled {
-			want = nil
+		if len(v.tokens.deleted) != 0 {
+			t.Fatalf("reinstalled=%v: deleted %v", reinstalled, v.tokens.deleted)
 		}
-		if !slices.Equal(v.newapi.deleted, want) {
-			t.Fatalf("reinstalled=%v: deleted %v, want %v", reinstalled, v.newapi.deleted, want)
+		want := 1
+		if reinstalled {
+			want = 2
+		}
+		if v.tokens.tokenCount() != want || (reinstalled && len(carriedRevoke(tv, "hermes-agent")) != 1) {
+			t.Fatalf("reinstalled=%v: tokens %v carried %v", reinstalled, v.tokens.tokens, tv.Apps[0].Carried)
 		}
 	}
 }
@@ -372,8 +391,9 @@ func TestFreshInstallDropsStaleKeptRecord(t *testing.T) {
 func TestReuseWithoutKeptRecordKeepsFile(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
+	addOwnService(t, v)
 	v.w.adopted[hermesDigestForTest] = true
-	if tv := v.install(t, Request{App: "hermes-agent", Params: ownLLM()}); tv.Status != state.TaskSucceeded {
+	if tv := v.install(t, Request{App: "hermes-agent", Params: hermesModel()}); tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
 	vol := hermesVol(t, v)
@@ -383,7 +403,8 @@ func TestReuseWithoutKeptRecordKeepsFile(t *testing.T) {
 	if err := v.w.st.DeleteKeptCatalogSecrets(ctx, "hermes-agent"); err != nil {
 		t.Fatal(err)
 	}
-	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: ownLLM()})
+	// Nothing kept to bring the model back: it is given again.
+	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: hermesModel()})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
@@ -395,22 +416,26 @@ func TestReuseWithoutKeptRecordKeepsFile(t *testing.T) {
 	}
 }
 
-// A failed install on old data keeps the kept record and leaves the token
-// it took over alone.
-func TestReuseFailureKeepsTakenToken(t *testing.T) {
+// A failed install on old data keeps the kept record, and leaves the old
+// binding and its credential, used again by it, alone.
+func TestReuseFailureKeepsOldBinding(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
 	installHermes(t, v)
 	keepData(t, v, "hermes-agent")
+	before, _ := registry(t, v).GetBinding(ctx, "hermes-agent", "llm")
 	v.w.mu.Lock()
 	v.w.failDeploy["hermes-agent"] = true
 	v.w.mu.Unlock()
 	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
-	if tv.Status != state.TaskFailed || tv.Apps[0].TakenToken == nil {
-		t.Fatalf("should fail after taking the token over: %+v", tv)
+	if tv.Status != state.TaskFailed || len(tv.Apps[0].Bindings) != 1 || !tv.Apps[0].Bindings[0].Reused {
+		t.Fatalf("should fail after plugging in the old credential: %+v", tv)
 	}
-	if len(v.newapi.deleted) != 0 {
-		t.Fatalf("the old token was revoked by the failed install: %v", v.newapi.deleted)
+	if len(v.tokens.deleted) != 0 {
+		t.Fatalf("the old credential was taken back by the failed install: %v", v.tokens.deleted)
+	}
+	if b, err := registry(t, v).GetBinding(ctx, "hermes-agent", "llm"); err != nil || b.Issued["issue_id"] != before.Issued["issue_id"] {
+		t.Fatalf("binding %+v %v", b, err)
 	}
 	if _, err := v.w.st.GetKeptCatalogSecrets(ctx, "hermes-agent"); err != nil {
 		t.Fatal("kept record lost by a failed install")
@@ -418,8 +443,70 @@ func TestReuseFailureKeepsTakenToken(t *testing.T) {
 	v.w.mu.Lock()
 	v.w.failDeploy["hermes-agent"] = false
 	v.w.mu.Unlock()
-	if tv := v.install(t, Request{App: "hermes-agent", ReuseData: true}); tv.Status != state.TaskSucceeded || tv.Apps[0].TakenToken == nil {
+	if tv := v.install(t, Request{App: "hermes-agent", ReuseData: true}); tv.Status != state.TaskSucceeded || !tv.Apps[0].Bindings[0].Reused || v.tokens.tokenCount() != 1 {
 		t.Fatalf("retry %+v", tv)
+	}
+}
+
+// A required setting the user gave the old app (the model) comes back on
+// its data without being given again, and can be changed; a required
+// setting neither given nor kept is still refused (CAT-INST-01).
+func TestReuseRestoresRequiredSetting(t *testing.T) {
+	v := setup(t)
+	ctx := context.Background()
+	installHermes(t, v)
+	keepData(t, v, "hermes-agent")
+	if tv := v.install(t, Request{App: "hermes-agent", ReuseData: true}); tv.Status != state.TaskSucceeded {
+		t.Fatalf("on its data without the model: %+v", tv.Fault)
+	}
+	if vals, err := v.e.savedParams(ctx, "hermes-agent"); err != nil || vals["model"] != "demo-model" {
+		t.Fatalf("model %v %v", vals["model"], err)
+	}
+	keepData(t, v, "hermes-agent")
+	if tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: map[string]any{"model": "other-model"}}); tv.Status != state.TaskSucceeded {
+		t.Fatalf("on its data with another model: %+v", tv.Fault)
+	}
+	if vals, _ := v.e.savedParams(ctx, "hermes-agent"); vals["model"] != "other-model" {
+		t.Fatalf("model %v", vals["model"])
+	}
+	// The kept record lost: nothing to bring the model back.
+	keepData(t, v, "hermes-agent")
+	if err := v.w.st.DeleteKeptCatalogSecrets(ctx, "hermes-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.e.StartInstall(ctx, Request{App: "hermes-agent", ReuseData: true}); code(err) != CodeBadParams || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("no kept record, no model: %v", err)
+	}
+	pv, err := v.e.Plan(ctx, Request{App: "hermes-agent", ReuseData: true})
+	if err != nil || len(pv.Apps) != 1 || len(pv.Apps[0].ParamsMissing) != 1 || pv.Apps[0].ParamsMissing[0].Key != "model" {
+		t.Fatalf("plan %+v %v", pv, err)
+	}
+}
+
+// The old app on this data was installed with a manifest of the former
+// format and got a credential made for it in another app, which a delete
+// with the data kept did not mention (an install was meant to take it
+// over). Installed on that data with a manifest of the current format, the
+// install says that credential is not used any more and is left for the
+// user to remove (CAT-INST-35), by its number.
+func TestReuseFormerCredentialIsSaid(t *testing.T) {
+	v := setup(t)
+	ctx := context.Background()
+	installHermes(t, v)
+	vals, err := v.e.savedParams(ctx, "hermes-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vals[legacyCredentialsKey] = []map[string]any{{"provider": "gw", "id": 4}}
+	resealParams(t, v, "hermes-agent", vals)
+	keepData(t, v, "hermes-agent")
+	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
+	if tv.Status != state.TaskSucceeded {
+		t.Fatal(tv.Fault)
+	}
+	notes := carriedRevoke(tv, "hermes-agent")
+	if len(notes) != 1 || !strings.Contains(notes[0], "旧格式") || !strings.Contains(notes[0], "gw") || !strings.Contains(notes[0], "编号 4") {
+		t.Fatalf("carried %v", tv.Apps[0].Carried)
 	}
 }
 
@@ -443,50 +530,48 @@ func resealParams(t *testing.T, v *env, app string, vals map[string]any) {
 	}
 }
 
-// The old token is checked through its masked value (not the key endpoint
-// New API limits), and one the user turned off is taken over as it is, with
-// a note.
-func TestReuseTakesOverDisabledToken(t *testing.T) {
-	v := setup(t)
-	installHermes(t, v)
-	keepData(t, v, "hermes-agent")
-	v.newapi.mu.Lock()
-	v.newapi.disabled = map[int]bool{1: true}
-	calls := v.newapi.keyCalls
-	v.newapi.mu.Unlock()
-	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
-	if tv.Status != state.TaskSucceeded || tv.Apps[0].TakenToken == nil || tv.Apps[0].GatewayToken != nil {
-		t.Fatalf("%+v", tv)
+// The check answers one thing: can the old credential go on being used.
+// The material's check passes a token the user turned off (still the same
+// one; turning it on again is the user's call); a manifest whose check asks
+// for it to be on does not pass it: a new one is issued, the old one is left
+// where it is (the user may have turned it off on purpose) and the user is
+// told to look.
+func TestReuseCheckDecidesOnTurnedOff(t *testing.T) {
+	strict := goodManifest(t, "new-api")
+	const sameToken = `expect_json: { success: true, data: { id: "{{issued.token_id}}", name: "acornfox-{{consumer.name}}-{{issued.issue_id}}" } }`
+	idx := strings.LastIndex(strict, sameToken)
+	if idx < 0 {
+		t.Fatal("the check step to change is not in the material")
 	}
-	if v.newapi.keyCalls != calls {
-		t.Fatalf("the key endpoint was called %d times", v.newapi.keyCalls-calls)
+	strict = strict[:idx] + `expect_json: { success: true, data: { id: "{{issued.token_id}}", name: "acornfox-{{consumer.name}}-{{issued.issue_id}}", status: 1 } }` + strict[idx+len(sameToken):]
+	if _, err := catalog.ParseManifest([]byte(strict)); err != nil {
+		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(tv.Apps[0].Carried, func(c string) bool { return strings.Contains(c, "现在没有启用（状态 2）") }) {
-		t.Fatalf("carried %v", tv.Apps[0].Carried)
-	}
-}
-
-func TestMaskedTokenMatch(t *testing.T) {
-	full := "sk-abcdEFGH0123456789012345678901234567890123wxyz"
 	for _, c := range []struct {
-		masked string
-		want   bool
-	}{
-		{"abcd**********wxyz", true},
-		{"sk-abcd**********wxyz", true},
-		{"abce**********wxyz", false},
-		{"abcd**********wxya", false},
-		{"ab****yz", false}, // too little shown to tell
-		{strings.TrimPrefix(full, "sk-"), true},
-		{"abcdEFGH", false},
-		{"", false},
-	} {
-		if got := maskedTokenMatch(c.masked, full); got != c.want {
-			t.Errorf("%q: %v", c.masked, got)
-		}
-	}
-	if maskedTokenMatch("abcd**********wxyz", "") {
-		t.Error("empty full value matched")
+		name     string
+		manifest string
+		renewed  bool
+	}{{"the material's check", goodManifest(t, "new-api"), false}, {"a check that asks for it on", strict, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			b := typedBundle(t, goodDir, nil, c.manifest, goodManifest(t, "hermes-agent"))
+			v, _ := setupSnapshot(t, bundleFS(b), nil)
+			installHermes(t, v)
+			v.tokens.mu.Lock()
+			v.tokens.disabled = map[int]bool{1: true}
+			v.tokens.mu.Unlock()
+			keepData(t, v, "hermes-agent")
+			tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
+			if tv.Status != state.TaskSucceeded {
+				t.Fatal(tv.Fault)
+			}
+			notes := carriedRevoke(tv, "hermes-agent")
+			switch {
+			case !c.renewed && (v.tokens.tokenCount() != 1 || len(notes) != 0 || !tv.Apps[0].Bindings[0].Reused):
+				t.Fatalf("used again: tokens %v carried %v", v.tokens.tokens, tv.Apps[0].Carried)
+			case c.renewed && (v.tokens.tokenCount() != 2 || len(v.tokens.deleted) != 0 || len(notes) != 1 || !strings.Contains(notes[0], "没通过检查")):
+				t.Fatalf("renewed: tokens %v deleted %v carried %v", v.tokens.tokens, v.tokens.deleted, tv.Apps[0].Carried)
+			}
+		})
 	}
 }
 
@@ -498,31 +583,31 @@ func setDesired(t *testing.T, v *env, app, desired string) {
 	}
 }
 
-// The old app's gateway is installed but stopped: the install is refused
-// before a task starts (CAT-INST-10, "start it"), not CAT-INST-02 ("choose
-// again"), and not later at the create step with advice to install another
-// New API. The same for --llm local, on old data or not. Started again, the
-// install goes ahead and takes the old token over.
-func TestReuseGatewayStoppedRefused(t *testing.T) {
+// The provider is installed but stopped: its service cannot be used, so an
+// install that needs it is refused before a task starts (CAT-INST-31), on
+// old data or not, and the refusal says to start it rather than to install
+// anything. Started again, the install goes ahead and uses the old
+// credential again.
+func TestReuseProviderStoppedRefused(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
 	installHermes(t, v)
 	keepData(t, v, "hermes-agent")
 	setDesired(t, v, "new-api", state.DesiredStopped)
-	for _, req := range []Request{
-		{App: "hermes-agent", ReuseData: true},
-		{App: "hermes-agent", ReuseData: true, Params: map[string]any{"llm": "local"}},
-		{App: "hermes-agent", Name: "h2", Params: map[string]any{"llm": "local"}},
+	for name, req := range map[string]Request{
+		"hermes-agent": {App: "hermes-agent", ReuseData: true},
+		"h2":           {App: "hermes-agent", Name: "h2", Params: hermesModel()},
 	} {
 		_, err := v.e.StartInstall(ctx, req)
 		var f *Fault
-		if !errors.As(err, &f) || f.Code != CodeNoGateway || !strings.Contains(f.Message, "装着但停着") ||
-			!strings.Contains(f.Message, "acornfox start new-api") || !strings.Contains(f.Hint, "acornfox start new-api") ||
-			strings.Contains(f.Hint, "acornfox install new-api") {
-			t.Fatalf("%+v: got %v (hint %q)", req, err, hintOf(err))
+		if !errors.As(err, &f) || f.Code != CodeNoService || !strings.Contains(f.Message, "acornfox start new-api") ||
+			strings.Contains(f.Message, "acornfox install") || f.Hint == "" {
+			t.Fatalf("%+v: got %v", req, err)
 		}
-		if req.ReuseData && req.Params == nil && !strings.Contains(f.Message, "hermes-agent 原来用本机的 new-api，它装着但停着") {
-			t.Fatalf("message %q", f.Message)
+		pv, _ := v.e.Plan(ctx, req)
+		n := needOf(t, pv, name, "llm")
+		if n.Status != NeedRequiredMissing || !hasLine(n.How, "acornfox start new-api") || !hasLine(n.How, "acornfox services add llm_gateway") {
+			t.Fatalf("plan %+v", n)
 		}
 	}
 	if tasks, _ := v.w.st.ListInstallTasks(ctx, "", 50); len(tasks) != 2 { // new-api and the first hermes
@@ -530,116 +615,51 @@ func TestReuseGatewayStoppedRefused(t *testing.T) {
 	}
 	setDesired(t, v, "new-api", state.DesiredRunning)
 	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true})
-	if tv.Status != state.TaskSucceeded || tv.Apps[0].TakenToken == nil {
+	if tv.Status != state.TaskSucceeded || !tv.Apps[0].Bindings[0].Reused || v.tokens.tokenCount() != 1 {
 		t.Fatalf("after start: %+v", tv)
 	}
 }
 
-func hintOf(err error) string {
-	var f *Fault
-	if errors.As(err, &f) {
-		return f.Hint
-	}
-	return ""
-}
-
-// A token of the old app that is not taken over cannot be revoked while its
-// gateway is stopped (or deleted with its data kept): the install still
-// succeeds and the kept record goes, but the progress (the init step, which
-// the page shows) and carried say which token to remove by hand. A gateway
-// deleted with its data took its tokens with it: nothing is said.
-func TestReuseTokenNotRevokedIsSaid(t *testing.T) {
-	for _, c := range []struct {
-		name, why string
-		down      func(t *testing.T, v *env)
-	}{
-		{"stopped", "new-api 停着", func(t *testing.T, v *env) { setDesired(t, v, "new-api", state.DesiredStopped) }},
-		{"deleted, data kept", "new-api 已经删了，它的数据还留着", func(t *testing.T, v *env) { keepData(t, v, "new-api") }},
-		{"deleted with data", "", func(t *testing.T, v *env) {
-			t.Helper()
-			if err := v.w.delete(context.Background(), "new-api", true); err != nil {
-				t.Fatal(err)
-			}
-			for _, vol := range append([]string(nil), v.w.volumes["new-api"]...) {
-				_ = v.w.RemoveVolume(context.Background(), "new-api", vol)
-			}
-		}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			v := setup(t)
-			ctx := context.Background()
-			installHermes(t, v)
-			keepData(t, v, "hermes-agent")
-			c.down(t, v)
-			tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: ownLLM()})
-			if tv.Status != state.TaskSucceeded {
-				t.Fatal(tv.Fault)
-			}
-			if _, err := v.w.st.GetKeptCatalogSecrets(ctx, "hermes-agent"); err == nil {
-				t.Fatal("kept record left")
-			}
-			if len(v.newapi.deleted) != 0 {
-				t.Fatalf("revoked %v", v.newapi.deleted)
-			}
-			a := tv.Apps[0]
-			initStep := stepOf(tv, "hermes-agent", "init")
-			if c.why == "" {
-				if slices.ContainsFunc(a.Carried, func(s string) bool { return strings.Contains(s, "令牌") && strings.Contains(s, "吊销") }) || strings.Contains(initStep.Message, "吊销") {
-					t.Fatalf("said something about a token that is gone: %v / %q", a.Carried, initStep.Message)
-				}
-				return
-			}
-			want := "没能吊销以前在 new-api 里给 hermes-agent 的令牌（编号 1，结尾 xxxx）：" + c.why
-			if !slices.ContainsFunc(a.Carried, func(s string) bool { return strings.HasPrefix(s, want) }) {
-				t.Fatalf("carried %v, want %q", a.Carried, want)
-			}
-			if !strings.Contains(initStep.Message, want) || !strings.HasSuffix(initStep.Message, "acornfox-hermes-agent、结尾是 xxxx 的那一把") || initStep.Status != StepSkipped {
-				t.Fatalf("init step %+v", initStep)
-			}
-			// The task as read says it is over and hands the line on as a
-			// must-tell, word for word.
-			if tm := tv.Timing; tm == nil || !tm.Done || tm.Clock != "server" || !slices.ContainsFunc(tm.MustTell, func(s string) bool { return strings.HasPrefix(s, want) }) {
-				t.Fatalf("timing %+v", tv.Timing)
-			}
-		})
-	}
-}
-
-// A token whose value was not kept cannot be told from another app's under
-// the same number: not revoked, said. A new token of the same name was issued
-// in the same gateway this time: the note says not to remove that one.
-func TestReuseTokenWithoutValueIsSaid(t *testing.T) {
+// Plugged into another service this time while the old provider is stopped:
+// the old credential cannot be taken back. The install still succeeds, the
+// old binding goes, and carried (a must-tell) says what to remove by hand
+// and where, with the issue number.
+func TestReuseOldCredentialNotTakenBackIsSaid(t *testing.T) {
 	v := setup(t)
 	ctx := context.Background()
 	installHermes(t, v)
-	saved, _ := v.e.savedParams(ctx, "hermes-agent")
-	llm, _ := saved["llm"].(map[string]any)
-	llm["api_key"] = ""
-	resealParams(t, v, "hermes-agent", saved)
+	addOwnService(t, v)
+	old, _ := registry(t, v).GetBinding(ctx, "hermes-agent", "llm")
 	keepData(t, v, "hermes-agent")
-	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: map[string]any{"llm": "local"}})
+	setDesired(t, v, "new-api", state.DesiredStopped)
+	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Use: map[string]string{"llm": "my-upstream"}})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatal(tv.Fault)
 	}
-	if len(v.newapi.deleted) != 0 || tv.Apps[0].GatewayToken == nil || tv.Apps[0].GatewayToken.ID != 2 {
-		t.Fatalf("revoked without its value %v, or no new token %+v", v.newapi.deleted, tv.Apps[0])
-	}
-	if !slices.ContainsFunc(tv.Apps[0].Carried, func(s string) bool {
-		return strings.HasPrefix(s, "没能吊销以前在 new-api 里给 hermes-agent 的令牌（编号 1）：没有记下它的值") &&
-			strings.HasSuffix(s, "acornfox-hermes-agent、编号 1 的那一把（这次新发给它的那把同名，不要删）")
-	}) {
+	notes := carriedRevoke(tv, "hermes-agent")
+	if len(notes) != 1 || !strings.Contains(notes[0], "new-api") || !strings.Contains(notes[0], old.Issued["issue_id"]) {
 		t.Fatalf("carried %v", tv.Apps[0].Carried)
+	}
+	if tm := tv.Timing; tm == nil || len(tm.MustTell) != 1 || tm.MustTell[0] != notes[0] {
+		t.Fatalf("must_tell %+v", tv.Timing)
+	}
+	if b, err := registry(t, v).GetBinding(ctx, "hermes-agent", "llm"); err != nil || b.Service != "my-upstream" {
+		t.Fatalf("binding %+v %v", b, err)
+	}
+	if v.tokens.tokenCount() != 1 || len(v.tokens.deleted) != 0 {
+		t.Fatalf("tokens %v deleted %v", v.tokens.tokens, v.tokens.deleted)
 	}
 }
 
-// An install on old data that rewrote config.yaml (another model chosen)
-// and then failed leaves that attempt's file in the data, while the kept
-// record still holds the old settings. Installing again with the old
-// settings must not take the file for the old app's: it is written anew
-// (and that attempt's copied aside), not "kept as it was".
+// An install on old data that rewrote config.yaml (another service) and then
+// failed leaves that attempt's file in the data, while the kept record still
+// holds the old settings. The next install on the data must not take the
+// file for the old app's: it is written anew (and that attempt's copied
+// aside), not "kept as it was".
 func TestReuseAfterFailedRewrite(t *testing.T) {
 	v := setup(t)
 	installHermes(t, v)
+	addOwnService(t, v)
 	vol := hermesVol(t, v)
 	orig, _ := v.w.volFile(vol, "config.yaml")
 	v.w.editVolFile(vol, "config.yaml", orig+marker)
@@ -648,7 +668,7 @@ func TestReuseAfterFailedRewrite(t *testing.T) {
 	v.w.mu.Lock()
 	v.w.failDeploy["hermes-agent"] = true
 	v.w.mu.Unlock()
-	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Params: ownLLM()})
+	tv := v.install(t, Request{App: "hermes-agent", ReuseData: true, Use: map[string]string{"llm": "my-upstream"}})
 	if tv.Status != state.TaskFailed || len(tv.Apps[0].FileBackups) != 1 {
 		t.Fatalf("first attempt should rewrite, then fail: %+v", tv)
 	}
@@ -660,8 +680,8 @@ func TestReuseAfterFailedRewrite(t *testing.T) {
 	v.w.failDeploy["hermes-agent"] = false
 	v.w.mu.Unlock()
 
-	tv = v.install(t, Request{App: "hermes-agent", ReuseData: true})
-	if tv.Status != state.TaskSucceeded || tv.Apps[0].TakenToken == nil {
+	tv = v.install(t, Request{App: "hermes-agent", ReuseData: true, Use: map[string]string{"llm": "new-api"}})
+	if tv.Status != state.TaskSucceeded {
 		t.Fatalf("%+v", tv)
 	}
 	a := tv.Apps[0]
@@ -672,8 +692,8 @@ func TestReuseAfterFailedRewrite(t *testing.T) {
 		t.Fatalf("the failed attempt's file not copied aside:\n%s", got)
 	}
 	got, _ := v.w.volFile(vol, "config.yaml")
-	if strings.Contains(got, "sk-own") || !strings.Contains(got, "K1") {
-		t.Fatalf("config.yaml should hold the old token again:\n%s", got)
+	if strings.Contains(got, "sk-own") || !strings.Contains(got, `base_url: "http://new-api:3000/v1"`) {
+		t.Fatalf("config.yaml should hold the provider's again:\n%s", got)
 	}
 	if msg := stepOf(tv, "hermes-agent", "files").Message; !strings.Contains(msg, "上次接旧数据没装好时按那次的设置改写过") {
 		t.Fatalf("files step %q", msg)

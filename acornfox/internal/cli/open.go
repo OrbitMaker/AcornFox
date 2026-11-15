@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -24,7 +26,9 @@ const openUsage = `用法：acornfox open [应用名] [--no-browser] [--port N]
     127.0.0.1 的地址是打不开的，这个命令像打开控制台一样开一条 SSH 隧道，把应用转到你电脑的
     一个本地端口，再打开浏览器；看完按 Ctrl+C 关闭隧道。不用放行安全组，也不改应用的对外方式。
     - 服务器是经 SSH 登记的（target add --ssh）：总是走隧道，任何对外方式都能用。
-    - 这台电脑自己的 AcornFox：直接打开 http://127.0.0.1:端口。
+    - 这台电脑自己的 AcornFox：直接打开 http://127.0.0.1:端口。在 Linux 服务器上运行、又没能打开浏览器时，
+      另说明这是服务器本机的地址，并给出从你自己电脑打开的两个办法（在你电脑上运行这条命令，或 SSH 隧道那一行）；
+      --json 另带 server_only: true、note（这句说明）和 open_hint（和 acornfox --json apps 里的一样）。
     - 服务器是经局域网控制台或公网控制台的网址登记的：应用已是局域网或公网时打开它的地址；
       只本机的应用打不开（OPEN-APP-02），改用 SSH 登记这台服务器，或经用户同意改成局域网。
 参数：
@@ -36,17 +40,19 @@ const openUsage = `用法：acornfox open [应用名] [--no-browser] [--port N]
   OPEN-APP-01  应用还没有访问端口（没部署成功，或只在容器网络里）：acornfox status 应用名 看状态
   OPEN-APP-02  经网址登记的服务器上，只本机的应用打不开：用 acornfox target add 名称 --ssh 用户@主机
                登记后再试；或经用户同意改成局域网：acornfox app set --app 应用名 --expose lan
+  OPEN-APP-03  应用只在内部网络（数据库、缓存这类，给别的应用用），没有网页可以打开，也不用打开
   连不上服务器、SSH 隧道建不起来时，输出里是连接诊断（和 acornfox open 打开控制台时一样）。
 例子：
   acornfox open                 打开控制台
-  acornfox open new-api         在自己电脑上打开 New API（看完按 Ctrl+C）
-  acornfox open hermes-agent --port 9119
-  acornfox --json open new-api --no-browser`
+  acornfox open demo-app        在自己电脑上打开应用 demo-app（看完按 Ctrl+C）
+  acornfox open demo-app --port 9119
+  acornfox --json open demo-app --no-browser`
 
 // Fault codes of acornfox open APP (listed in openUsage and the Skill).
 const (
 	codeOpenNoPort    = "OPEN-APP-01" // the app has no host port yet
 	codeOpenLocalOnly = "OPEN-APP-02" // URL target, local-only app
+	codeOpenInternal  = "OPEN-APP-03" // the app is reached over the app network only
 )
 
 // cmdOpen implements `open [APP] [--no-browser] [--port N]`. Without an app
@@ -217,6 +223,9 @@ func (a *app) cmdOpenApp(ctx context.Context, name string, noBrowser bool, port 
 	if aerr != nil {
 		return a.out.fail(aerr)
 	}
+	if ap.InternalOnly {
+		return a.openFail(codeOpenInternal, name+" "+internalNoteOf(ap)+"，没有网页可以打开", openHint(codeOpenInternal, name))
+	}
 	if ap.PublicPort <= 0 {
 		return a.openFail(codeOpenNoPort, name+" 还没有访问端口（没部署成功，或只在容器网络里）", openHint(codeOpenNoPort, name))
 	}
@@ -257,8 +266,20 @@ func (a *app) cmdOpenApp(ctx context.Context, name string, noBrowser bool, port 
 	if !noBrowser {
 		browserOpened = a.openURLFn()(appURL) == nil
 	}
+	// Run on a Linux server itself (this computer's acornfox gives the app
+	// an open hint only there) with no browser opened here: the address
+	// only opens on the server, so the user is told to run the command on
+	// their own computer, or the tunnel.
+	var serverNote string
+	if strings.HasPrefix(t.URL, "unix:") && ap.OpenHint != nil && !browserOpened {
+		serverNote = serverOnlyNote(name, ap.OpenHint)
+	}
 	if a.out.json {
-		a.out.emitJSON(map[string]any{"app": name, "url": appURL, "tunnel": tunnel != nil})
+		out := map[string]any{"app": name, "url": appURL, "tunnel": tunnel != nil}
+		if serverNote != "" {
+			out["server_only"], out["note"], out["open_hint"] = true, serverNote, ap.OpenHint
+		}
+		a.out.emitJSON(out)
 	} else {
 		switch {
 		case browserOpened:
@@ -267,6 +288,12 @@ func (a *app) cmdOpenApp(ctx context.Context, name string, noBrowser bool, port 
 			a.out.human("%s 的地址（在这台电脑的浏览器里打开）：%s", name, appURL)
 		default:
 			a.out.human("无法自动打开浏览器。请在这台电脑的浏览器里打开：%s", appURL)
+		}
+		if serverNote != "" {
+			a.out.human("%s", serverNote)
+			if ap.OpenHint.TunnelCommand != "" {
+				a.out.human("  %s", ap.OpenHint.TunnelCommand)
+			}
 		}
 		if tunnel != nil {
 			a.out.human("地址经 SSH 隧道转到服务器上的 %s，只在这台电脑上能用；看完按 Ctrl+C 关闭。", name)
@@ -291,6 +318,27 @@ func (a *app) cmdOpenApp(ctx context.Context, name string, noBrowser bool, port 
 		}
 		return exitOK
 	}
+}
+
+// serverOnlyNote is said when acornfox open APP runs on the Linux server
+// itself: the address it printed only opens there; from the user's own
+// computer it is this command run there, or the SSH tunnel (h's
+// tunnel_command, printed on a line of its own after the note).
+func serverOnlyNote(name string, h *client.OpenHint) string {
+	cmd := h.Command
+	if cmd == "" {
+		cmd = "acornfox open " + name
+	}
+	note := "这是服务器本机的地址，只有在服务器上才能打开。要从你自己电脑打开：在你自己电脑的终端运行 " + cmd +
+		"（电脑上要装了 acornfox 命令行，并用 --ssh 登记过这台服务器）"
+	if h.TunnelCommand == "" {
+		return note + "。"
+	}
+	open := "再打开浏览器"
+	if h.TunnelURL != "" {
+		open = "再用浏览器打开 " + h.TunnelURL
+	}
+	return note + "；或者在你自己电脑的终端运行下面这一行开 SSH 隧道并保持不关（用户@服务器地址 换成你登录这台服务器用的），" + open + "："
 }
 
 // urlTargetAppURL is where an app reachable from the network opens for a
@@ -380,9 +428,17 @@ func freeLocalPort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
+// errNoDisplay: on Linux with no graphical session there is no browser to
+// open; xdg-open may still be installed and start fine, which would read as
+// "opened".
+var errNoDisplay = errors.New("没有图形界面，打不开浏览器")
+
 // openBrowser launches the OS default handler for url. Commands per N3 contract
 // section 5.
 func openBrowser(url string) error {
+	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		return errNoDisplay
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
