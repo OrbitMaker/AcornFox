@@ -523,7 +523,7 @@ describe('应用概览里用到的服务', () => {
     routes['GET /v1/apps/web'] = () => app()
     location.hash = '#app-web'
     render(<App />)
-    await screen.findByText('来源')
+    await screen.findByTestId('ov-run')
     expect(screen.queryByTestId('app-services')).toBeNull()
     expect(screen.queryByTestId('services-alert')).toBeNull()
   })

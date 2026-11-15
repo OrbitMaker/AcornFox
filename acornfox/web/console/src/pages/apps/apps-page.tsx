@@ -95,7 +95,7 @@ function AppMenu({ a, st, act }: { a: AppView; st: AppStatus; act: (n: string, x
       <MenuItem icon={<FileText />} href={appHref(a.name, 'logs')} onClick={stop}>日志</MenuItem>
       <MenuItem icon={<History />} href={appHref(a.name, 'versions')} onClick={stop}>版本</MenuItem>
       <MenuSep />
-      <MenuItem icon={<Trash2 />} danger href={appHref(a.name, 'advanced')} onClick={stop}>删除</MenuItem>
+      <MenuItem icon={<Trash2 />} danger href={appHref(a.name, 'settings/delete')} onClick={stop}>删除</MenuItem>
     </Dropdown>
   )
 }
@@ -212,7 +212,7 @@ export function AppsPage() {
 
   return (
     <div>
-      <PageHead title="我的应用" meta={apps ? all.length + ' 个' : undefined}>
+      <PageHead meta={apps ? all.length + ' 个' : undefined}>
         <a href="#store" className={buttonVariants()}><Plus className="size-3.5" />装新应用</a>
       </PageHead>
       <ErrorLine error={appsError} className="mb-3" />

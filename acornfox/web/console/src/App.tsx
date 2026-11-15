@@ -1,13 +1,13 @@
 // 控制台外壳：读会话 → 左侧菜单 + 顶栏 + 页面；⌘K 命令面板、安装弹窗挂在这一层。
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type ApiError } from './lib/api'
-import { parseHash, type AppTab, type Route } from './lib/router'
+import { parseHash, type AppTab, type Route, type SettingsSection } from './lib/router'
 import type { Session } from './lib/types'
 import { ConsoleProvider, type InstallTarget } from './state'
 import { Header } from './components/shell/header'
 import { Sidebar } from './components/shell/sidebar'
 import { CommandPalette } from './components/shell/command-palette'
-import { Logo } from './components/bits'
+import { Logo, PageSlots } from './components/bits'
 import { Button, buttonVariants } from './components/ui/button'
 import { Spinner } from './components/ui/controls'
 import { Sheet } from './components/ui/dialog'
@@ -85,6 +85,10 @@ function Shell({ session, onLoggedOut }: { session: Session; onLoggedOut: () => 
   const [cmd, setCmd] = useState(false)
   const [nav, setNav] = useState(false)
   const [target, setTarget] = useState<InstallTarget | null>(null)
+  // 顶栏里给一级页面留的两个位置（数量和状态、页面自己的按钮）
+  const [metaEl, setMetaEl] = useState<HTMLElement | null>(null)
+  const [actionsEl, setActionsEl] = useState<HTMLElement | null>(null)
+  const slots = useMemo(() => ({ meta: metaEl, actions: actionsEl }), [metaEl, actionsEl])
 
   const routeRef = useRef(route)
   useEffect(() => {
@@ -115,7 +119,7 @@ function Shell({ session, onLoggedOut }: { session: Session; onLoggedOut: () => 
   switch (route.page) {
     case 'home': page = <DashboardPage />; break
     case 'apps': page = <AppsPage />; break
-    case 'app': page = <AppPage key={route.id} name={route.id || ''} tab={(route.tab || 'overview') as AppTab} />; break
+    case 'app': page = <AppPage key={route.id} name={route.id || ''} tab={(route.tab || 'overview') as AppTab} section={route.section as SettingsSection | undefined} />; break
     case 'store': page = <StorePage />; break
     case 'item': page = <ItemPage key={(route.query?.catalog || '') + route.id} id={route.id || ''} catalog={route.query?.catalog} />; break
     case 'runtime': page = <RuntimePage />; break
@@ -130,8 +134,8 @@ function Shell({ session, onLoggedOut }: { session: Session; onLoggedOut: () => 
           <Sidebar route={route} onNavigate={() => setNav(false)} />
         </Sheet>
         <div className="flex min-w-0 flex-1 flex-col">
-          <Header route={route} openCmd={() => setCmd(true)} openNav={() => setNav(true)} onLoggedOut={onLoggedOut} />
-          <main className="gutter mx-auto w-full max-w-7xl flex-1 pb-24 pt-5">{page}</main>
+          <Header route={route} openCmd={() => setCmd(true)} openNav={() => setNav(true)} onLoggedOut={onLoggedOut} metaSlot={setMetaEl} actionsSlot={setActionsEl} />
+          <main className="gutter mx-auto w-full max-w-7xl flex-1 pb-24 pt-5"><PageSlots.Provider value={slots}>{page}</PageSlots.Provider></main>
         </div>
       </div>
       <CommandPalette open={cmd} onClose={() => setCmd(false)} />

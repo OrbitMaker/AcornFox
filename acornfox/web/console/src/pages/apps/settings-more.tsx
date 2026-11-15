@@ -1,12 +1,12 @@
-// 配置：环境变量（密钥类不回显，留空表示不改）和运行设置（容器端口、健康检查路径）。
-// 改动先保存到期望状态，重新部署后生效。接口：PUT/DELETE /v1/apps/{app}/env/{key}、PATCH /v1/apps/{app}、POST /v1/apps/{app}/redeploy。
+// 设置 → 更多：环境变量（密钥类不回显，留空表示不改）、运行设置（容器端口、健康检查路径）、常用命令。
+// 环境变量和运行设置的改动先保存到期望状态，重新部署后生效。接口：PUT/DELETE /v1/apps/{app}/env/{key}、PATCH /v1/apps/{app}、POST /v1/apps/{app}/redeploy。
 import { useEffect, useState } from 'react'
 import { Lock, Plus, Trash2, Unlock } from 'lucide-react'
 import { api, appPath } from '@/lib/api'
 import type { AppView } from '@/lib/types'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/controls'
+import { CopyLine } from '@/components/ui/copy'
 import { Input, Label } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
 import type { TabProps } from './app-page'
@@ -53,7 +53,7 @@ export function envChanges(rows: EnvRow[]): { put: EnvRow[]; del: string[]; prob
   return { put, del: [...new Set(del)].filter((k) => !put.some((p) => p.key === k)), problems }
 }
 
-export function ConfigTab({ app: a, reload }: TabProps) {
+export function MoreSection({ app: a, reload }: TabProps) {
   const toast = useToast()
   const [rows, setRows] = useState<EnvRow[]>(() => rowsFrom(a))
   const [port, setPort] = useState(String(a.port || ''))
@@ -102,52 +102,58 @@ export function ConfigTab({ app: a, reload }: TabProps) {
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <Card>
-        <div className="flex items-center justify-between px-3.5 py-2.5">
-          <span className="text-sm font-medium">环境变量</span>
+    <div className="flex flex-col gap-5">
+      <section className="flex flex-col gap-1.5" aria-label="环境变量">
+        <div className="flex items-center justify-between">
+          <span className="text-2xs text-muted-foreground">环境变量</span>
           <Button variant="ghost" size="sm" onClick={() => setRows((rs) => [...rs, { key: '', value: '', secret: false }])}><Plus className="size-3.5" />添加</Button>
         </div>
-        <div className="flex flex-col gap-1.5 px-3.5 pb-3">
-          {rows.every((r) => r.removed) && <div className="py-2 text-xs text-muted-foreground">还没有环境变量</div>}
-          {rows.map((r, i) => r.removed ? null : (
-            <div key={i} className="grid grid-cols-1 gap-1.5 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)_auto]">
-              <Input className="mono text-xs" aria-label="变量名" placeholder="变量名" value={r.key} onChange={(e) => set(i, { key: e.target.value })} />
-              <Input
-                className="mono text-xs"
-                aria-label={'变量 ' + r.key + ' 的值'}
-                type={r.secret ? 'password' : 'text'}
-                autoComplete="off"
-                placeholder={r.orig?.secret ? '已保存（不显示），留空不改' : '值'}
-                value={r.value}
-                onChange={(e) => set(i, { value: e.target.value })}
-              />
-              <div className="flex">
-                <Button variant="ghost" size="icon" onClick={() => set(i, { secret: !r.secret })} aria-label={r.secret ? '改成普通变量' : '改成密钥'} title={r.secret ? '密钥：不回显，日志里会遮住' : '普通变量'}>
-                  {r.secret ? <Lock className="size-3.5" /> : <Unlock className="size-3.5 text-muted-foreground" />}
-                </Button>
-                <Button variant="ghost" size="icon" onClick={() => set(i, { removed: true })} aria-label={'删除 ' + r.key}><Trash2 className="size-3.5" /></Button>
-              </div>
+        {rows.every((r) => r.removed) && <div className="text-xs text-muted-foreground">还没有环境变量</div>}
+        {rows.map((r, i) => r.removed ? null : (
+          <div key={i} className="grid grid-cols-1 gap-1.5 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)_auto]">
+            <Input className="mono text-xs" aria-label="变量名" placeholder="变量名" value={r.key} onChange={(e) => set(i, { key: e.target.value })} />
+            <Input
+              className="mono text-xs"
+              aria-label={'变量 ' + r.key + ' 的值'}
+              type={r.secret ? 'password' : 'text'}
+              autoComplete="off"
+              placeholder={r.orig?.secret ? '已保存（不显示），留空不改' : '值'}
+              value={r.value}
+              onChange={(e) => set(i, { value: e.target.value })}
+            />
+            <div className="flex">
+              <Button variant="ghost" size="icon" onClick={() => set(i, { secret: !r.secret })} aria-label={r.secret ? '改成普通变量' : '改成密钥'} title={r.secret ? '密钥：不回显，日志里会遮住' : '普通变量'}>
+                {r.secret ? <Lock className="size-3.5" /> : <Unlock className="size-3.5 text-muted-foreground" />}
+              </Button>
+              <Button variant="ghost" size="icon" onClick={() => set(i, { removed: true })} aria-label={'删除 ' + r.key}><Trash2 className="size-3.5" /></Button>
             </div>
-          ))}
-          {problems.map((p) => <p key={p} className="text-2xs text-danger">{p}</p>)}
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t px-3.5 py-2.5">
+          </div>
+        ))}
+        {problems.map((p) => <p key={p} className="text-2xs text-danger">{p}</p>)}
+        <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
           <span className="mr-auto text-2xs text-muted-foreground">改动在重新部署后生效</span>
           <Button variant="outline" disabled={!dirty || !!busy} onClick={() => saveEnv(false)}>{busy === 'env' && <Spinner />}只保存</Button>
           <Button disabled={!dirty || !!busy || !a.current_deployment} onClick={() => saveEnv(true)}>{busy === 'env-re' && <Spinner />}保存并重新部署</Button>
         </div>
-      </Card>
-      <Card>
-        <div className="px-3.5 py-2.5 text-sm font-medium">运行设置</div>
-        <div className="grid gap-3 px-3.5 pb-3 sm:grid-cols-2">
+      </section>
+      <section className="flex flex-col gap-1.5" aria-label="运行设置">
+        <span className="text-2xs text-muted-foreground">运行设置</span>
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
           <div className="flex flex-col gap-1.5"><Label htmlFor="cfg-port">容器端口</Label><Input id="cfg-port" className="tnum" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} /></div>
           <div className="flex flex-col gap-1.5"><Label htmlFor="cfg-health">健康检查路径</Label><Input id="cfg-health" className="mono" value={health} onChange={(e) => setHealth(e.target.value)} /></div>
-        </div>
-        <div className="flex justify-end border-t px-3.5 py-2.5">
           <Button variant="outline" disabled={!!busy || (String(a.port) === port && a.health_path === health)} onClick={saveRun}>{busy === 'run' && <Spinner />}保存</Button>
         </div>
-      </Card>
+      </section>
+      <section className="flex flex-col gap-1.5" aria-label="命令行">
+        <span className="text-2xs text-muted-foreground">命令行</span>
+        <CopyLine text={'acornfox status ' + a.name} />
+        <CopyLine text={'acornfox logs ' + a.name + ' -f'} />
+      </section>
     </div>
   )
+}
+
+// moreSummary：设置里“更多”那一行的摘要。
+export function moreSummary(a: AppView): string {
+  return '环境变量 ' + (a.env || []).length + ' 个 · 端口和健康检查 · 命令行'
 }

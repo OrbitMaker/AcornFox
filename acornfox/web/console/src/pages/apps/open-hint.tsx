@@ -81,7 +81,7 @@ export function OpenHintBlock({ name, hint, openURL, onChanged, className }: {
             <span className="text-muted-foreground">（地址见应用详情）</span>
           )}
         </div>
-        <p className="text-2xs text-muted-foreground">要改回只本机：在 {name} 的“高级”里把访问方式改成“只本机”，或者在服务器上运行 <span className="mono">acornfox app set --app {name} --expose local</span>。</p>
+        <p className="text-2xs text-muted-foreground">要改回只本机：在 {name} 的“设置 → 谁能打开”里点“只本机”，或者在服务器上运行 <span className="mono">acornfox app set --app {name} --expose local</span>。</p>
       </div>
     )
   }
@@ -108,7 +108,7 @@ export function OpenHintBlock({ name, hint, openURL, onChanged, className }: {
             <Button size="sm" className="self-start" onClick={() => setConfirm(true)}><Wifi className="size-3.5" />让局域网里的电脑能打开</Button>
           ) : (
             <div className="flex flex-col gap-2 rounded-md bg-muted/50 p-2.5 text-xs">
-              <span>会在服务器的所有网卡上开放端口 {portOf(lanAfter(h))}：同一局域网（{h.lan_address}）里的电脑都能访问 {name}，要用它自己的账号密码登录。服务器如果还有公网地址、防火墙或安全组又放行了这个端口，公网也能访问到。改完马上生效，以后可以在“高级”里改回只本机。</span>
+              <span>会在服务器的所有网卡上开放端口 {portOf(lanAfter(h))}：同一局域网（{h.lan_address}）里的电脑都能访问 {name}，要用它自己的账号密码登录。服务器如果还有公网地址、防火墙或安全组又放行了这个端口，公网也能访问到。改完马上生效，以后可以在“设置 → 谁能打开”里改回只本机。</span>
               <div className="flex gap-2">
                 <Button size="sm" onClick={toLAN} disabled={busy}>{busy && <Spinner />}确认改成局域网</Button>
                 <Button size="sm" variant="ghost" onClick={() => setConfirm(false)}>取消</Button>

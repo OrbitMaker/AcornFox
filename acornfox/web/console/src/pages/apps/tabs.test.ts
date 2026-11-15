@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { envChanges, rowsFrom } from './tab-config'
-import { limitOptions } from './tab-resources'
+import { envChanges, rowsFrom } from './settings-more'
+import { limitOptions } from './settings-limits'
 import { lineTone } from './tab-logs'
 import { app, resources } from '@/test/fixtures'
 

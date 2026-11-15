@@ -23,7 +23,8 @@ export function crumbsFor(route: Route, itemName?: string): [string, string?][] 
   }
 }
 
-export function Header({ route, openCmd, openNav, onLoggedOut }: { route: Route; openCmd: () => void; openNav: () => void; onLoggedOut: () => void }) {
+// metaSlot、actionsSlot：一级页面把数量、状态和自己的按钮画到顶栏的这两个位置（见 bits.tsx 的 PageHead），窗口窄时这两个位置不显示。
+export function Header({ route, openCmd, openNav, onLoggedOut, metaSlot, actionsSlot }: { route: Route; openCmd: () => void; openNav: () => void; onLoggedOut: () => void; metaSlot?: (el: HTMLElement | null) => void; actionsSlot?: (el: HTMLElement | null) => void }) {
   const { apps, installing, catalog, theme, setTheme } = useConsole()
   const itemName = route.page === 'item' ? findApp(catalog, route.id || '', route.query?.catalog || 'public')?.name : undefined
   const crumbs = crumbsFor(route, itemName)
@@ -41,11 +42,13 @@ export function Header({ route, openCmd, openNav, onLoggedOut }: { route: Route;
           {crumbs.map(([label, href], i) => (
             <Fragment key={i}>
               {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted-foreground" />}
-              {href ? <a href={href} className="hidden text-muted-foreground hover:text-foreground sm:inline">{label}</a> : <span className="truncate font-medium">{label}</span>}
+              {href ? <a href={href} className="hidden text-muted-foreground hover:text-foreground sm:inline">{label}</a> : crumbs.length === 1 ? <h1 className="truncate font-medium">{label}</h1> : <span className="truncate font-medium">{label}</span>}
             </Fragment>
           ))}
         </nav>
+        <span ref={metaSlot} className="hidden min-w-0 shrink truncate pl-1 text-xs text-muted-foreground lg:block" />
         <div className="ml-auto flex items-center gap-1.5">
+          <div ref={actionsSlot} className="hidden items-center gap-2 pr-1 lg:flex" />
           <button type="button" onClick={openCmd} className="hidden h-7 w-48 items-center gap-2 rounded-md border bg-muted/40 px-2 text-xs text-muted-foreground transition-colors hover:bg-accent lg:flex">
             <Search className="size-3.5" /><span className="flex-1 text-left">搜索</span><Kbd>⌘K</Kbd>
           </button>

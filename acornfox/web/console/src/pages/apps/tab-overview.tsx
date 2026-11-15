@@ -1,81 +1,28 @@
-// 概览：出问题时的提示（带“复制诊断给 AI”）、运行情况、资源、来源、访问地址（只本机的给怎么打开的说明）、
-// 首次登录信息。用旧格式清单装的应用，详情里带 legacy_note 时原样显示成一条提示。
-// 最上面两张小图：内存、CPU 的近 1 小时或 24 小时（GET /v1/metrics/apps/{app}/history，30 秒刷新一次）。
-// 历史只存在后台服务的内存里，重启后从头记；旧服务端没有这个接口时两张图不显示。
+// 概览，从上到下：出问题时的提示（带“复制诊断给 AI”）→ 访问卡片（地址、三档，从应用中心装的应用把首次登录信息并在里面）
+// → 运行、资源、版本三张卡片（见 overview-cards.tsx）→ 用到的服务 → 只本机应用的“怎么打开”说明。
+// 没有访问卡片的应用（只本机要按说明打开的）有首次登录信息时，登录那一行单独放在说明下面。
+// 用旧格式清单装的应用，详情里带 legacy_note 时原样显示成一条提示。
+// 概览里不再放内存、CPU 的曲线图（2026-11-15 去掉，圆环看现在的用量；历史仍可用 acornfox stats 应用 --history 1h 看）。
 // 用到的服务（GET /v1/apps/{app} 的 services）：需要的名字、类型、接的是哪条、状态；不是可用时最上面醒目提示。
 // 没有这个字段（旧服务端、旧清单装的应用）时不显示。
-import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Copy, FileText, Info } from 'lucide-react'
-import { api } from '@/lib/api'
-import { appCharts } from '@/lib/apphistory'
-import { RANGE_TAB, type RangeKey } from '@/lib/dashboard'
-import { usePoll } from '@/lib/hooks'
-import { deployDiagnosisForAI, deriveStatus, failedDeployment, liveSeq, loginAddress, oldVersionServing, openableAddress } from '@/lib/appstatus'
+import { deployDiagnosisForAI, deriveStatus, failedDeployment, oldVersionServing, openableAddress } from '@/lib/appstatus'
 import { copyText } from '@/lib/clipboard'
-import { mbText, pctText, sinceText } from '@/lib/format'
 import { appHref, go } from '@/lib/router'
 import { TONE_BADGE, appServiceStatus, kindLabel } from '@/lib/services'
-import type { AppHistory, AppServiceUse, FirstLogin } from '@/lib/types'
+import { accessInfo } from '@/lib/overview'
+import type { AppServiceUse } from '@/lib/types'
 import { useConsole } from '@/state'
-import { KV } from '@/components/bits'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Alert } from '@/components/ui/controls'
-import { CopyLine } from '@/components/ui/copy'
 import { useToast } from '@/components/ui/toast'
-import { FirstLoginCard } from '../store/install-dialog'
 import { KindName } from '../prefs/service-form'
-import { TimeChart } from '../home/viz'
 import { OpenHintBlock } from './open-hint'
+import { AccessCard, ResourceCard, RunCard, VersionCard } from './overview-cards'
+import { LoginLine, hasLoginFields, useFirstLogin } from './login-line'
 import type { TabProps } from './app-page'
-
-export const EXPOSURE_TEXT: Record<string, string> = { local: '只本机', lan: '局域网', public: '公网', afx_cloud: 'AFX 云', internal: '只在内部网络' }
-
-function useFirstLogin(app: string, fromCatalog: boolean) {
-  const [fl, setFl] = useState<FirstLogin | null>(null)
-  useEffect(() => {
-    if (!fromCatalog) return
-    let alive = true
-    api.get<FirstLogin>('/v1/apps/' + encodeURIComponent(app) + '/first-login').then((v) => { if (alive) setFl(v) }).catch(() => {})
-    return () => { alive = false }
-  }, [app, fromCatalog])
-  return fl
-}
-
-// 内存、CPU 两张小图和时间范围切换。没有历史接口（旧服务端）时什么都不显示。
-function HistoryCharts({ app, running }: { app: string; running: boolean }) {
-  const [range, setRange] = useState<RangeKey>('1h')
-  const hist = usePoll((s) => api.get<AppHistory>('/v1/metrics/apps/' + encodeURIComponent(app) + '/history?range=' + range, s).catch(() => null), 30000, [app, range])
-  const h = hist.data
-  const c = useMemo(() => (h ? appCharts(h) : null), [h])
-  if (!h || !c || !h.ranges.length) return null
-  const empty = running ? '还没有记录，每 30 秒记一次，稍等一会儿' : '这段时间没有记录（应用停着的时候不记）'
-  const head = (name: string) => (
-    <div className="mb-2 flex items-center justify-between text-xs font-medium">
-      <span>{name} <span className="font-normal text-muted-foreground">近 {RANGE_TAB[h.range] || h.range}</span></span>
-    </div>
-  )
-  return (
-    <div data-testid="app-history" className="flex flex-col gap-2">
-      <div className="flex items-center justify-end gap-1" role="group" aria-label="时间范围">
-        {h.ranges.filter((r): r is RangeKey => r === '1h' || r === '24h').map((r) => (
-          <Button key={r} size="sm" variant={r === range ? 'secondary' : 'ghost'} aria-pressed={r === range} onClick={() => setRange(r)}>{RANGE_TAB[r]}</Button>
-        ))}
-      </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        <Card className="p-3.5">
-          {head('内存')}
-          <div className="h-28">{c.count ? <TimeChart d={c.mem} type="area" gaps /> : <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{empty}</div>}</div>
-        </Card>
-        <Card className="p-3.5">
-          {head('CPU')}
-          <div className="h-28">{c.count ? <TimeChart d={c.cpu} type="area" gaps /> : <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{empty}</div>}</div>
-        </Card>
-      </div>
-    </div>
-  )
-}
 
 // 用到的服务里不能用的，放在最上面提示。
 function ServicesAlert({ list }: { list: AppServiceUse[] }) {
@@ -121,6 +68,7 @@ export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
   const st = deriveStatus(a, installing)
   const failed = failedDeployment(a)
   const fl = useFirstLogin(a.name, !!a.catalog_id)
+  const withAccess = !a.open_hint && !!accessInfo(a)
   const copyDiag = async () => {
     (await copyText(deployDiagnosisForAI(a))) ? toast('已复制', '粘贴给 AI 工作台') : toast('没能复制', '浏览器不允许', 'error')
   }
@@ -145,49 +93,18 @@ export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
       {typeof a.legacy_note === 'string' && a.legacy_note.trim() !== '' && (
         <Alert icon={<Info />} title="说明"><span data-testid="legacy-note">{a.legacy_note}</span></Alert>
       )}
-      {!!a.current_deployment && <HistoryCharts app={a.name} running={!!a.observed?.running} />}
+      {withAccess && <AccessCard app={a} reload={reload} login={fl} />}
       <div className="grid gap-3 md:grid-cols-3">
-        <Card className="px-3.5 py-2">
-          <div className="pt-1 text-xs font-medium">运行</div>
-          <div className="divide-y">
-            <KV k="已运行">{a.observed?.running ? sinceText(a.observed.started_at) : '—'}</KV>
-            <KV k="重启次数"><span className="tnum">{a.observed ? a.observed.restart_count : '—'}</span></KV>
-            <KV k="健康检查"><span className="mono text-xs">{a.health_path || '/'}</span></KV>
-            <KV k="容器端口"><span className="tnum">{a.port || '—'}</span></KV>
-          </div>
-        </Card>
-        <Card className="px-3.5 py-2">
-          <div className="pt-1 text-xs font-medium">资源 <span className="font-normal text-muted-foreground">现在</span></div>
-          <div className="divide-y">
-            <KV k="CPU"><span className="tnum">{m?.available && m.cpu_available !== false ? pctText(m.cpu_percent) : '—'}</span></KV>
-            <KV k="内存"><span className="tnum">{m?.available ? mbText(m.memory_usage_mb) : '—'} / {mbText(a.memory_mb)}</span></KV>
-            <KV k="进程数"><span className="tnum">{m?.available ? m.pids ?? '—' : '—'}</span></KV>
-            <KV k="网络收发"><span className="tnum">{m?.available ? mbText(m.network_rx_mb) + ' / ' + mbText(m.network_tx_mb) : '—'}</span></KV>
-          </div>
-        </Card>
-        <Card className="px-3.5 py-2">
-          <div className="pt-1 text-xs font-medium">来源</div>
-          <div className="divide-y">
-            <KV k="当前版本">{liveSeq(a) ? '第 ' + liveSeq(a) + ' 版' : '—'}</KV>
-            <KV k="来自">{a.catalog_id ? (a.catalog_origin ? (a.catalog_origin_name || a.catalog_origin) : '应用中心') + ' · ' + a.catalog_id : a.live?.source_text || '—'}</KV>
-            {a.catalog_disconnected && <KV k="目录"><span className="text-warning" title="照常运行，但不能再从这个私有目录安装或升级">已断开</span></KV>}
-            {a.catalog_version && <KV k="目录版本"><span className="tnum">{a.catalog_version}</span></KV>}
-            <KV k="访问方式">{EXPOSURE_TEXT[a.exposure] || a.exposure}</KV>
-          </div>
-        </Card>
+        <RunCard app={a} />
+        <ResourceCard app={a} metrics={m} />
+        <VersionCard app={a} />
       </div>
       {a.services && a.services.length > 0 && <ServicesCard list={a.services} />}
       {/* 总是渲染：改成局域网后 open_hint 没了，这一块在原位置显示完成态。 */}
       <OpenHintBlock name={a.name} hint={a.open_hint} openURL={openableAddress(a)} onChanged={reload} />
-      {!a.open_hint && (a.url || a.lan_url) && (
-        <Card className="flex flex-col gap-2 p-3">
-          {a.url && <CopyLine prompt={false} label="复制地址" text={a.url} />}
-          {a.lan_url && a.lan_url !== a.url && (
-            <div className="flex items-center gap-2"><span className="shrink-0 text-2xs text-muted-foreground">局域网</span><CopyLine className="flex-1" prompt={false} label="复制地址" text={a.lan_url} /></div>
-          )}
-        </Card>
+      {!withAccess && hasLoginFields(fl) && (
+        <Card data-testid="ov-login" className="px-3.5 py-2.5 text-2xs text-muted-foreground"><LoginLine fl={fl} /></Card>
       )}
-      {fl && <FirstLoginCard fl={fl} title="首次登录" url={loginAddress(fl.url, a)} />}
     </div>
   )
 }

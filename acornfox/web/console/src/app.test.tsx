@@ -669,7 +669,7 @@ describe('我的应用', () => {
     unmount()
     routes['GET /v1/apps/old-app'] = () => ({ ...app({ name: 'old-app', catalog_id: 'old-app' }), legacy_note: true })
     render(<App />)
-    await screen.findByText('来源')
+    await screen.findByTestId('ov-run')
     expect(screen.queryByTestId('legacy-note')).toBeNull()
   })
 
@@ -698,7 +698,7 @@ describe('我的应用', () => {
     expect(within(card('blank')).getAllByText('还没部署').length).toBeGreaterThan(0)
   })
 
-  it('应用详情：在概览里改成局域网后说明块显示完成态，首次登录地址跟着变', async () => {
+  it('应用详情：在概览里改成局域网后说明块显示完成态；登录信息从说明下面挪进出现的访问卡片', async () => {
     const hint = { lan_address: '192.168.1.20', lan_url_after_expose: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
     let exposure = 'local'
     routes['GET /v1/apps/new-api'] = () => exposure === 'local'
@@ -709,14 +709,20 @@ describe('我的应用', () => {
     location.hash = '#app-new-api'
     render(<App />)
     const box = await screen.findByTestId('open-hint')
-    expect((await screen.findByTestId('first-login-url')).textContent).toContain('127.0.0.1:18810（只本机）')
+    // 只本机、要按说明打开：没有访问卡片，登录那一行单独放在说明下面
+    const alone = await screen.findByTestId('ov-login')
+    expect(within(alone).getByText('admin')).toBeTruthy()
+    expect(screen.queryByTestId('ov-access')).toBeNull()
     fireEvent.click(within(box).getByRole('button', { name: '让局域网里的电脑能打开' }))
     fireEvent.click(within(box).getByRole('button', { name: '确认改成局域网' }))
     const done = await screen.findByTestId('open-lan-done')
-    await vi.waitFor(() => expect(screen.getByTestId('first-login-url').textContent).not.toContain('只本机'))
-    expect(screen.getByTestId('first-login-url').textContent).toContain('http://192.168.1.20:18810')
+    const access = await screen.findByTestId('ov-access')
+    expect(access.textContent).toContain('192.168.1.20:18810')
+    expect(within(access).getByTestId('first-login').textContent).toContain('admin')
+    expect(screen.queryByTestId('ov-login')).toBeNull()
+    expect(screen.getAllByTestId('first-login').length).toBe(1)
     expect(within(done).getByRole('link').getAttribute('href')).toBe('http://192.168.1.20:18810')
-    expect(screen.getByTestId('open-hint').textContent).toContain('“高级”里把访问方式改成“只本机”')
+    expect(screen.getByTestId('open-hint').textContent).toContain('“设置 → 谁能打开”里点“只本机”')
     expect(screen.queryByText(/只在服务器本机能打开/)).toBeNull()
   })
 
@@ -745,40 +751,71 @@ describe('我的应用', () => {
     expect(screen.queryByTestId('open-hint')).toBeNull()
   })
 
-  it('高级页：服务端给了平台默认时可以选“跟随默认”，保存发 exposure 空值；默认是公网时先确认', async () => {
+  it('设置 → 谁能打开（从旧的 #…/advanced 进来就展开它）：服务端给了平台默认时可以勾“跟随默认”，保存发 exposure 空值；默认是公网时先确认', async () => {
     routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'public', exposure_is_default: true, default_exposure: 'public' })
     routes['PATCH /v1/apps/web'] = () => ({ app: app({ name: 'web', exposure: 'local' }) })
     location.hash = '#app-web/advanced'
     const r = render(<App />)
-    const sel = (await screen.findByLabelText('访问方式')) as HTMLSelectElement
-    expect(sel.value).toBe('default')
-    expect(within(sel).getByRole('option', { name: '跟随默认（现在是公网）' })).toBeTruthy()
-    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.change(sel, { target: { value: 'local' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    const set = await screen.findByTestId('app-settings')
+    expect(within(set).getByRole('button', { name: /谁能打开/ }).getAttribute('aria-expanded')).toBe('true')
+    expect(within(set).getByTestId('summary-access').textContent).toBe('公网（跟随默认） · 没有绑定域名')
+    expect((within(set).getByLabelText('跟随默认（现在是公网）') as HTMLInputElement).checked).toBe(true)
+    const group = within(set).getByRole('group', { name: '访问方式' })
+    fireEvent.click(within(group).getByRole('button', { name: '只本机' }))
     await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: 'local' }))
     r.unmount()
 
     calls = []
     routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local', exposure_is_default: false, default_exposure: 'public' })
     render(<App />)
-    const sel2 = (await screen.findByLabelText('访问方式')) as HTMLSelectElement
-    expect(sel2.value).toBe('local')
-    fireEvent.change(sel2, { target: { value: 'default' } })
+    const box = (await screen.findByLabelText('跟随默认（现在是公网）')) as HTMLInputElement
+    expect(box.checked).toBe(false)
     expect(screen.getByText(/acornfox app set --app web --expose default/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    fireEvent.click(box)
     const dialog = await screen.findByRole('dialog')
     expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
     fireEvent.click(within(dialog).getByRole('button', { name: '改成公网' }))
     await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: '' }))
   })
 
-  it('高级页：服务端没给平台默认（旧版本）时只有三个具体值', async () => {
+  it('设置 → 谁能打开：服务端没给平台默认（旧版本）时只有三档，没有“跟随默认”', async () => {
     routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local' })
-    location.hash = '#app-web/advanced'
+    location.hash = '#app-web/settings/access'
     render(<App />)
-    const sel = await screen.findByLabelText('访问方式')
-    expect(within(sel).getAllByRole('option').map((o) => o.textContent)).toEqual(['只本机', '局域网', '公网'])
+    const group = await screen.findByRole('group', { name: '访问方式' })
+    expect(within(group).getAllByRole('button').map((o) => o.textContent)).toEqual(['只本机', '局域网', '公网'])
+    expect(screen.queryByTestId('exposure-default')).toBeNull()
+  })
+
+  it('概览的访问卡片：三档能点，局域网直接改；改成公网要先确认；经 AFX 云的应用在设置里只显示、不能改', async () => {
+    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local', url: 'http://192.168.1.20:18810' })
+    routes['PATCH /v1/apps/web'] = () => app({ name: 'web', exposure: 'public' })
+    location.hash = '#app-web'
+    const r = render(<App />)
+    const card = await screen.findByTestId('ov-access')
+    fireEvent.click(within(card).getByRole('button', { name: '公网' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/所有网卡都能打开/)).toBeTruthy()
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+    fireEvent.click(within(dialog).getByRole('button', { name: '改成公网' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'PATCH' && (c.body as { exposure: string }).exposure === 'public')).toBe(true))
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    calls = []
+    const lan = within(card).getByRole('button', { name: '局域网' }) as HTMLButtonElement
+    await vi.waitFor(() => expect(lan.disabled).toBe(false))
+    fireEvent.click(lan)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: 'lan' }))
+    // 点亮着的那一档什么都不做
+    expect((within(card).getByRole('button', { name: '只本机' }) as HTMLButtonElement).disabled).toBe(true)
+    r.unmount()
+
+    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'afx_cloud' })
+    location.hash = '#app-web/settings/access'
+    render(<App />)
+    const ro = await screen.findByTestId('exposure-readonly')
+    expect(within(ro).getByText('经 AFX 云')).toBeTruthy()
+    expect(screen.queryByRole('group', { name: '访问方式' })).toBeNull()
   })
 
   it('外壳里没有 AFX 云和旧版入口', async () => {
@@ -789,28 +826,6 @@ describe('我的应用', () => {
     expect(screen.queryByText('搬到云上')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '账号菜单' }))
     expect(screen.queryByText('切回旧版')).toBeNull()
-  })
-
-  it('高级页：改成公网要先确认；经 AFX 云的应用只显示、不能在页面改', async () => {
-    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local' })
-    routes['PATCH /v1/apps/web'] = () => app({ name: 'web', exposure: 'public' })
-    location.hash = '#app-web/advanced'
-    const r = render(<App />)
-    const sel = await screen.findByLabelText('访问方式')
-    fireEvent.change(sel, { target: { value: 'public' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText(/所有网卡都能打开/)).toBeTruthy()
-    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
-    fireEvent.click(within(dialog).getByRole('button', { name: '改成公网' }))
-    await vi.waitFor(() => expect(calls.some((c) => c.method === 'PATCH' && (c.body as { exposure: string }).exposure === 'public')).toBe(true))
-    r.unmount()
-
-    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'afx_cloud' })
-    render(<App />)
-    const ro = await screen.findByTestId('exposure-readonly')
-    expect(within(ro).getByText('经 AFX 云')).toBeTruthy()
-    expect(screen.queryByLabelText('访问方式')).toBeNull()
   })
 
   it('会话过期时提示重新执行 acornfox open', async () => {
@@ -972,6 +987,209 @@ describe('图标', () => {
     expect(img.getAttribute('src')!.startsWith('data:image/svg+xml')).toBe(true)
     expect(container.querySelector('script')).toBeNull()
     expect(screen.getByText('He')).toBeTruthy()
+  })
+})
+
+describe('应用详情：名片、四个页签、设置', () => {
+  const started = new Date(Date.now() - 3 * 86400000 - 3600000).toISOString()
+  const web = (over: Parameters<typeof app>[0] = {}) => app({
+    name: 'web', exposure: 'lan', url: 'http://192.168.1.20:18810', memory_mb: 640, cpu_milli: 2000,
+    observed: { name: 'af-web-a', state: 'running', running: true, restart_count: 0, host_port: 18810, started_at: started },
+    env: [{ key: 'TZ', secret: false, value: 'UTC' }],
+    volumes: [{ app: 'web', path: '/data', volume_name: 'af-web-data', auto: false, created_at: '' }],
+    addons: [{ kind: 'postgres', image: 'postgres:16', env_var: 'DATABASE_URL', host: 'af-web-postgres', port: 5432, volume_name: 'v', observed_state: 'running', created_at: '2026-11-06T01:00:00Z' }],
+    ...over,
+  })
+  beforeEach(() => {
+    routes['GET /v1/apps/web'] = () => web()
+    routes['GET /v1/apps/web/deployments'] = () => ({ deployments: [] })
+  })
+
+  it('名片：名字、一句话状态、“打开”和“更多”菜单（重启、停止）；副标题里没有版本和地址；页签是概览、日志、版本、设置', async () => {
+    routes['POST /v1/apps/web/stop'] = () => ({})
+    location.hash = '#app-web'
+    render(<App />)
+    const h1 = await screen.findByRole('heading', { name: 'web' })
+    const head = h1.closest('.mb-4') as HTMLElement
+    expect(within(head).getByTestId('app-status-line').textContent).toBe('运行正常· 已连续运行 3 天')
+    expect(head.textContent).not.toContain('192.168.1.20')
+    expect(head.textContent).not.toContain('第 1 版')
+    expect(within(head).getByRole('link', { name: /打开/ }).getAttribute('href')).toBe('http://192.168.1.20:18810')
+    // “打开”只在名片上，访问卡片里没有
+    expect(screen.getAllByRole('link', { name: /打开/ }).length).toBe(1)
+    expect(within(head).queryByRole('button', { name: '重启' })).toBeNull()
+    fireEvent.click(within(head).getByRole('button', { name: '更多操作' }))
+    const menu = within(head).getByRole('menu')
+    expect(within(menu).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['重启', '停止'])
+    fireEvent.click(within(menu).getByRole('menuitem', { name: '停止' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/apps/web/stop')).toBe(true))
+    const tabs = screen.getByRole('tablist', { name: '应用详情' })
+    expect(within(tabs).getAllByRole('tab').map((t) => t.textContent)).toEqual(['概览', '日志', '版本', '设置'])
+    fireEvent.click(within(tabs).getByRole('tab', { name: '设置' }))
+    expect(location.hash).toBe('#app-web/settings')
+    expect(await screen.findByTestId('app-settings')).toBeTruthy()
+  })
+
+  it('名片：停着的应用写“已停止”，“更多”里只有启动', async () => {
+    routes['GET /v1/apps/web'] = () => web({ desired: 'stopped', observed_state: 'stopped', observed: { name: 'c', state: 'exited', running: false, restart_count: 0, host_port: 0 } })
+    location.hash = '#app-web'
+    render(<App />)
+    expect((await screen.findByTestId('app-status-line')).textContent).toBe('已停止')
+    fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['启动'])
+  })
+
+  it('概览：访问卡片在最上面，三张卡片在下面；概览里不再有单独的首次登录卡片', async () => {
+    routes['GET /v1/apps/web'] = () => web({ catalog_id: 'web' })
+    routes['GET /v1/apps/web/first-login'] = () => ({ app: 'web', url: 'http://192.168.1.20:18810', fields: [{ label: '账号', value: 'admin' }, { label: '密码', value: '******', secret: true }] })
+    routes['GET /v1/apps/web/first-login?reveal=true'] = () => ({ app: 'web', fields: [{ label: '账号', value: 'admin' }, { label: '密码', value: 'S3cret', secret: true }] })
+    location.hash = '#app-web'
+    render(<App />)
+    const access = await screen.findByTestId('ov-access')
+    const run = await screen.findByTestId('ov-run')
+    expect(access.compareDocumentPosition(run) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const login = await within(access).findByTestId('first-login')
+    expect(screen.getAllByTestId('first-login').length).toBe(1)
+    expect(screen.queryByText('首次登录')).toBeNull()
+    expect(within(login).getByText('******')).toBeTruthy()
+    fireEvent.click(within(login).getByRole('button', { name: '显示' }))
+    await within(login).findByText('S3cret')
+    expect(calls.some((c) => c.url === '/v1/apps/web/first-login?reveal=true')).toBe(true)
+  })
+
+  it('设置：一行一项，摘要写现状；点一行才展开，同一时间只展开一项', async () => {
+    routes['GET /v1/apps/web'] = () => web({ domains: [{ app: 'web', name: 'demo.example.com', status: 'ready', created_at: '' }] })
+    location.hash = '#app-web/settings'
+    render(<App />)
+    const set = await screen.findByTestId('app-settings')
+    const sum = (k: string) => within(set).getByTestId('summary-' + k).textContent
+    expect(sum('access')).toBe('局域网 · 域名 demo.example.com')
+    expect(sum('limits')).toBe('内存 640 MB · CPU 2 核')
+    expect(sum('data')).toBe('1 个数据卷 · 接着 PostgreSQL')
+    expect(sum('more')).toBe('环境变量 1 个 · 端口和健康检查 · 命令行')
+    expect(within(set).getByText('删除应用')).toBeTruthy()
+    expect(within(set).getByText('默认保留数据卷')).toBeTruthy()
+    const row = (n: RegExp) => within(set).getByRole('button', { name: n })
+    expect(set.querySelectorAll('[aria-expanded="true"]').length).toBe(0)
+    fireEvent.click(row(/资源上限/))
+    expect(row(/资源上限/).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByLabelText('内存上限')).toBeTruthy()
+    fireEvent.click(row(/^数据/))
+    expect(row(/资源上限/).getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByLabelText('内存上限')).toBeNull()
+    expect(screen.getByText('af-web-data')).toBeTruthy()
+    fireEvent.click(row(/^数据/))
+    expect(set.querySelectorAll('[aria-expanded="true"]').length).toBe(0)
+  })
+
+  it('以前的标签地址：#…/config、/data、/resources 跳到设置并展开更多、数据、资源上限', async () => {
+    const cases: [string, RegExp, string][] = [['config', /^更多/, '容器端口'], ['data', /^数据/, '附加服务'], ['resources', /资源上限/, '内存上限']]
+    for (const [old, name, label] of cases) {
+      location.hash = '#app-web/' + old
+      const r = render(<App />)
+      const set = await screen.findByTestId('app-settings')
+      expect(within(screen.getByRole('tablist', { name: '应用详情' })).getByRole('tab', { name: '设置' }).getAttribute('aria-selected')).toBe('true')
+      expect(within(set).getByRole('button', { name }).getAttribute('aria-expanded')).toBe('true')
+      expect(set.querySelectorAll('[aria-expanded="true"]').length).toBe(1)
+      expect(within(set).getAllByText(label).length).toBeGreaterThan(0)
+      r.unmount()
+    }
+  })
+
+  it('设置 → 谁能打开：添加、删除域名', async () => {
+    routes['GET /v1/apps/web'] = () => web({ domains: [{ app: 'web', name: 'old.example.com', status: 'pending', created_at: '' }] })
+    routes['POST /v1/apps/web/domains'] = () => ({})
+    routes['DELETE /v1/apps/web/domains/old.example.com'] = () => ({})
+    location.hash = '#app-web/settings/access'
+    render(<App />)
+    const doms = await screen.findByTestId('domains')
+    expect(within(doms).getByText('等待证书')).toBeTruthy()
+    fireEvent.change(within(doms).getByLabelText('新域名'), { target: { value: ' New.Example.com ' } })
+    fireEvent.click(within(doms).getByRole('button', { name: '添加域名' }))
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'POST' && c.url === '/v1/apps/web/domains')?.body).toEqual({ name: 'new.example.com' }))
+    const rm = within(doms).getByRole('button', { name: '删除域名 old.example.com' }) as HTMLButtonElement
+    await vi.waitFor(() => expect(rm.disabled).toBe(false))
+    fireEvent.click(rm)
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web/domains/old.example.com')).toBe(true))
+  })
+
+  it('设置 → 更多：改环境变量后保存并重新部署；改端口要合法；有常用命令', async () => {
+    routes['PUT /v1/apps/web/env/TZ'] = () => ({})
+    routes['POST /v1/apps/web/redeploy'] = () => ({})
+    routes['PATCH /v1/apps/web'] = () => ({})
+    location.hash = '#app-web/settings/more'
+    render(<App />)
+    const tz = await screen.findByLabelText('变量 TZ 的值')
+    fireEvent.change(tz, { target: { value: 'Asia/Shanghai' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存并重新部署' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/apps/web/redeploy')).toBe(true))
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ value: 'Asia/Shanghai', secret: false })
+    fireEvent.change(screen.getByLabelText('容器端口'), { target: { value: '70000' } })
+    fireEvent.click(within(screen.getByRole('region', { name: '运行设置' })).getByRole('button', { name: '保存' }))
+    await screen.findByText('端口不对')
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+    fireEvent.change(screen.getByLabelText('容器端口'), { target: { value: '8080' } })
+    fireEvent.click(within(screen.getByRole('region', { name: '运行设置' })).getByRole('button', { name: '保存' }))
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ port: 8080, health_path: '/' }))
+    expect(screen.getByText('acornfox status web')).toBeTruthy()
+    expect(screen.getByText('acornfox logs web -f')).toBeTruthy()
+  })
+
+  it('设置 → 资源上限：改内存上限后保存发 PATCH；不再显示“现在”的用量', async () => {
+    routes['PATCH /v1/apps/web'] = () => ({ applied_now: true })
+    location.hash = '#app-web/settings/limits'
+    render(<App />)
+    const mem = (await screen.findByLabelText('内存上限')) as HTMLSelectElement
+    expect(screen.queryByText('每 5 秒更新')).toBeNull()
+    const save = within(screen.getByTestId('app-settings')).getByRole('button', { name: '保存' }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    fireEvent.change(mem, { target: { value: '1024' } })
+    fireEvent.click(save)
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ memory_mb: 1024, cpu_milli: 2000 }))
+  })
+
+  it('设置 → 数据：加一个附加服务；关掉一个时可以选同时删数据', async () => {
+    routes['POST /v1/apps/web/addons'] = () => ({})
+    routes['DELETE /v1/apps/web/addons/postgres'] = () => ({})
+    location.hash = '#app-web/settings/data'
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Redis' }))
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'POST' && c.url === '/v1/apps/web/addons')?.body).toEqual({ kind: 'redis' }))
+    const off = screen.getByRole('button', { name: '关闭' }) as HTMLButtonElement
+    await vi.waitFor(() => expect(off.disabled).toBe(false))
+    fireEvent.click(off)
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByLabelText('同时删除数据（不可恢复）'))
+    // 弹窗右上角的 × 也叫“关闭”，点的是底下那个文字按钮
+    fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' }).find((b) => b.textContent === '关闭')!)
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web/addons/postgres?volumes=true')).toBe(true))
+  })
+
+  it('设置 → 删除应用：默认保留数据卷；不保留要输入应用名才能删', async () => {
+    routes['DELETE /v1/apps/web'] = () => ({})
+    location.hash = '#app-web/settings/delete'
+    const r = render(<App />)
+    const set = await screen.findByTestId('app-settings')
+    expect(set.querySelectorAll('[aria-expanded="true"]').length).toBe(0)
+    fireEvent.click(within(set).getByRole('button', { name: '删除' }))
+    let dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: '删除' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web?volumes=false')).toBe(true))
+    await vi.waitFor(() => expect(location.hash).toBe('#apps'))
+    r.unmount()
+
+    calls = []
+    location.hash = '#app-web/settings'
+    render(<App />)
+    fireEvent.click(within(await screen.findByTestId('app-settings')).getByRole('button', { name: '删除' }))
+    dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByLabelText(/保留数据卷/))
+    const del = within(dialog).getByRole('button', { name: '删除' }) as HTMLButtonElement
+    expect(del.disabled).toBe(true)
+    fireEvent.change(within(dialog).getByLabelText(/确认连数据一起删除/), { target: { value: 'web' } })
+    expect(del.disabled).toBe(false)
+    fireEvent.click(del)
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web?volumes=true')).toBe(true))
   })
 })
 

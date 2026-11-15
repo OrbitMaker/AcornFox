@@ -158,7 +158,6 @@ export function StorePage() {
   if (catalogError) {
     return (
       <div>
-        <PageHead title="应用中心" />
         <Empty>{catalogError.message}</Empty>
       </div>
     )
@@ -166,7 +165,6 @@ export function StorePage() {
   if (!catalog) {
     return (
       <div>
-        <PageHead title="应用中心" />
         <div className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />正在读取目录…</div>
       </div>
     )
@@ -174,11 +172,7 @@ export function StorePage() {
 
   return (
     <div>
-      <PageHead title="应用中心" meta={`${apps.length} 个应用`} actionsClassName="w-full flex-nowrap sm:w-auto">
-        <div className="relative min-w-0 flex-1 sm:w-56 sm:flex-none">
-          <Search className="absolute left-2 top-2 size-3.5 text-muted-foreground" />
-          <Input className="pl-7" placeholder="搜索应用" aria-label="搜索应用" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
+      <PageHead meta={`${apps.length} 个应用`}>
         <Button variant="ghost" size="icon-sm" className="shrink-0" onClick={sync} disabled={syncing} aria-label="更新目录" title="更新目录">
           {syncing ? <Spinner /> : <RefreshCw className="size-3.5" />}
         </Button>
@@ -201,7 +195,14 @@ export function StorePage() {
           {recipes.map((r) => <RecipeCard key={sourceId(r) + '/' + r.id} r={r} />)}
         </section>
       )}
-      {tabs.length > 1 && <Tabs value={group} onChange={setGroup} items={tabs} className="mb-3" label="分类" />}
+      {/* 搜索应用留在页面里（顶栏已经有一个全局搜索，两个搜索框挨在一起会混），和分类排在一行 */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {tabs.length > 1 && <Tabs value={group} onChange={setGroup} items={tabs} label="分类" />}
+        <div className="relative ml-auto w-full min-w-0 sm:w-56">
+          <Search className="absolute left-2 top-2 size-3.5 text-muted-foreground" />
+          <Input className="pl-7" placeholder="搜索应用" aria-label="搜索应用" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+      </div>
       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
         {list.map((a) => <AppCard key={appKey(a)} a={a} />)}
       </div>

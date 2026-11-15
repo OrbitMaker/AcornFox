@@ -1,5 +1,6 @@
 // 控制台里反复用到的小块：标志、应用图块、状态、交付方式、页头、键值行、步骤列表。
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { Check, CircleDashed, CircleX, PlayCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { abbr, catalogAppOf, hue } from '@/lib/catalog'
@@ -74,12 +75,44 @@ export function TierBadge({ tier }: { tier: string }) {
   )
 }
 
-// actionsClassName：右侧操作区的额外类名，例如手机宽度下让搜索框和按钮占满一行。
-export function PageHead({ title, meta, children, actionsClassName }: { title: React.ReactNode; meta?: React.ReactNode; children?: React.ReactNode; actionsClassName?: string }) {
+// 一级页面不再有自己的大标题：页面名只在顶栏写一次（顶栏的面包屑）。
+// PageHead 把这一页的数量、状态（meta）和页面自己的按钮（children）送到顶栏里：
+//   窗口够宽（≥1024px）而且外面有顶栏时，用传送门画进顶栏的两个位置（PageSlots 由外壳提供）；
+//   窗口窄，或者单独渲染这一页（测试）时，就在页面最上面画成一行。两种情况下都不再画页面名。
+// actionsClassName：按钮区的额外类名（只在页面里画成一行时用），例如手机宽度下让按钮占满一行。
+export const PageSlots = React.createContext<{ meta: HTMLElement | null; actions: HTMLElement | null }>({ meta: null, actions: null })
+
+const WIDE = '(min-width: 1024px)'
+function useWide(): boolean {
+  const can = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  const [wide, setWide] = React.useState(() => can && window.matchMedia(WIDE).matches)
+  React.useEffect(() => {
+    if (!can) return
+    const m = window.matchMedia(WIDE)
+    const h = () => setWide(m.matches)
+    h()
+    m.addEventListener('change', h)
+    return () => m.removeEventListener('change', h)
+  }, [can])
+  return wide
+}
+
+export function PageHead({ meta, children, actionsClassName }: { meta?: React.ReactNode; children?: React.ReactNode; actionsClassName?: string }) {
+  const slots = React.useContext(PageSlots)
+  const wide = useWide()
+  const hasMeta = meta !== undefined && meta !== null && meta !== false
+  if (wide && slots.meta && slots.actions) {
+    return (
+      <>
+        {hasMeta && createPortal(<span data-testid="page-meta">{meta}</span>, slots.meta)}
+        {children && createPortal(children, slots.actions)}
+      </>
+    )
+  }
+  if (!hasMeta && !children) return null
   return (
     <div className="mb-4 flex flex-wrap items-center gap-2">
-      <h1 className="text-lg font-semibold">{title}</h1>
-      {meta !== undefined && meta !== null && <span className="text-xs text-muted-foreground">{meta}</span>}
+      {hasMeta && <span data-testid="page-meta" className="text-xs text-muted-foreground">{meta}</span>}
       <div className={cn('ml-auto flex flex-wrap items-center gap-2', actionsClassName)}>{children}</div>
     </div>
   )

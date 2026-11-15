@@ -16,7 +16,7 @@ import { UPGRADE_CN, UPGRADE_GLOBAL } from '@/lib/upgrade'
 import type { HostView, LANConsoleStatus, LANDevice, PublicConsoleStatus, RuntimeChecks } from '@/lib/types'
 import { ACCENTS, type Theme } from '@/lib/theme'
 import { useConsole } from '@/state'
-import { KV, PageHead } from '@/components/bits'
+import { KV } from '@/components/bits'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -292,7 +292,6 @@ export function PrefsPage({ sec }: { sec?: string }) {
   }
   return (
     <div>
-      <PageHead title="设置" />
       <div className="flex flex-col gap-4 md:flex-row">
         <nav aria-label="设置分区" className="no-scrollbar flex gap-0.5 overflow-x-auto md:w-40 md:shrink-0 md:flex-col">
           {PREF_NAV.map(([k, l, Icon]) => (

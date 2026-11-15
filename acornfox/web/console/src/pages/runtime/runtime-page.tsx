@@ -83,7 +83,7 @@ export function RuntimePage() {
   const bad = c ? c.items.filter((i) => i.level !== 'ok').length : 0
   return (
     <div>
-      <PageHead title="运行环境" meta={c ? (bad ? `${bad} 项要处理` : '全部正常') : undefined}>
+      <PageHead meta={c ? (bad ? `${bad} 项要处理` : '全部正常') : undefined}>
         <Button variant="outline" size="sm" onClick={recheck} disabled={busy}>{busy ? <Spinner /> : <RefreshCw className="size-3.5" />}重新检查</Button>
       </PageHead>
       {err && !c && <Empty>{checksErrorText(err)}</Empty>}

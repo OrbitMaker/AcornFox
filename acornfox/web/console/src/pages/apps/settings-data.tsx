@@ -1,13 +1,12 @@
-// 数据：数据卷（应用自己的数据放在哪）和附加服务（PostgreSQL、MySQL、Redis）。
+// 设置 → 数据：数据卷（应用自己的数据放在哪）和附加服务（PostgreSQL、MySQL、Redis）。
 // 接口：GET /v1/apps/{app}（volumes、addons）、POST /v1/apps/{app}/addons、DELETE /v1/apps/{app}/addons/{kind}[?volumes=true]。
 import { useState } from 'react'
 import { Database, HardDrive, Plus } from 'lucide-react'
 import { api, appPath } from '@/lib/api'
 import { timeText } from '@/lib/format'
-import type { Addon } from '@/lib/types'
+import type { Addon, AppView } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/controls'
 import { Dialog, DialogHead } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/toast'
@@ -22,7 +21,7 @@ const ADDON_STATE: Record<string, [string, 'success' | 'warning' | 'danger' | 'o
   running: ['运行中', 'success'], starting: ['初始化中', 'warning'], unhealthy: ['未就绪', 'warning'], stopped: ['已停止', 'outline'], missing: ['等待创建', 'outline'], unavailable: ['读不到状态', 'outline'],
 }
 
-export function DataTab({ app: a, reload }: TabProps) {
+export function DataSection({ app: a, reload }: TabProps) {
   const toast = useToast()
   const [busy, setBusy] = useState('')
   const [removing, setRemoving] = useState<Addon | null>(null)
@@ -60,9 +59,9 @@ export function DataTab({ app: a, reload }: TabProps) {
   }
 
   return (
-    <div className="grid gap-3 md:grid-cols-2">
-      <Card className="p-3.5">
-        <div className="mb-2 text-sm font-medium">数据卷</div>
+    <div className="grid gap-5 md:grid-cols-2">
+      <section aria-label="数据卷">
+        <div className="mb-1.5 text-2xs text-muted-foreground">数据卷</div>
         {volumes.length === 0 && <div className="text-xs text-muted-foreground">这个应用没有数据卷，容器重建后里面写的文件会丢</div>}
         {volumes.map((v) => (
           <div key={v.volume_name} className="flex items-center gap-2 py-1 text-sm">
@@ -73,9 +72,9 @@ export function DataTab({ app: a, reload }: TabProps) {
           </div>
         ))}
         {volumes.length > 0 && <p className="mt-2 text-2xs text-muted-foreground">删除应用时默认保留数据卷。</p>}
-      </Card>
-      <Card className="p-3.5">
-        <div className="mb-2 text-sm font-medium">附加服务</div>
+      </section>
+      <section aria-label="附加服务">
+        <div className="mb-1.5 text-2xs text-muted-foreground">附加服务</div>
         {addons.length === 0 && <div className="mb-2 text-xs text-muted-foreground">没有附加服务</div>}
         {addons.map((x) => {
           const [t, v] = ADDON_STATE[x.observed_state] || ['状态未知', 'outline']
@@ -100,7 +99,7 @@ export function DataTab({ app: a, reload }: TabProps) {
           </div>
         )}
         <p className="mt-2 text-2xs text-muted-foreground">添加后连接地址写进环境变量，应用会自动重新部署。</p>
-      </Card>
+      </section>
       <Dialog open={!!removing} onClose={() => setRemoving(null)} labelledBy="addon-title">
         {removing && (
           <>
@@ -115,4 +114,11 @@ export function DataTab({ app: a, reload }: TabProps) {
       </Dialog>
     </div>
   )
+}
+
+// dataSummary：设置里“数据”那一行的摘要，例如“1 个数据卷 · 接着 PostgreSQL、Redis”。
+export function dataSummary(a: AppView): string {
+  const vols = (a.volumes || []).length
+  const addons = (a.addons || []).map((x) => ADDONS[x.kind]?.name || x.kind)
+  return (vols ? vols + ' 个数据卷' : '没有数据卷') + (addons.length ? ' · 接着 ' + addons.join('、') : '')
 }

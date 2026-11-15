@@ -367,40 +367,16 @@ describe('应用中心的私有目录', () => {
   })
 })
 
-describe('应用概览的小图', () => {
-  const appHistory = (ranges: string[], n = 6) => ({
-    app: 'new-api', range: '1h', step_seconds: 30, ranges, since: n ? '2026-11-06T00:00:00Z' : undefined,
-    points: Array.from({ length: n }, (_, i) => ({ t: new Date(Date.UTC(2026, 10, 6, 0, 0, 30 * i)).toISOString(), cpu_percent: 1 + i, memory_usage_mb: 200 + i })),
-  })
-  beforeEach(() => {
+describe('应用概览不再放内存、CPU 的曲线图', () => {
+  it('只有四张图表卡片，不读历史接口', async () => {
     routes['GET /v1/apps/new-api'] = () => app({ name: 'new-api', catalog_id: 'new-api' })
-  })
-
-  it('有历史时显示内存、CPU 两张图，能切到 24 小时', async () => {
-    routes['GET /v1/metrics/apps/new-api/history'] = () => appHistory(['1h', '24h'])
+    routes['GET /v1/metrics/apps/new-api/history'] = () => ({ app: 'new-api', range: '1h', step_seconds: 30, ranges: ['1h', '24h'], points: [] })
     location.hash = '#app-new-api'
     render(<App />)
-    const box = await screen.findByTestId('app-history')
-    expect(within(box).getByText('内存')).toBeTruthy()
-    expect(within(box).getByText('CPU')).toBeTruthy()
-    expect(within(box).getAllByText('近 1 小时').length).toBe(2)
-    expect(within(box).queryByText(/还没有记录/)).toBeNull()
-    fireEvent.click(within(box).getByRole('button', { name: '24 小时' }))
-    await vi.waitFor(() => expect(calls.some((c) => c.url === '/v1/metrics/apps/new-api/history?range=24h')).toBe(true))
-  })
-
-  it('刚启动还没有点时说明原因；旧服务端没有这个接口时两张图不显示', async () => {
-    routes['GET /v1/metrics/apps/new-api/history'] = () => appHistory(['1h', '24h'], 0)
-    location.hash = '#app-new-api'
-    const first = render(<App />)
-    const box = await screen.findByTestId('app-history')
-    expect(within(box).getAllByText(/还没有记录，每 30 秒记一次/).length).toBe(2)
-    first.unmount()
-
-    delete routes['GET /v1/metrics/apps/new-api/history']
-    render(<App />)
-    await screen.findByText('来源')
-    await vi.waitFor(() => expect(calls.some((c) => c.url.startsWith('/v1/metrics/apps/new-api/history'))).toBe(true))
+    await screen.findByTestId('ov-run')
+    await screen.findByTestId('ov-res')
+    await screen.findByTestId('ov-ver')
     expect(screen.queryByTestId('app-history')).toBeNull()
+    expect(calls.some((c) => c.url.startsWith('/v1/metrics/apps/new-api/history'))).toBe(false)
   })
 })

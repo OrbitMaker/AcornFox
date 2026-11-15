@@ -12,7 +12,7 @@
 | 首页看板：可编辑网格（拖动排序、改宽高、前移后移、移除、添加图表、每张图换图表方式），布局存在这个浏览器里（`localStorage` 的 `afx-dash-v1`） | 完成 | `GET /v1/metrics/host`、`GET /v1/metrics/host/history?range=1h\|24h`、`GET /v1/metrics/apps/{app}`、`GET /v1/runtime/checks`、`GET /v1/apps/{app}/deployments?limit=5`，加共享的应用、安装任务、资源 |
 | 应用中心：配方卡片、分类、搜索、应用卡片（真图标）、详情页（它需要的服务、它能提供的服务）、已断开提示；“连接私有目录”和来源标签这一版藏起（`src/lib/features.ts` 的 `PRIVATE_CATALOG_UI`，代码保留） | 完成 | `GET /v1/catalog`、`GET /v1/catalog/apps/{id}[?catalog=]`、`POST /v1/catalog/sync`、`POST /v1/catalog/connect`、`GET /v1/resources` |
 | 安装弹窗：版本、需要的服务（见下）、更多设置、内存检查、命令行写法（私有目录带 `--catalog`）；进度、失败编号、首次登录；只本机的应用不给打不开的 127.0.0.1 链接，改成“怎么打开”（服务器在局域网、应用有自己的登录时可确认后改成局域网；总是给 `acornfox open 应用名`） | 完成 | `POST /v1/catalog/plan`、`POST /v1/catalog/install`、`GET /v1/catalog/install[/{task}]`、`GET /v1/apps/{app}/first-login[?reveal=true]` |
-| 我的应用：卡片和表格、筛选、搜索、只本机的标“只本机”；详情七个标签页（概览里有只本机应用的“怎么打开”、用到的服务、旧格式清单装的应用的说明）；来自私有目录的标目录名，目录断开的标出来 | 完成 | `/v1/apps…`、`/v1/metrics/apps/{app}`、`/v1/deployments/{id}/logs` |
+| 我的应用：卡片和表格、筛选、搜索、只本机的标“只本机”；详情四个标签页（概览、日志、版本、设置；概览里有访问卡片（三档能点、首次登录信息并在里面）、只本机应用的“怎么打开”、用到的服务、旧格式清单装的应用的说明；能改的都在“设置”里，一行一项点开才展开，以前的配置、数据、资源、高级四个标签的地址跳到设置的对应项）；来自私有目录的标目录名，目录断开的标出来 | 完成 | `/v1/apps…`、`/v1/metrics/apps/{app}`、`/v1/deployments/{id}/logs` |
 | 运行环境：后台服务、Docker、网关、磁盘、端口的自检，每项带故障编号、原因和怎么办 | 完成 | `GET /v1/runtime/checks`、`GET /v1/setup/faults` |
 | 设置：通用、服务、访问、运行环境、存储、下载源、升级、开发者与 AI | 完成 | `GET /v1/services`、`GET /v1/services/kinds`、`POST /v1/services`、`PATCH /v1/services/{name}`、`POST /v1/services/{name}/test`、`DELETE /v1/services/{name}`、`GET /v1/lan-console`、`GET /v1/public-console`（控制台入口只读）、`GET /v1/runtime/checks`、`GET /v1/metrics/host`、`GET /v1/status`、`GET /v1/catalog`、`POST /v1/catalog/connect` |
 

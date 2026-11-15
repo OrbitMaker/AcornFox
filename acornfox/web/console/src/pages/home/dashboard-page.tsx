@@ -16,6 +16,7 @@ import {
 } from '@/lib/dashboard'
 import type { AppMetrics, Deployment, HostHistory, HostView, RuntimeChecks } from '@/lib/types'
 import { useConsole } from '@/state'
+import { PageHead } from '@/components/bits'
 import { Button } from '@/components/ui/button'
 import { Tabs } from '@/components/ui/controls'
 import { Sheet } from '@/components/ui/dialog'
@@ -156,8 +157,9 @@ export function DashboardPage() {
   const upd = (id: string, p: Partial<WidgetConf>) => setLayout((l) => l.map((x) => (x.id === id ? { ...x, ...p } : x)))
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <h1 className="mr-auto text-lg font-semibold">首页</h1>
+      <PageHead meta={ctx.history?.since && ranges.length > 0
+        ? <span title="CPU、内存曲线只存在内存里，后台服务重启后从头记">曲线从 {new Date(ctx.history.since).toLocaleString('zh-CN', { hour12: false })} 开始记录</span>
+        : undefined}>
         {ranges.length > 1 && <Tabs<RangeKey> value={range} onChange={setRange} items={ranges.map((r) => [r, RANGE_TAB[r]])} label="时间范围" />}
         {edit ? (
           <>
@@ -168,10 +170,7 @@ export function DashboardPage() {
         ) : (
           <Button variant="outline" onClick={() => setEdit(true)}><Pencil className="size-3.5" />编辑</Button>
         )}
-      </div>
-      {ctx.history?.since && ranges.length > 0 && (
-        <p className="-mt-2 mb-3 text-2xs text-muted-foreground">CPU、内存曲线从 {new Date(ctx.history.since).toLocaleString('zh-CN', { hour12: false })} 开始记录（只存在内存里，后台服务重启后从头记）</p>
-      )}
+      </PageHead>
       <div className="dash">
         {layout.map((wd) => (
           <Widget key={wd.id} wd={wd} ctx={ctx} edit={edit} drag={drag}

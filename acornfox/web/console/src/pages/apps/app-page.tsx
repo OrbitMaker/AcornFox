@@ -1,27 +1,28 @@
-// 一个应用的详情：顶部状态和操作，下面七个标签页（概览、版本记录、日志、配置、数据、资源、高级）。
-// 应用视图和指标每 5 秒刷新。标签写在地址里（#app-<名字>/<标签>），刷新页面还在原处。
-import { ExternalLink, Play, RotateCw, Square } from 'lucide-react'
+// 一个应用的详情：名片（图标、名字、一句话状态、“打开”和“更多”菜单），下面四个标签页（概览、日志、版本、设置）。
+// 每件事只放一个地方：地址和谁能打开在概览的访问卡片，版本在版本卡片和版本页签，能改的都在设置；
+// 重启、停止、启动收在“更多”菜单里，删除在设置最下面。
+// 应用视图和指标每 5 秒刷新。标签写在地址里（#app-<名字>/<标签>），刷新页面还在原处；以前的配置、数据、资源、高级四个
+// 标签的地址跳到设置并展开对应的那一项（见 lib/router.ts）。
+import { ExternalLink, MoreHorizontal, Play, RotateCw, Square } from 'lucide-react'
 import { useState } from 'react'
 import { api, appPath, type ApiError } from '@/lib/api'
-import { appAddress, deriveStatus, failedDeployment, isLocalOnly, openableAddress, shortAddress } from '@/lib/appstatus'
+import { STATUS, deriveStatus, failedDeployment, openableAddress, type AppStatus } from '@/lib/appstatus'
+import { sinceText } from '@/lib/format'
 import { usePoll } from '@/lib/hooks'
-import { appHref, go, type AppTab } from '@/lib/router'
+import { appHref, go, type AppTab, type SettingsSection } from '@/lib/router'
 import type { AppMetrics, AppView } from '@/lib/types'
+import { cn } from '@/lib/utils'
 import { useConsole } from '@/state'
-import { AppTile, Empty, StatusBadge } from '@/components/bits'
-import { Badge } from '@/components/ui/badge'
+import { AppTile, Empty } from '@/components/bits'
 import { Button } from '@/components/ui/button'
 import { Spinner, Tabs } from '@/components/ui/controls'
+import { Dropdown, MenuItem } from '@/components/ui/menu'
 import { useToast } from '@/components/ui/toast'
 import { ACTION_DONE, runAction, type AppAction } from './actions'
-import { versionLine } from './apps-page'
 import { OverviewTab } from './tab-overview'
 import { VersionsTab } from './tab-versions'
 import { LogsTab } from './tab-logs'
-import { ConfigTab } from './tab-config'
-import { DataTab } from './tab-data'
-import { ResourcesTab } from './tab-resources'
-import { AdvancedTab } from './tab-advanced'
+import { SettingsTab } from './tab-settings'
 
 export interface TabProps {
   app: AppView
@@ -29,7 +30,18 @@ export interface TabProps {
   reload: () => Promise<void>
 }
 
-export function AppPage({ name, tab }: { name: string; tab: AppTab }) {
+const TONE_TEXT = { success: 'text-success', danger: 'text-danger', warning: 'text-warning', muted: 'text-muted-foreground' } as const
+const TONE_DOT = { success: 'bg-success', danger: 'bg-danger', warning: 'animate-pulse bg-warning', muted: 'bg-muted-foreground' } as const
+
+// 名字下面的一句话状态：运行中写“运行正常 · 已连续运行 X”，别的状态照状态判断的文字。
+export function statusLine(a: AppView, st: AppStatus): { text: string; since: string; tone: keyof typeof TONE_TEXT } {
+  const { text, tone } = STATUS[st]
+  if (st !== 'running') return { text, since: '', tone }
+  const started = a.observed?.started_at
+  return { text: '运行正常', since: started ? '已连续运行 ' + sinceText(started) : '', tone }
+}
+
+export function AppPage({ name, tab, section }: { name: string; tab: AppTab; section?: SettingsSection }) {
   const { installing, refreshApps } = useConsole()
   const toast = useToast()
   const [busy, setBusy] = useState<AppAction | ''>('')
@@ -43,7 +55,7 @@ export function AppPage({ name, tab }: { name: string; tab: AppTab }) {
   if (!a) return err ? <Empty>{err.message}</Empty> : <div className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />正在读取…</div>
 
   const st = deriveStatus(a, installing)
-  const url = appAddress(a)
+  const line = statusLine(a, st)
   const openURL = openableAddress(a)
   const act = async (x: AppAction) => {
     setBusy(x)
@@ -58,33 +70,24 @@ export function AppPage({ name, tab }: { name: string; tab: AppTab }) {
     }
   }
   const tabs: [AppTab, string, boolean?][] = [
-    ['overview', '概览', !!failedDeployment(a) || st === 'crashed'], ['versions', '版本记录'], ['logs', '日志'], ['config', '配置'], ['data', '数据'], ['resources', '资源'], ['advanced', '高级'],
+    ['overview', '概览', !!failedDeployment(a) || st === 'crashed'], ['logs', '日志'], ['versions', '版本'], ['settings', '设置'],
   ]
+  const canStop = a.desired !== 'stopped' && st !== 'installing'
+  const canRestart = st === 'running'
   const props: TabProps = { app: a, metrics: metrics.data, reload }
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <AppTile a={a} size="lg" />
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-lg font-semibold">{a.name}</h1>
-            <StatusBadge s={st} />
-            {a.catalog_id && <Badge variant="outline">{versionLine(a)}</Badge>}
-          </div>
-          <div className="tnum truncate text-xs text-muted-foreground">
-            {a.live ? '第 ' + a.live.seq + ' 版' + (a.live.source_text ? ' · ' + a.live.source_text : '') : '还没有上线的版本'}
-            {url && <> · <span className="mono">{shortAddress(url)}</span>{isLocalOnly(a) && '（只本机）'}</>}
+          <h1 className="truncate text-lg font-semibold leading-6">{a.name}</h1>
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs" data-testid="app-status-line">
+            <span className={cn('size-1.5 shrink-0 rounded-full', TONE_DOT[line.tone])} />
+            <span className={cn('font-medium', TONE_TEXT[line.tone])}>{line.text}</span>
+            {line.since && <span className="truncate text-muted-foreground">· {line.since}</span>}
           </div>
         </div>
         <div className="flex items-center gap-1.5">
-          {a.desired === 'stopped' ? (
-            <Button variant="outline" disabled={!!busy} onClick={() => act('start')}>{busy === 'start' ? <Spinner /> : <Play className="size-3.5" />}启动</Button>
-          ) : (
-            <Button variant="outline" disabled={!!busy || st === 'installing'} onClick={() => act('stop')}>{busy === 'stop' ? <Spinner /> : <Square className="size-3.5" />}停止</Button>
-          )}
-          <Button variant="outline" size="icon" disabled={!!busy || st !== 'running'} onClick={() => act('restart')} aria-label="重启" title="重启">
-            {busy === 'restart' ? <Spinner /> : <RotateCw className="size-3.5" />}
-          </Button>
           {/* 只本机的应用在 Linux 服务器上点不开：概览里有怎么打开的说明。 */}
           {!openURL && a.open_hint && (
             <Button onClick={() => {
@@ -97,16 +100,25 @@ export function AppPage({ name, tab }: { name: string; tab: AppTab }) {
               打开<ExternalLink className="size-3.5" />
             </a>
           )}
+          {(a.desired === 'stopped' || canStop || canRestart) && (
+            <Dropdown width="w-32" trigger={(t, open) => (
+              <Button variant="outline" size="icon" disabled={!!busy} onClick={t} aria-label="更多操作" aria-haspopup="menu" aria-expanded={open}>
+                {busy ? <Spinner /> : <MoreHorizontal className="size-4" />}
+              </Button>
+            )}>
+              {canRestart && <MenuItem icon={<RotateCw />} onClick={() => act('restart')}>重启</MenuItem>}
+              {a.desired === 'stopped'
+                ? <MenuItem icon={<Play />} onClick={() => act('start')}>启动</MenuItem>
+                : canStop && <MenuItem icon={<Square />} onClick={() => act('stop')}>停止</MenuItem>}
+            </Dropdown>
+          )}
         </div>
       </div>
       <Tabs<AppTab> value={tab} onChange={(t) => go(appHref(a.name, t))} items={tabs} className="mb-4" label="应用详情" />
       {tab === 'overview' && <OverviewTab {...props} />}
-      {tab === 'versions' && <VersionsTab {...props} />}
       {tab === 'logs' && <LogsTab {...props} />}
-      {tab === 'config' && <ConfigTab {...props} />}
-      {tab === 'data' && <DataTab {...props} />}
-      {tab === 'resources' && <ResourcesTab {...props} />}
-      {tab === 'advanced' && <AdvancedTab {...props} />}
+      {tab === 'versions' && <VersionsTab {...props} />}
+      {tab === 'settings' && <SettingsTab {...props} section={section} />}
     </div>
   )
 }

@@ -155,9 +155,6 @@ export interface HostView {
 
 // GET /v1/metrics/host/history?range=1h|24h：只存在内存里，服务重启后从头记。
 export interface HostPoint { t: string; cpu_percent?: number; memory_used?: number; memory_total?: number; disk_used?: number; disk_total?: number }
-// GET /v1/metrics/apps/{app}/history?range=1h|24h：一个应用的 CPU、内存；规则同上，应用停着的时候不记。
-export interface AppPoint { t: string; cpu_percent?: number; memory_usage_mb?: number; memory_limit_mb?: number }
-export interface AppHistory { app: string; range: string; step_seconds: number; ranges: string[]; since?: string; points: AppPoint[] }
 export interface HostHistory { range: string; step_seconds: number; ranges: string[]; since?: string; points: HostPoint[] }
 
 // GET /v1/runtime/checks：和 acornfox doctor 同一套故障编号。
