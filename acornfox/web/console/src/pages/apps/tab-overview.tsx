@@ -1,26 +1,29 @@
 // 概览，从上到下：出问题时的提示（带“复制诊断给 AI”）→ 访问卡片（地址、三档，从应用中心装的应用把首次登录信息并在里面）
-// → 运行、资源、版本三张卡片（见 overview-cards.tsx）→ 用到的服务 → 只本机应用的“怎么打开”说明。
+// → 连接卡片 → 运行、资源、版本三张卡片（见 overview-cards.tsx）→ 只本机应用的“怎么打开”说明。
 // 没有访问卡片的应用（只本机要按说明打开的）有首次登录信息时，登录那一行单独放在说明下面。
 // 用旧格式清单装的应用，详情里带 legacy_note 时原样显示成一条提示。
 // 概览里不再放内存、CPU 的曲线图（2026-11-15 去掉，圆环看现在的用量；历史仍可用 acornfox stats 应用 --history 1h 看）。
-// 用到的服务（GET /v1/apps/{app} 的 services）：需要的名字、类型、接的是哪条、状态；不是可用时最上面醒目提示。
-// 没有这个字段（旧服务端、旧清单装的应用）时不显示。
+// 用到的服务（GET /v1/apps/{app} 的 services）里有不能用的：最上面醒目提示；没有这个字段（旧服务端、旧清单装的应用）时不提示。
+// 原来单独的一张“用到的服务”卡片去掉了（2026-11-16），它说的事并进了“连接”卡片。
+// “连接”卡片（links-card.tsx）放在访问卡片下面：用着谁的服务、谁在用它的服务，数据来自 GET /v1/services；没有连接时不显示。
 import { AlertTriangle, Copy, FileText, Info } from 'lucide-react'
 import { deployDiagnosisForAI, deriveStatus, failedDeployment, oldVersionServing, openableAddress } from '@/lib/appstatus'
 import { copyText } from '@/lib/clipboard'
 import { appHref, go } from '@/lib/router'
-import { TONE_BADGE, appServiceStatus, kindLabel } from '@/lib/services'
+import { appServiceStatus, kindLabel } from '@/lib/services'
 import { accessInfo } from '@/lib/overview'
+import { useAppLinks } from '@/lib/app-links'
+import { catalogAppOf } from '@/lib/catalog'
 import type { AppServiceUse } from '@/lib/types'
 import { useConsole } from '@/state'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Alert } from '@/components/ui/controls'
+import { Tile } from '@/components/bits'
 import { useToast } from '@/components/ui/toast'
-import { KindName } from '../prefs/service-form'
 import { OpenHintBlock } from './open-hint'
 import { AccessCard, ResourceCard, RunCard, VersionCard } from './overview-cards'
+import { LinksCard, type TileOf } from './links-card'
 import { LoginLine, hasLoginFields, useFirstLogin } from './login-line'
 import type { TabProps } from './app-page'
 
@@ -40,30 +43,15 @@ function ServicesAlert({ list }: { list: AppServiceUse[] }) {
   )
 }
 
-function ServicesCard({ list }: { list: AppServiceUse[] }) {
-  return (
-    <Card className="px-3.5 py-2" data-testid="app-services">
-      <div className="pt-1 text-xs font-medium">用到的服务</div>
-      <div className="divide-y">
-        {list.map((u) => {
-          const st = appServiceStatus(u)
-          return (
-            <div key={u.use} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 text-sm">
-              <span className="min-w-0 flex-1">
-                <KindName label={u.kind_label} kind={u.kind} /> <span className="mono text-2xs text-muted-foreground">{u.use}</span>
-              </span>
-              <span className="min-w-0 truncate text-xs">{u.service ? '接的是“' + u.service + '”' : '没接上'}</span>
-              <Badge variant={TONE_BADGE[st.tone]}>{st.text}</Badge>
-            </div>
-          )
-        })}
-      </div>
-    </Card>
-  )
-}
-
 export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
-  const { installing } = useConsole()
+  const { installing, apps, catalog } = useConsole()
+  const links = useAppLinks(a.name)
+  // 连接卡片里别的应用的小图块：是已装的、从应用中心装的，用目录里的图标。
+  const tileOf: TileOf = (name) => {
+    const other = apps?.find((x) => x.name === name)
+    const c = other ? catalogAppOf(catalog, other) : undefined
+    return <Tile id={other?.catalog_id || name} name={name} icon={c?.icon} iconType={c?.icon_type} size="xs" />
+  }
   const toast = useToast()
   const st = deriveStatus(a, installing)
   const failed = failedDeployment(a)
@@ -94,12 +82,12 @@ export function OverviewTab({ app: a, metrics: m, reload }: TabProps) {
         <Alert icon={<Info />} title="说明"><span data-testid="legacy-note">{a.legacy_note}</span></Alert>
       )}
       {withAccess && <AccessCard app={a} reload={reload} login={fl} />}
+      <LinksCard links={links} tile={tileOf} />
       <div className="grid gap-3 md:grid-cols-3">
         <RunCard app={a} />
         <ResourceCard app={a} metrics={m} />
         <VersionCard app={a} />
       </div>
-      {a.services && a.services.length > 0 && <ServicesCard list={a.services} />}
       {/* 总是渲染：改成局域网后 open_hint 没了，这一块在原位置显示完成态。 */}
       <OpenHintBlock name={a.name} hint={a.open_hint} openURL={openableAddress(a)} onChanged={reload} />
       {!withAccess && hasLoginFields(fl) && (

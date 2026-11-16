@@ -1,7 +1,7 @@
 // 地址栏 # 后面的路由，写法照控制台样稿：
 //   #home、#apps、#store、#runtime、#prefs
 //   #app-<应用名>[/<标签>]   我的应用里的一个应用；标签是 overview、logs、versions、settings
-//   #app-<应用名>/settings/<项>   设置里展开某一项（access、limits、data、more；delete 只滚到删除那一行）
+//   #app-<应用名>/settings/<项>   设置里展开某一项（access、vars、limits、data、more；delete 只滚到删除那一行；vars 是“安装设置”，只有从应用中心装的应用才有）
 //   以前的四个标签 config、data、resources、advanced 仍然认：跳到设置并展开对应的那一项
 //   #item-<目录 id>[?catalog=<私有目录编号>]   应用中心里的一个应用（私有目录的带编号）
 //   #prefs/<分区>            设置的一个分区
@@ -13,7 +13,7 @@ export interface Route { page: Page; id?: string; tab?: string; section?: string
 export const APP_TABS = ['overview', 'logs', 'versions', 'settings'] as const
 export type AppTab = (typeof APP_TABS)[number]
 
-export const SETTINGS_SECTIONS = ['access', 'limits', 'data', 'more', 'delete'] as const
+export const SETTINGS_SECTIONS = ['access', 'vars', 'limits', 'data', 'more', 'delete'] as const
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]
 
 // 以前的标签 → 设置里的哪一项（旧链接、书签照样能用）。

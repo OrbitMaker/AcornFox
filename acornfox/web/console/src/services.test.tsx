@@ -56,18 +56,63 @@ function item(name: string) {
 }
 
 describe('设置里的服务', () => {
-  it('列出四种状态、类型、来源、谁在用；分区在设置的分区表里', async () => {
+  it('一行一项：名字是服务类型，一句话说谁提供、谁在用；状态不是可用时状态放最前面；分区在设置的分区表里', async () => {
     await openServices()
     const nav = screen.getByRole('navigation', { name: '设置分区' })
     expect(within(nav).getByText('服务').closest('a')!.getAttribute('aria-current')).toBe('page')
-    expect(screen.getAllByTestId('service').map((x) => within(x).getByTestId('service-status').textContent))
-      .toEqual(['可用', '还差：Key', '提供它的应用 other-api 停着', '提供它的应用 old-api 已删'])
-    const mail = item('我的自建邮箱')
-    expect(within(mail).getByText('邮箱（发信）')).toBeTruthy()
-    expect(within(mail).getByText('自己登记的 · memos 在用')).toBeTruthy()
-    expect(within(item('new-api')).getByText('由应用 new-api 提供 · 还没有应用在用')).toBeTruthy()
-    // 页面上没有“服务类型”这类英文写法
+    expect(screen.getByText('这台机器上的服务')).toBeTruthy()
+    expect(screen.getByTestId('services-intro').textContent).toBe('应用之间互相借用的东西。装应用时需要哪种，自动接上。')
+    expect(screen.getAllByTestId('service-summary').map((x) => x.textContent)).toEqual([
+      '你登记的“我的自建邮箱” · memos 在用',
+      '还差：Key · new-api 提供 · 还没有应用在用',
+      '提供它的应用 other-api 停着 · other-api 提供 · hermes-agent 在用',
+      '提供它的应用 old-api 已删 · old-api 提供 · 还没有应用在用',
+    ])
+    // 能用的没有状态字；不能用的状态字单独标出来
+    expect(screen.getAllByTestId('service').map((x) => within(x).queryByTestId('service-status')?.textContent ?? ''))
+      .toEqual(['', '还差：Key', '提供它的应用 other-api 停着', '提供它的应用 old-api 已删'])
+    // 小圆点：能用是绿的，缺项、停着是黄的，已删是红的
+    const dot = (name: string) => ['success', 'warning', 'danger'].find((t) => item(name).querySelector('.bg-' + t))
+    expect(['我的自建邮箱', 'new-api', 'other-api', 'old-api'].map(dot)).toEqual(['success', 'warning', 'warning', 'danger'])
+    // 名字是服务类型的中文名
+    expect(within(item('我的自建邮箱')).getByText('邮箱（发信）')).toBeTruthy()
+    expect(within(item('new-api')).getByText('大模型接口')).toBeTruthy()
+    // 都收起；最下面不再有命令行那一条
+    expect(screen.queryByTestId('service-values')).toBeNull()
+    expect(screen.queryByText('acornfox services list')).toBeNull()
+    // 页面上没有“服务类型”这类英文写法，也没有“变量”两个字
     expect(screen.queryByText(/llm_gateway|provides|uses/)).toBeNull()
+    expect(screen.getByTestId('prefs-services').textContent).not.toContain('变量')
+  })
+
+  it('同一时间只展开一条：点开另一条，前一条收起；再点一下收起', async () => {
+    await openServices()
+    fireEvent.click(within(item('我的自建邮箱')).getByRole('button', { name: /我的自建邮箱/ }))
+    expect(within(item('我的自建邮箱')).getByTestId('service-values')).toBeTruthy()
+    fireEvent.click(within(item('other-api')).getByRole('button', { name: /other-api/ }))
+    expect(within(item('我的自建邮箱')).queryByTestId('service-values')).toBeNull()
+    const other = item('other-api')
+    expect(within(other).getByTestId('service-users').textContent).toBe('谁在用hermes-agent')
+    fireEvent.click(within(other).getByRole('button', { name: /other-api/ }))
+    expect(screen.queryByTestId('service-values')).toBeNull()
+  })
+
+  it('展开后：名额有限时写还能接几个；应用提供的服务名字和应用名不一样时写出名字；还不能用时写原因', async () => {
+    routes['GET /v1/services'] = () => ({ services: [
+      { ...services[0], status: 'ok', max_consumers: 3, slots_left: 2 },
+      { ...services[1], name: 'gw-main', status: 'not_ready', ready_say: '还没有上游', ready_detail: '第 1 步：应用返回 HTTP 503', used_by: [], dedicated_to: 'hermes-agent', slots_left: 0 },
+    ] })
+    await openServices()
+    fireEvent.click(within(item('我的自建邮箱')).getByRole('button', { name: /我的自建邮箱/ }))
+    expect(within(item('我的自建邮箱')).getByTestId('service-slots').textContent).toBe('还能不能接还能接 2 个（最多 3 个）')
+    expect(within(item('我的自建邮箱')).queryByTestId('service-name')).toBeNull()
+    const gw = item('gw-main')
+    expect(within(gw).getByTestId('service-summary').textContent).toBe('还不能用 · new-api 提供 · 还没有应用在用')
+    fireEvent.click(within(gw).getByRole('button', { name: /gw-main|new-api/ }))
+    expect(within(gw).getByTestId('service-name').textContent).toBe('名字gw-main')
+    expect(within(gw).getByTestId('service-not-ready').textContent).toContain('还不能用：还没有上游')
+    expect(within(gw).getByTestId('service-not-ready').textContent).toContain('没过的那一步：第 1 步：应用返回 HTTP 503')
+    expect(within(gw).getByTestId('service-slots').textContent).toBe('还能不能接被应用 hermes-agent 独占，别的应用接不了')
   })
 
   it('点开看各项的值：保密项只有后 4 位，没有“显示明文”', async () => {
@@ -84,8 +129,9 @@ describe('设置里的服务', () => {
     routes['PATCH /v1/services/new-api'] = () => ({ ...services[1], status: 'ok', notes: ['有 1 个应用在用它，重新应用设置后才生效：hermes-agent'] })
     await openServices()
     const s = item('new-api')
-    // 收起时也提示
-    expect(within(s).getByText('登录 New API，在“令牌”里新建一把，贴进来')).toBeTruthy()
+    // 收起时只有一句：还差哪一项；那句提示点开才看到
+    expect(within(s).getByTestId('service-summary').textContent).toContain('还差：Key')
+    expect(within(s).queryByText('登录 New API，在“令牌”里新建一把，贴进来')).toBeNull()
     fireEvent.click(within(s).getByRole('button', { name: /new-api/ }))
     expect(within(s).getByTestId('service-ask').textContent).toBe('登录 New API，在“令牌”里新建一把，贴进来')
     // 应用提供的：没有删除，说明删掉那个应用它才会消失
@@ -271,7 +317,61 @@ describe('设置里的服务', () => {
     routes['GET /v1/services'] = () => ({ services: [] })
     location.hash = '#prefs/services'
     render(<App />)
-    expect((await screen.findByTestId('services-empty')).textContent).toContain('也可以自己登记一条')
+    const empty = await screen.findByTestId('services-empty')
+    expect(empty.textContent).toContain('还没有。装一个能提供服务的应用，它的服务会自己出现在这里；你手里已有的')
+    expect(empty.textContent).toContain('也可以登记进来。')
+    expect(screen.getByRole('button', { name: '登记一条' })).toBeTruthy()
+  })
+})
+
+describe('设置里的服务：平台自动填的', () => {
+  const pv = (name: string, label: string, value: string) => ({ name, label, standalone: '', cloud: '', user_can_set: true, value, available: !!value })
+  const VARS = [
+    pv('tz', '时区', 'Asia/Shanghai'),
+    pv('region', '网络区域（cn 或 global）', 'global'),
+    pv('mirror.pypi', 'Python 包下载源', 'https://pypi.org/simple/'),
+    pv('mirror.npm', 'Node 包下载源', ''),
+    pv('app.url', '这个应用的访问地址', 'http://127.0.0.1:8080'),
+    pv('app.host', '这个应用访问地址里的主机（不带端口）', ''),
+  ]
+
+  it('列表最后固定一行：收起时一句话，项数只算列出来的；点开列出有值的（不列每个应用各算各的），名字去掉括号里的补充', async () => {
+    routes['GET /v1/catalog/platform-vars'] = () => ({ vars: VARS })
+    await openServices()
+    const row = await screen.findByTestId('platform-auto')
+    // 在最后一条服务的后面
+    const all = screen.getByTestId('prefs-services').querySelectorAll('[data-testid="service"], [data-testid="platform-auto"]')
+    expect(all[all.length - 1]).toBe(row)
+    expect(within(row).getByText('平台自动填的')).toBeTruthy()
+    expect(within(row).getByTestId('platform-auto-summary').textContent).toBe('时区、下载源等 3 项。装应用时平台替你填好，不用管')
+    expect(within(row).queryByTestId('platform-auto-values')).toBeNull()
+    // 先展开一条服务，再展开这一行：服务那条收起（同一时间只展开一项）
+    fireEvent.click(within(item('我的自建邮箱')).getByRole('button', { name: /我的自建邮箱/ }))
+    fireEvent.click(within(row).getByRole('button', { name: /平台自动填的/ }))
+    expect(within(item('我的自建邮箱')).queryByTestId('service-values')).toBeNull()
+    const vals = within(row).getByTestId('platform-auto-values')
+    expect([...vals.querySelectorAll('dt')].map((x) => x.textContent)).toEqual(['时区', '网络区域', 'Python 包下载源'])
+    expect([...vals.querySelectorAll('dd')].map((x) => x.textContent)).toEqual(['Asia/Shanghai', 'global', 'https://pypi.org/simple/'])
+    expect(row.textContent).toContain('想给某个应用用别的值，装它的时候可以改。')
+    // 不显示清单里的名字，也不写“变量”
+    expect(row.textContent).not.toMatch(/app\.|mirror\.|tz|变量/)
+  })
+
+  it('还没有服务时也显示这一行', async () => {
+    routes['GET /v1/services'] = () => ({ services: [] })
+    routes['GET /v1/catalog/platform-vars'] = () => ({ vars: VARS })
+    location.hash = '#prefs/services'
+    render(<App />)
+    await screen.findByTestId('services-empty')
+    expect((await screen.findByTestId('platform-auto-summary')).textContent).toBe('时区、下载源等 3 项。装应用时平台替你填好，不用管')
+  })
+
+  it('旧服务端没有这个接口（404）：不显示这一行，也不报错', async () => {
+    await openServices()
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/v1/catalog/platform-vars')).toBe(true))
+    expect(screen.queryByTestId('platform-auto')).toBeNull()
+    expect(screen.queryByText('平台自动填的')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
 
@@ -500,7 +600,7 @@ describe('安装弹窗里需要的服务', () => {
 })
 
 describe('应用概览里用到的服务', () => {
-  it('列出需要的、类型、接的是哪条、状态；不能用的在最上面提示', async () => {
+  it('不能用的在最上面提示，能点去看服务；不再有单独的“用到的服务”卡片', async () => {
     routes['GET /v1/apps/hermes-agent'] = () => app({
       name: 'hermes-agent',
       services: [
@@ -510,11 +610,9 @@ describe('应用概览里用到的服务', () => {
     })
     location.hash = '#app-hermes-agent'
     render(<App />)
-    const card = await screen.findByTestId('app-services')
-    expect(within(card).getByText('接的是“other-api”')).toBeTruthy()
-    expect(within(card).getByText('接的是“我的自建邮箱”')).toBeTruthy()
-    expect(within(card).getByText('可用')).toBeTruthy()
-    expect(screen.getByTestId('services-alert').textContent).toBe('大模型接口（other-api）：提供它的应用停着')
+    expect((await screen.findByTestId('services-alert')).textContent).toBe('大模型接口（other-api）：提供它的应用停着')
+    // 原来单独的“用到的服务”卡片去掉了，它说的事在“连接”卡片里
+    expect(screen.queryByTestId('app-services')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '去看服务' }))
     expect(location.hash).toBe('#prefs/services')
   })
@@ -537,8 +635,10 @@ describe('已删、数据还留着的使用方和删除后的说明', () => {
   it('谁在用：已删的写成“名字（已删除，数据还留着）”，不算在用', async () => {
     routes['GET /v1/services'] = () => ({ services: [withGone, { ...services[1], name: 'gw2', used_by: [{ app: 'blog', use: 'llm', gone: true }] }] })
     await openServices()
-    expect(within(item('我的自建邮箱')).getByText('自己登记的 · memos 在用；blog（已删除，数据还留着）')).toBeTruthy()
-    expect(within(item('gw2')).getByText('由应用 new-api 提供 · 没有已装的应用在用；blog（已删除，数据还留着）')).toBeTruthy()
+    expect(within(item('我的自建邮箱')).getByTestId('service-summary').textContent).toBe('你登记的“我的自建邮箱” · memos 在用；blog（已删除，数据还留着）')
+    expect(within(item('gw2')).getByTestId('service-summary').textContent).toBe('还差：Key · new-api 提供 · 没有已装的应用在用；blog（已删除，数据还留着）')
+    fireEvent.click(within(item('我的自建邮箱')).getByRole('button', { name: /我的自建邮箱/ }))
+    expect(within(item('我的自建邮箱')).getByTestId('service-users').textContent).toBe('谁在用memos、blog（已删除，数据还留着）')
   })
 
   it('只有已删的应用接着它：确认时说它们以后装回来要重新接服务；200 带 notes 时删完在列表上方原样列出，关掉才消失', async () => {
@@ -691,21 +791,24 @@ describe('服务类型或项没有中文名', () => {
     routes['GET /v1/apps/hermes-agent'] = () => app({ name: 'hermes-agent', services: [{ use: 'llm', kind: 'x_kind', kind_label: '', service: '', status: 'not_connected', status_label: '没接上' }] })
     location.hash = '#app-hermes-agent'
     render(<App />)
-    const card = await screen.findByTestId('app-services')
-    expect(within(card).getByTestId('unnamed').textContent).toBe('（未命名的服务类型）x_kind')
-    expect(screen.getByTestId('services-alert').textContent).toBe('（未命名的服务类型）：没接上')
+    expect((await screen.findByTestId('services-alert')).textContent).toBe('（未命名的服务类型）：没接上')
   })
 
-  it('设置里的说明举的例子取自目录里定义的服务类型，不写死', async () => {
+  it('还没有服务时说明里举的例子取自目录里定义的服务类型，不写死；取不到时不举例', async () => {
+    routes['GET /v1/services'] = () => ({ services: [] })
     location.hash = '#prefs/services'
     const r = render(<App />)
-    await screen.findAllByTestId('service')
-    await vi.waitFor(() => expect(screen.getByTestId('services-intro').textContent).toContain('（例如大模型接口、邮箱（发信））'))
+    await screen.findByTestId('services-empty')
+    await vi.waitFor(() => expect(screen.getByTestId('services-empty').textContent).toContain('你手里已有的（例如大模型接口、邮箱（发信））也可以登记进来'))
     r.unmount()
     routes['GET /v1/services/kinds'] = () => ({ kinds: [{ kind: 'a', label: '甲服务', fields: [] }] })
+    const r2 = render(<App />)
+    await vi.waitFor(() => expect(screen.getByTestId('services-empty').textContent).toContain('（例如甲服务）'))
+    expect(screen.getByTestId('services-empty').textContent).not.toMatch(/大模型|邮箱/)
+    r2.unmount()
+    routes['GET /v1/services/kinds'] = () => ({ kinds: [] })
     render(<App />)
-    await screen.findAllByTestId('service')
-    await vi.waitFor(() => expect(screen.getByTestId('services-intro').textContent).toContain('（例如甲服务）'))
-    expect(screen.getByTestId('services-intro').textContent).not.toMatch(/大模型|邮箱/)
+    await vi.waitFor(() => expect(screen.getByTestId('services-empty').textContent).toContain('你手里已有的也可以登记进来'))
+    expect(screen.getByTestId('services-empty').textContent).not.toContain('例如')
   })
 })

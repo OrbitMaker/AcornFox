@@ -176,7 +176,7 @@ const (
 	editNever       = "never"
 )
 
-var layerLabels = map[string]string{catalog.LayerSystem: "系统变量", catalog.LayerCustom: "自定义变量"}
+var layerLabels = map[string]string{catalog.LayerSystem: "平台变量", catalog.LayerCustom: "自定义变量"}
 
 var manifestSourceLabels = map[string]string{
 	state.ManifestFromInstall:  "安装时保存的",

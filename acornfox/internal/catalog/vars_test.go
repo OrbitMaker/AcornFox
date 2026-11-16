@@ -151,9 +151,9 @@ func TestVarsFingerprintChangesOnlyWithVariables(t *testing.T) {
 		"类别变了（默认值没了）": change("    default: admin\n", ""),
 		"类别变了（改成必填）":  change("    default: admin\n", "    required: true\n"),
 		"多了一个参数":      change("\nenv:\n", "  - key: site_name\n    type: string\n\nenv:\n"),
-		"少了一个系统变量":    change("  - { key: TZ, from: platform.tz }\n", ""),
-		"多了一个系统变量":    change("  - { key: TZ, from: platform.tz }\n", "  - { key: TZ, from: platform.tz }\n  - { key: PIP_INDEX_URL, from: platform.mirror.pypi }\n"),
-		"系统变量换了一个":    change("from: platform.tz", "from: platform.region"),
+		"少了一个平台变量":    change("  - { key: TZ, from: platform.tz }\n", ""),
+		"多了一个平台变量":    change("  - { key: TZ, from: platform.tz }\n", "  - { key: TZ, from: platform.tz }\n  - { key: PIP_INDEX_URL, from: platform.mirror.pypi }\n"),
+		"平台变量换了一个":    change("from: platform.tz", "from: platform.region"),
 	}
 	seen := map[string]string{}
 	for name, m := range differ {

@@ -5,6 +5,7 @@ import { App } from './App'
 import { ConsoleProvider } from './state'
 import { ToastProvider } from './components/ui/toast'
 import { ConnectCatalogDialog } from './pages/store/connect-dialog'
+import { certPoll } from './pages/prefs/cert-wait'
 import { app, catalog, newApiDetail, resources, task } from './test/fixtures'
 import { DEFAULT_LAYOUT, LAYOUT_KEY } from './lib/dashboard'
 import type { CatalogView } from './lib/types'
@@ -432,6 +433,81 @@ describe('设置', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '开启' }))
     expect((await screen.findByTestId('pub-new-password')).textContent).toContain('Once-999')
     expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ domain: 'c.mine.com' })
+  })
+
+  it('在外面打开控制台·刚开启证书还在申请：弹窗写“正在申请证书”，好了改成“可以打开了”，关掉弹窗后那一行也说一声', async () => {
+    certPoll.pending = 5
+    let enabled = false
+    let ready = false
+    const on = { enabled: true, domain: 'c.mine.com', url: 'https://c.mine.com', enabled_at: '2026-11-16T01:00:00Z', can_toggle: true, needs_password: false }
+    routes['GET /v1/public-console'] = () => (enabled ? on : { enabled: false, can_toggle: true, needs_password: false, suggested_domain: 'c.mine.com' })
+    routes['GET /v1/public-console?check=https'] = () => (enabled
+      ? { ...on, https: ready ? { code: 'ok', message: 'https://c.mine.com 已可访问，证书有效' } : { code: 'cert_pending', message: 'c.mine.com 的 443 端口已通，但证书还没有就绪', hint: '入口代理正在自动申请证书，通常一两分钟。' } }
+      : { enabled: false })
+    routes['POST /v1/public-console/enable'] = () => { enabled = true; return { domain: 'c.mine.com', url: 'https://c.mine.com', password: 'Pw-1' } }
+    location.hash = '#prefs/access'
+    render(<App />)
+    await screen.findByTestId('summary-pub')
+    fireEvent.click(row('在外面打开控制台'))
+    expect(screen.queryByTestId('pub-cert')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '开启公网控制台' }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: '开启公网控制台？' })).getByRole('button', { name: '开启' }))
+    const done = await screen.findByRole('dialog', { name: '公网控制台已开启' })
+    await vi.waitFor(() => expect(within(done).getByTestId('pub-cert').getAttribute('data-phase')).toBe('pending'))
+    expect(within(done).getByTestId('pub-cert').textContent).toContain('正在申请证书，通常一两分钟')
+    expect(within(done).getByTestId('pub-cert').textContent).toContain('现在打开，浏览器会报“连接不安全”')
+    expect(within(done).queryByRole('link', { name: '打开' })).toBeNull()
+    // 一直在问
+    const asked = () => calls.filter((c) => c.url === '/v1/public-console?check=https').length
+    const n = asked()
+    await vi.waitFor(() => expect(asked()).toBeGreaterThan(n + 1))
+    ready = true
+    await vi.waitFor(() => expect(within(done).getByTestId('pub-cert').getAttribute('data-phase')).toBe('ready'))
+    expect(within(done).getByTestId('pub-cert').textContent).toContain('证书好了，可以打开了')
+    expect((within(done).getByRole('link', { name: '打开' }) as HTMLAnchorElement).getAttribute('href')).toBe('https://c.mine.com')
+    // 好了以后不再问
+    const m = asked()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(asked()).toBe(m)
+    fireEvent.click(within(done).getByRole('button', { name: '我记下了' }))
+    expect(screen.getByTestId('pub-cert').textContent).toContain('证书好了，可以打开了')
+    certPoll.pending = 3000
+  })
+
+  it('在外面打开控制台·证书状态的另外几种：没签下来给原因；服务器确认不了时说明；一直是好的、旧服务端都不多说', async () => {
+    const on = { enabled: true, domain: 'c.mine.com', url: 'https://c.mine.com', enabled_at: '2026-11-16T01:00:00Z', can_toggle: true, needs_password: false }
+    routes['GET /v1/public-console'] = () => on
+    routes['GET /v1/public-console?check=https'] = () => ({ ...on, https: { code: 'cert_failed', message: '等待后 c.mine.com 的 HTTPS 证书仍未签发', hint: '常见原因：80 端口没有放行。' } })
+    location.hash = '#prefs/access'
+    const first = render(<App />)
+    await screen.findByTestId('summary-pub')
+    fireEvent.click(row('在外面打开控制台'))
+    await vi.waitFor(() => expect(screen.getByTestId('pub-cert').getAttribute('data-phase')).toBe('failed'))
+    expect(screen.getByTestId('pub-cert').textContent).toContain('证书还没签下来，地址现在打不开。服务器还在自己重试，好了这里会提示。')
+    expect(screen.getByTestId('pub-cert').textContent).toContain('常见原因：80 端口没有放行。')
+    first.unmount()
+
+    routes['GET /v1/public-console?check=https'] = () => ({ ...on, https: { code: 'port_unreachable', message: '连接 c.mine.com 的 443 端口超时' } })
+    const second = render(<App />)
+    await screen.findByTestId('summary-pub')
+    fireEvent.click(row('在外面打开控制台'))
+    await vi.waitFor(() => expect(screen.getByTestId('pub-cert').getAttribute('data-phase')).toBe('unknown'))
+    expect(screen.getByTestId('pub-cert').textContent).toContain('这台服务器自己确认不了证书好了没有（连接 c.mine.com 的 443 端口超时）')
+    expect(screen.getByTestId('pub-cert').textContent).toContain('直接打开地址试试')
+    second.unmount()
+
+    for (const https of [{ code: 'ok' }, undefined]) {
+      routes['GET /v1/public-console?check=https'] = () => ({ ...on, https })
+      const before = calls.length
+      const r = render(<App />)
+      await screen.findByTestId('summary-pub')
+      fireEvent.click(row('在外面打开控制台'))
+      await vi.waitFor(() => expect(calls.slice(before).some((c) => c.url === '/v1/public-console?check=https')).toBe(true))
+      await screen.findByTestId('pub-url')
+      await new Promise((res) => setTimeout(res, 20))
+      expect(screen.queryByTestId('pub-cert')).toBeNull()
+      r.unmount()
+    }
   })
 
   it('在外面打开控制台·已开启：地址、复制、关闭；关闭先确认，要密码时带上密码调 DELETE', async () => {

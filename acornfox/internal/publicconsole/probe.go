@@ -118,7 +118,7 @@ func CertFailedDiagnosis(domain string) Diagnosis {
 	return Diagnosis{
 		Code:    CodeCertFailed,
 		Message: fmt.Sprintf("等待后 %s 的 HTTPS 证书仍未签发", domain),
-		Hint:    "常见原因：80 端口没有放行（证书机构要通过 80 端口验证）；域名的 CAA 记录不允许 Let's Encrypt/ZeroSSL；同一域名短时间内申请次数过多。可在服务器上运行 acornfox doctor，按它给出的入口容器名用 docker logs 查看原因，稍后用 acornfox public-console status 再看。",
+		Hint:    "入口代理会自己接着重试，可以再等几分钟（服务器连证书机构不稳时会这样，国内的服务器上常见）。别的常见原因：80 端口没有放行（证书机构要通过 80 端口验证）；域名的 CAA 记录不允许 Let's Encrypt/ZeroSSL；同一域名短时间内申请次数过多。可在服务器上运行 acornfox doctor，按它给出的入口容器名用 docker logs 查看原因，稍后用 acornfox public-console status 再看。",
 	}
 }
 

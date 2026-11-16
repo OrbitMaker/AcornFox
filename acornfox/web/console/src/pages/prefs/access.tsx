@@ -4,9 +4,10 @@
 //   局域网里打开控制台：开没开、地址、密码是谁设的、记住的设备（能移除）；开关和清密码只给服务器上的命令。
 //   在外面打开控制台：开没开；服务端允许时（can_toggle）页面上能开、能关，都先弹确认框，
 //         needs_password 时要再输一次现在的控制台密码；开启成功给的新密码只显示这一次。不想对外开放给 acornfox open。
+//         开着时会问服务端证书好了没有（cert-wait.tsx）：第一次开启要等一两分钟，这段时间写“正在申请证书”，好了再说可以打开。
 // 接口：GET/PUT/DELETE /v1/platform/domain、POST /v1/platform/domain/check；
 //       GET /v1/lan-console、GET/DELETE /v1/lan-console/devices[/{id}]；
-//       GET /v1/public-console、POST /v1/public-console/enable {domain,password}、DELETE /v1/public-console {password}。
+//       GET /v1/public-console[?check=https]、POST /v1/public-console/enable {domain,password}、DELETE /v1/public-console {password}。
 // 密码只放在组件状态里，关掉弹窗就清掉，不写进地址、存储和日志。
 import * as React from 'react'
 import { Check, Copy } from 'lucide-react'
@@ -23,6 +24,7 @@ import { CopyButton, CopyLine } from '@/components/ui/copy'
 import { Dialog, DialogHead } from '@/components/ui/dialog'
 import { Input, Label } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
+import { CertLine, useCertState } from './cert-wait'
 
 type Key = 'domain' | 'lan' | 'pub'
 const EXAMPLE = 'apps.example.com'
@@ -317,6 +319,8 @@ function PubBody({ p, onChanged }: { p: PublicConsoleStatus; onChanged: () => Pr
 
   const needPw = !!p.needs_password
   const target = normDomain(domain)
+  // 开着时问证书好了没有；换了地址或重新开启就从头问
+  const cert = useCertState(p.enabled, (p.domain || '') + '|' + (p.enabled_at || ''))
   const open = (d: 'enable' | 'disable') => { setErr(''); setPassword(''); setDialog(d) }
   const close = () => { setDialog(''); setPassword(''); setErr('') }
   const enable = async () => {
@@ -373,6 +377,7 @@ function PubBody({ p, onChanged }: { p: PublicConsoleStatus; onChanged: () => Pr
           <Button size="sm" variant="outline" onClick={copyURL}>{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}复制地址</Button>
           {p.can_toggle && <Button size="sm" variant="outline" className="text-danger hover:text-danger" onClick={() => open('disable')}>关闭公网控制台</Button>}
         </div>
+        <CertLine s={cert} url={pubURL(p)} where="row" />
         {p.enabled_at && <div className="text-2xs text-muted-foreground">{timeText(p.enabled_at)} 开的</div>}
         {p.can_toggle ? <div className="text-2xs text-muted-foreground">忘了密码：关闭后重新开启，会给一个新密码。</div> : <ServerOnly p={p} />}
       </>
@@ -430,6 +435,7 @@ function PubBody({ p, onChanged }: { p: PublicConsoleStatus; onChanged: () => Pr
       </Dialog>
       <Dialog open={!!shown} onClose={() => setShown(null)} labelledBy="pub-pw-title">
         <DialogHead id="pub-pw-title" title="公网控制台已开启" desc={shown ? '地址：' + shown.url : undefined} />
+        <div className="mb-3 empty:hidden"><CertLine s={cert} url={shown?.url || ''} where="dialog" /></div>
         <div className="text-xs font-medium text-warning">登录密码只显示这一次，请马上记下来。关掉这个窗口后就再也看不到了。</div>
         <div className="mt-2 flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2.5" data-testid="pub-new-password">
           <code className="mono min-w-0 flex-1 select-all break-all text-lg font-semibold tracking-wide">{shown?.password}</code>

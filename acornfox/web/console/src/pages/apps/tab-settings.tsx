@@ -1,9 +1,9 @@
 // 设置：这个应用能改的都在这一页。一张卡片，一行一项（名字、现状摘要、展开箭头），点一行才展开，同一时间只展开一项：
-//   谁能打开（三档、域名）、资源上限（内存、CPU）、数据（数据卷、附加服务）、更多（环境变量、端口和健康检查、命令行），
+//   谁能打开（三档、域名）、安装设置（从应用中心装的应用才有，见 settings-vars.tsx）、资源上限（内存、CPU）、数据（数据卷、附加服务）、更多（环境变量、端口和健康检查、命令行），
 //   最下面是删除应用（红字，点“删除”走确认框）。
 // 从地址进来时展开地址里的那一项：#app-<名字>/settings/<项>，以前的 config、data、resources、advanced 也认（见 lib/router.ts）。
 // 行的样子在 components/expand-row.tsx（“设置 › 访问”也用它）；每一项展开后的内容在 settings-*.tsx，保存、校验、提示和原来的四个标签页一样。
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { SettingsSection } from '@/lib/router'
 import type { AppView } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -13,11 +13,13 @@ import { AccessSection, DeleteAppButton, accessSummary } from './settings-access
 import { LimitsSection, limitsSummary } from './settings-limits'
 import { DataSection, dataSummary } from './settings-data'
 import { MoreSection, moreSummary } from './settings-more'
+import { VarsRow, useAppVars } from './settings-vars'
 import type { TabProps } from './app-page'
 
 type Expandable = Exclude<SettingsSection, 'delete'>
 
-const ROWS: { key: Expandable; name: string; summary: (a: AppView) => string; Body: (p: TabProps) => ReactElement }[] = [
+// “安装设置”（vars）不在这张表里：它的现状要先读接口，单独画在“谁能打开”下面（VarsRow）。
+const ROWS: { key: Exclude<Expandable, 'vars'>; name: string; summary: (a: AppView) => string; Body: (p: TabProps) => ReactElement }[] = [
   { key: 'access', name: '谁能打开', summary: accessSummary, Body: AccessSection },
   { key: 'limits', name: '资源上限', summary: limitsSummary, Body: LimitsSection },
   { key: 'data', name: '数据', summary: dataSummary, Body: DataSection },
@@ -28,22 +30,35 @@ export function SettingsTab({ section, ...props }: TabProps & { section?: Settin
   const a = props.app
   const [open, setOpen] = useState<Expandable | ''>(section && section !== 'delete' ? section : '')
   const rowRefs = useRef<Partial<Record<SettingsSection, HTMLDivElement | null>>>({})
+  const vars = useAppVars(a)
   // 地址里换了一项（例如从别处跳过来）：展开那一项并滚到它
   useEffect(() => {
     if (!section) return
     if (section !== 'delete') setOpen(section)
     window.setTimeout(() => rowRefs.current[section]?.scrollIntoView?.({ block: 'nearest' }), 50)
   }, [section])
+  // “安装设置”这一行要等接口回来才画出来：从地址直接进来时，画出来以后再滚到它
+  const varsShown = !!vars.vars
+  useEffect(() => {
+    if (section === 'vars' && varsShown) rowRefs.current.vars?.scrollIntoView?.({ block: 'nearest' })
+  }, [section, varsShown])
   return (
     <Card className="overflow-hidden" data-testid="app-settings">
       {ROWS.map(({ key, name, summary, Body }, i) => {
         const on = open === key
         return (
-          <div key={key} ref={(el) => { rowRefs.current[key] = el }} data-section={key} className={cn(i > 0 && 'border-t')}>
-            <ExpandRow id={'set-' + key} name={name} summary={summary(a)} summaryTestId={'summary-' + key} open={on} onToggle={() => setOpen(on ? '' : key)}>
-              <Body {...props} />
-            </ExpandRow>
-          </div>
+          <Fragment key={key}>
+            <div ref={(el) => { rowRefs.current[key] = el }} data-section={key} className={cn(i > 0 && 'border-t')}>
+              <ExpandRow id={'set-' + key} name={name} summary={summary(a)} summaryTestId={'summary-' + key} open={on} onToggle={() => setOpen(on ? '' : key)}>
+                <Body {...props} />
+              </ExpandRow>
+            </div>
+            {key === 'access' && (vars.vars || vars.error) && (
+              <div ref={(el) => { rowRefs.current.vars = el }} data-section="vars" className="border-t">
+                <VarsRow app={a.name} vars={vars.vars} error={vars.error} open={open === 'vars'} onToggle={() => setOpen(open === 'vars' ? '' : 'vars')} />
+              </div>
+            )}
+          </Fragment>
         )
       })}
       <div ref={(el) => { rowRefs.current.delete = el }} data-section="delete" className="flex items-center gap-3 border-t px-4 py-2.5">

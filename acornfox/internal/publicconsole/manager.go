@@ -243,6 +243,37 @@ func (m *Manager) VerifyHere(ctx context.Context, domain string) (VerifyInfo, Di
 	return info, ProbeHTTP(ctx, m.cfg.Getter, info.Domain, info.Path, info.Token), nil
 }
 
+// httpsCheckTimeout bounds one CheckHTTPS probe: the console page asks every
+// few seconds while a certificate is being issued.
+const httpsCheckTimeout = 5 * time.Second
+
+// certWaitLimit is how long after opening a certificate may still be "on its
+// way"; later a missing certificate is reported as failed (same wait as the
+// command line).
+const certWaitLimit = 3 * time.Minute
+
+// CheckHTTPS tells whether https://<domain> of the public console answers
+// with a valid certificate yet, checked from this server itself. Right after
+// opening the entry proxy is still getting the certificate (cert_pending,
+// usually a minute or two); when that lasts longer than certWaitLimit it is
+// cert_failed. On a host that cannot connect to its own public address the
+// verdict is a port or timeout code, not a certificate one: callers must
+// treat anything but ok, cert_pending and cert_failed as "cannot tell from
+// here". The zero Diagnosis means the public console is off.
+func (m *Manager) CheckHTTPS(ctx context.Context) Diagnosis {
+	st, err := m.Status(ctx)
+	if err != nil || !st.Enabled || st.Domain == "" {
+		return Diagnosis{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, httpsCheckTimeout)
+	defer cancel()
+	d := ProbeHTTPS(ctx, m.cfg.Getter, st.Domain)
+	if d.Code == CodeCertPending && st.EnabledAt != nil && m.cfg.Now().Sub(*st.EnabledAt) > certWaitLimit {
+		return CertFailedDiagnosis(st.Domain)
+	}
+	return d
+}
+
 // expire clears the challenge of verification id if it is still pending.
 func (m *Manager) expire(id string) {
 	m.mu.Lock()

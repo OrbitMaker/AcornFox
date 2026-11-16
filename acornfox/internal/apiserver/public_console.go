@@ -72,6 +72,18 @@ type publicConsoleView struct {
 	// SuggestedDomain is console.<platform domain>, "" without one.
 	SuggestedDomain string           `json:"suggested_domain"`
 	Unsupported     *unsupportedView `json:"unsupported,omitempty"`
+	// HTTPS is only there with ?check=https while it is on: whether the
+	// address answers with a valid certificate yet, checked from this server.
+	// code ok: ready to open; cert_pending: the certificate is being issued
+	// (a minute or two after opening); cert_failed: still none after the
+	// wait; any other code: this server could not tell.
+	HTTPS *publicconsole.Diagnosis `json:"https,omitempty"`
+}
+
+// publicConsoleHTTPSChecker is the optional certificate check behind
+// GET /v1/public-console?check=https; *publicconsole.Manager implements it.
+type publicConsoleHTTPSChecker interface {
+	CheckHTTPS(ctx context.Context) publicconsole.Diagnosis
 }
 
 type unsupportedView struct {
@@ -176,7 +188,10 @@ func (s *server) writePublicConsoleError(w http.ResponseWriter, err error) {
 }
 
 // publicConsoleStatus implements GET /v1/public-console (trusted and console
-// entries): the state, and what this login may do on the page.
+// entries): the state, and what this login may do on the page. With
+// ?check=https it also checks, from this server, whether the certificate of
+// the address is ready (the page asks this after opening, so that it does not
+// send people to an address that still fails with a certificate error).
 func (s *server) publicConsoleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.publicConsoleUnavailable(w) {
 		return
@@ -188,14 +203,22 @@ func (s *server) publicConsoleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind, entry := consoleEntry(ctx)
-	writeJSON(w, http.StatusOK, publicConsoleView{
+	view := publicConsoleView{
 		Status:          st,
 		Entry:           kind,
 		CanToggle:       true,
 		NeedsPassword:   entry != nil,
 		SuggestedDomain: s.suggestedConsoleDomain(ctx),
 		Unsupported:     s.publicConsoleUnsupported(),
-	})
+	}
+	if st.Enabled && r.URL.Query().Get("check") == "https" {
+		if c, ok := s.publicConsole.(publicConsoleHTTPSChecker); ok {
+			if d := c.CheckHTTPS(ctx); d.Code != "" {
+				view.HTTPS = &d
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // consolePublicConsoleEnable implements POST /v1/public-console/enable on

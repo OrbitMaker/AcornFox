@@ -1,29 +1,32 @@
-// 设置里的“服务”分区：这台机器上能给应用用的服务（装好的应用提供的，或自己登记的），谁在用、能不能用。
-// 点开一条看各项的值（保密项只显示后 4 位，页面上没有显示明文）；要在应用里做一步的项显示那句提示和“填这一项”；
-// 按每个使用它的应用单独发的项（issued_per_consumer）单独列出，不算“没填”。
+// 设置里的“服务”分区：这台机器上能给应用用的服务（装好的应用提供的，或自己登记的），一行一项，点开才展开，同一时间只展开一项。
+// 一行：左边是服务类型的中文名，中间一句“应用名 提供 · 谁在用”或“你登记的“名字” · 谁在用”；能用是绿点，
+// 别的状态按 serviceStatus 的结论给颜色，并把状态那几个字放在这句话最前面。
+// 点开看各项的值（保密项只显示后 4 位，页面上没有显示明文）；要在应用里做一步的项显示那句提示和“填这一项”；
+// 按每个使用它的应用单独发的项（issued_per_consumer）单独列出，不算“没填”；有名额限制时写还能接几个。
 // “试一下”：通了、没通（带故障编号）、试不了（skipped，不是没通）三种，连的是哪（target）也写出来。
 // 存的值解不开的服务（列表接口的 unreadable）不在列表里，列表上方提示是哪几条。
 // 谁在用：已删、数据还留着的应用（used_by 里 gone 为 true）写成“名字（已删除，数据还留着）”，不算在用，不拦删除。
 // 删除成功时服务端可能带 notes（例如哪些已删的应用以后装回来要重新接服务）：在列表上方原样列出，关掉或再删一条没有说明的服务时消失。
 // 应用提供的服务只在提供它的应用已删时能在这里删。服务类型或项没有中文名时说“未命名”，原名用小字带上。
 // 页面上的说明不举具体的服务类型：例子取自目录里定义的服务类型。
+// 列表最后固定一行“平台自动填的”：平台按这台机器替应用填好的几项（时区、下载源等）和现在的值；每个应用各算各的不列。
 // 接口：GET /v1/services、GET /v1/services/kinds、POST /v1/services、PATCH /v1/services/{name}、
-//       POST /v1/services/{name}/test、DELETE /v1/services/{name}（有应用在用时被拒绝，列出是哪些应用）。
-// 旧版本服务端没有这些接口：显示“这个版本的服务端还没有这项功能”。
+//       POST /v1/services/{name}/test、DELETE /v1/services/{name}（有应用在用时被拒绝，列出是哪些应用）、
+//       GET /v1/catalog/platform-vars（“平台自动填的”）。
+// 旧版本服务端没有服务接口：显示“这个版本的服务端还没有这项功能”；没有 platform-vars 接口（404）时不显示“平台自动填的”。
 import * as React from 'react'
-import { AlertTriangle, ChevronDown, CircleCheck, CircleMinus, CircleX, Plus, X } from 'lucide-react'
+import { AlertTriangle, CircleCheck, CircleMinus, CircleX, Plus, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ApiError } from '@/lib/api'
 import { usePoll } from '@/lib/hooks'
 import {
-  TONE_BADGE, canRemove, checkFieldValue, deleteService, editPlaceholder, fieldControl, fieldOptions, issuedItems, itemLabel, listServices, patchService, refusedBy, removeConfirmText,
-  serviceStatus, shownValues, slotsText, sourceText, testService, testText, usedByText, waitingAsk,
+  canRemove, checkFieldValue, deleteService, editPlaceholder, fieldControl, fieldOptions, issuedItems, itemLabel, listPlatformVars, listServices, patchService,
+  platformLabel, platformShown, platformSummary, providerText, refusedBy, removeConfirmText, serviceStatus, shownValues, slotsText, testService, testText, usedByText, usersText,
 } from '@/lib/services'
-import type { ServiceField, ServiceKind, ServiceTestResult, ServiceValue, ServiceView } from '@/lib/types'
-import { Badge } from '@/components/ui/badge'
+import type { PlatformVarView, ServiceField, ServiceKind, ServiceTestResult, ServiceValue, ServiceView } from '@/lib/types'
+import { ExpandRow, type RowTone } from '@/components/expand-row'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/controls'
-import { CopyLine } from '@/components/ui/copy'
 import { useToast } from '@/components/ui/toast'
 import { ApiErrorBox, FieldInput, ItemName, KindName, NOT_SUPPORTED, RegisterServiceDialog, useKinds } from './service-form'
 
@@ -33,12 +36,19 @@ function kindExamples(kinds: ServiceKind[] | null | undefined): string {
   return names.length ? '（例如' + names.join('、') + '）' : ''
 }
 
+const PLATFORM_ROW = 'platform'
+const rowKey = (name: string) => 'svc:' + name
+const domId = (name: string) => name.replace(/[^A-Za-z0-9_-]/g, '-')
+
 export function Services() {
   const toast = useToast()
   const list = usePoll((s) => listServices(s), 0)
+  const pv = usePoll((s) => listPlatformVars(s), 0)
   const kinds = useKinds()
   const [adding, setAdding] = React.useState(false)
   const [removed, setRemoved] = React.useState<{ name: string; notes: string[] } | null>(null)
+  const [open, setOpen] = React.useState('')
+  const toggle = (k: string) => setOpen((o) => (o === k ? '' : k))
   const unsupported = !list.loading && !list.error && list.data === null
   const items = list.data?.services
   const unreadable = list.data?.unreadable || []
@@ -47,7 +57,7 @@ export function Services() {
       <div className="flex flex-wrap items-center justify-between gap-3 py-2.5">
         <div className="min-w-0">
           <div className="text-sm">这台机器上的服务</div>
-          <div className="text-2xs text-muted-foreground" data-testid="services-intro">装好的应用能给别的应用用的东西，以及你自己已有的{kindExamples(kinds.data)}。装应用时，需要哪种服务就自动接上这里的。</div>
+          <div className="text-2xs text-muted-foreground" data-testid="services-intro">应用之间互相借用的东西。装应用时需要哪种，自动接上。</div>
         </div>
         {!unsupported && <Button size="sm" variant="outline" onClick={() => setAdding(true)} disabled={list.loading && !list.data}><Plus className="size-3.5" />登记一条</Button>}
       </div>
@@ -73,45 +83,71 @@ export function Services() {
           <Button size="icon-sm" variant="ghost" className="shrink-0" onClick={() => setRemoved(null)} aria-label="知道了" title="知道了"><X className="size-3.5" /></Button>
         </div>
       )}
-      {items && items.length === 0 && unreadable.length === 0 && <div className="py-2.5 text-xs text-muted-foreground" data-testid="services-empty">还没有服务。装好能提供服务的应用后会自动出现在这里，也可以自己登记一条。</div>}
-      {items && items.length > 0 && (
-        <ul className="flex flex-col gap-2 py-2.5" data-testid="services">
-          {items.map((s) => (
-            <ServiceItem key={s.name} s={s} kind={kinds.data?.find((k) => k.kind === s.kind)} kindsKnown={!!kinds.data} onChanged={list.refresh}
-              onRemoved={(notes) => setRemoved(notes.length ? { name: s.name, notes } : null)} />
-          ))}
-        </ul>
+      {items && items.length === 0 && unreadable.length === 0 && (
+        <div className="py-3 text-xs text-muted-foreground" data-testid="services-empty">
+          还没有。装一个能提供服务的应用，它的服务会自己出现在这里；你手里已有的{kindExamples(kinds.data)}也可以登记进来。
+        </div>
       )}
-      {list.data && <CopyLine className="mb-2.5" text="acornfox services list" />}
+      {(items || []).map((s) => (
+        <ServiceRow key={s.name} s={s} kind={kinds.data?.find((k) => k.kind === s.kind)} kindsKnown={!!kinds.data}
+          open={open === rowKey(s.name)} onToggle={() => toggle(rowKey(s.name))} onChanged={list.refresh}
+          onRemoved={(notes) => setRemoved(notes.length ? { name: s.name, notes } : null)} />
+      ))}
+      {pv.data && <PlatformRow vars={pv.data} open={open === PLATFORM_ROW} onToggle={() => toggle(PLATFORM_ROW)} />}
+      {pv.error && !pv.data && (
+        <div className="-mx-4" data-testid="platform-auto">
+          <ExpandRow id="svc-platform" wide name="平台自动填的" tone="danger" summary="读不出来" summaryTestId="platform-auto-summary" open={open === PLATFORM_ROW} onToggle={() => toggle(PLATFORM_ROW)}>
+            <ApiErrorBox err={pv.error} />
+          </ExpandRow>
+        </div>
+      )}
       <RegisterServiceDialog open={adding} onClose={() => setAdding(false)} onAdded={(s) => { setAdding(false); toast('已登记', s.name); list.refresh() }} />
     </>
   )
 }
 
-function ServiceItem({ s, kind, kindsKnown, onChanged, onRemoved }: { s: ServiceView; kind?: ServiceKind; kindsKnown: boolean; onChanged: () => Promise<void>; onRemoved: (notes: string[]) => void }) {
-  const [open, setOpen] = React.useState(false)
-  const st = serviceStatus(s)
-  const asks = waitingAsk(s)
-  const slots = slotsText(s)
-  const bodyId = 'svc-body-' + s.name.replace(/[^A-Za-z0-9_-]/g, '-')
+// KV：展开后的一项：左边名字，右边值。
+function KV({ k, children, mono, className, testId }: { k: React.ReactNode; children: React.ReactNode; mono?: boolean; className?: string; testId?: string }) {
   return (
-    <li className="rounded-md border" data-testid="service" data-name={s.name}>
-      <button type="button" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((x) => !x)}
-        className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-1.5">
-            <span className="truncate text-sm font-medium">{s.name}</span>
-            <Badge variant="outline"><KindName label={s.kind_label || kind?.label} kind={s.kind} /></Badge>
-            <Badge variant={TONE_BADGE[st.tone]} data-testid="service-status" title={st.detail}>{st.text}</Badge>
-          </span>
-          <span className="block truncate text-2xs text-muted-foreground">{sourceText(s)} · {usedByText(s)}{slots.text ? ' · ' + slots.text : ''}</span>
-        </span>
-        <ChevronDown className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
-      </button>
-      {!open && s.status === 'not_ready' && s.ready_say && <p className="border-t px-3 py-1.5 text-2xs text-warning" data-testid="service-ready-say">还不能用：{s.ready_say}</p>}
-      {!open && s.status !== 'not_ready' && asks.length > 0 && <p className="border-t px-3 py-1.5 text-2xs text-warning">{asks[0].ask}</p>}
-      {open && <div id={bodyId}><ServiceBody s={s} kind={kind} kindsKnown={kindsKnown} onChanged={onChanged} onRemoved={onRemoved} /></div>}
-    </li>
+    <div className={cn('flex items-baseline gap-3 py-1', className)} data-testid={testId}>
+      <dt className="w-24 shrink-0 text-muted-foreground">{k}</dt>
+      <dd className={cn('min-w-0 flex-1 break-all', mono && 'mono')}>{children}</dd>
+    </div>
+  )
+}
+
+// PlatformRow：最后固定的一行“平台自动填的”。
+function PlatformRow({ vars, open, onToggle }: { vars: PlatformVarView[]; open: boolean; onToggle: () => void }) {
+  const shown = platformShown(vars)
+  return (
+    <div className="-mx-4" data-testid="platform-auto">
+      <ExpandRow id="svc-platform" wide name="平台自动填的" summary={platformSummary(shown.length)} summaryTestId="platform-auto-summary" open={open} onToggle={onToggle}>
+        {shown.length > 0 && (
+          <dl className="flex flex-col text-xs" data-testid="platform-auto-values">
+            {shown.map((v) => <KV key={v.name} k={platformLabel(v)} mono>{v.value}</KV>)}
+          </dl>
+        )}
+        <p className="mt-1.5 text-2xs text-muted-foreground">想给某个应用用别的值，装它的时候可以改。</p>
+      </ExpandRow>
+    </div>
+  )
+}
+
+function ServiceRow({ s, kind, kindsKnown, open, onToggle, onChanged, onRemoved }: {
+  s: ServiceView; kind?: ServiceKind; kindsKnown: boolean; open: boolean; onToggle: () => void; onChanged: () => Promise<void>; onRemoved: (notes: string[]) => void
+}) {
+  const st = serviceStatus(s)
+  const ok = s.status === 'ok'
+  const tone: RowTone = ok ? 'success' : st.tone === 'muted' ? '' : st.tone
+  return (
+    <div className="-mx-4" data-testid="service" data-name={s.name}>
+      <ExpandRow id={'svc-body-' + domId(s.name)} wide tone={tone} open={open} onToggle={onToggle}
+        name={<KindName label={s.kind_label || kind?.label} kind={s.kind} />}
+        summaryTestId="service-summary"
+        summary={<>{!ok && <><span data-testid="service-status" title={st.detail}>{st.text}</span>{' · '}</>}{providerText(s)} · {usedByText(s)}</>}>
+        <ServiceBody s={s} kind={kind} kindsKnown={kindsKnown} onChanged={onChanged} onRemoved={onRemoved} />
+      </ExpandRow>
+    </div>
   )
 }
 
@@ -135,6 +171,7 @@ function ServiceBody({ s, kind, kindsKnown, onChanged, onRemoved }: { s: Service
   const values = shownValues(s)
   const issued = issuedItems(s).map((k) => ({ key: k, label: kind?.fields.find((f) => f.key === k)?.label }))
   const result = tested ? testText(tested) : null
+  const slots = slotsText(s)
 
   const runTest = async () => {
     setTesting(true)
@@ -166,9 +203,8 @@ function ServiceBody({ s, kind, kindsKnown, onChanged, onRemoved }: { s: Service
       setDeleting(false)
     }
   }
-  const slots = slotsText(s)
   return (
-    <div className="flex flex-col gap-2.5 border-t px-3 py-2.5">
+    <div className="flex flex-col gap-2">
       {s.status === 'not_ready' && (
         <div className="text-xs text-warning" data-testid="service-not-ready">
           <p>还不能用：{s.ready_say || '提供它的应用的就绪检查没通过'}</p>
@@ -176,10 +212,9 @@ function ServiceBody({ s, kind, kindsKnown, onChanged, onRemoved }: { s: Service
           <p className="mt-0.5 text-2xs text-muted-foreground">不挡安装：别的应用照样能接上它，用到它的功能要等它好了才能用。</p>
         </div>
       )}
-      <p className={cn('text-2xs', slots.full ? 'text-warning' : 'text-muted-foreground')} data-testid="service-slots">能不能再接：{slots.text || '能，不限个数'}</p>
-      <dl className="flex flex-col divide-y text-xs" data-testid="service-values">
+      <dl className="flex flex-col text-xs" data-testid="service-values">
         {values.map((v) => (
-          <div key={v.key} className="py-1.5">
+          <div key={v.key} className="py-1">
             <div className="flex items-center gap-3">
               <dt className="w-24 shrink-0 text-muted-foreground"><ItemName label={v.label} item={v.key} /></dt>
               <dd className={cn('min-w-0 flex-1 break-all', v.set ? 'mono' : 'text-muted-foreground')}>{v.set ? v.value : '没填'}</dd>
@@ -196,14 +231,17 @@ function ServiceBody({ s, kind, kindsKnown, onChanged, onRemoved }: { s: Service
           </div>
         ))}
         {issued.length > 0 && (
-          <div className="py-1.5" data-testid="service-issued">
-            <div className="flex items-center gap-3">
-              <dt className="w-24 shrink-0 text-muted-foreground">{issued.map((x, i) => <React.Fragment key={x.key}>{i > 0 && '、'}<ItemName label={x.label} item={x.key} /></React.Fragment>)}</dt>
-              <dd className="min-w-0 flex-1 text-muted-foreground">这几项按每个使用它的应用单独发，不在这里填</dd>
-            </div>
+          <div className="flex items-baseline gap-3 py-1" data-testid="service-issued">
+            <dt className="w-24 shrink-0 text-muted-foreground">{issued.map((x, i) => <React.Fragment key={x.key}>{i > 0 && '、'}<ItemName label={x.label} item={x.key} /></React.Fragment>)}</dt>
+            <dd className="min-w-0 flex-1 text-muted-foreground">这几项按每个使用它的应用单独发，不在这里填</dd>
           </div>
         )}
-        {values.length === 0 && issued.length === 0 && <div className="py-1.5 text-muted-foreground">没有可显示的项</div>}
+        {values.length === 0 && issued.length === 0 && <div className="py-1 text-muted-foreground">没有可显示的项</div>}
+      </dl>
+      <dl className="flex flex-col text-xs">
+        {s.source === 'app' && s.name !== s.app && <KV k="名字" testId="service-name">{s.name}</KV>}
+        <KV k="谁在用" testId="service-users">{usersText(s)}</KV>
+        {slots.text && <KV k="还能不能接" testId="service-slots" className={slots.full ? 'text-warning' : ''}>{slots.text}</KV>}
       </dl>
       {notes.length > 0 && <ul className="flex flex-col gap-0.5 text-2xs text-muted-foreground" data-testid="service-notes">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul>}
       {result && (
@@ -223,7 +261,7 @@ function ServiceBody({ s, kind, kindsKnown, onChanged, onRemoved }: { s: Service
           )}
         </ApiErrorBox>
       )}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 pt-0.5">
         {canTest && <Button size="sm" variant="outline" onClick={runTest} disabled={testing}>{testing && <Spinner />}试一下</Button>}
         {!canRemove(s) ? (
           <span className="text-2xs text-muted-foreground">这条由应用 {s.app} 提供，删掉那个应用它才会消失</span>

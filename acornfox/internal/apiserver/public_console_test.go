@@ -17,6 +17,16 @@ type fakePublicConsole struct {
 	disabled bool
 	here     publicconsole.Diagnosis // what VerifyHere finds; zero => ok
 	password string                  // the new password Enable makes; "" => "pw"
+	https    publicconsole.Diagnosis // what CheckHTTPS finds while enabled
+	checks   int                     // CheckHTTPS calls
+}
+
+func (f *fakePublicConsole) CheckHTTPS(context.Context) publicconsole.Diagnosis {
+	f.checks++
+	if !f.enabled {
+		return publicconsole.Diagnosis{}
+	}
+	return f.https
 }
 
 func (f *fakePublicConsole) Status(context.Context) (publicconsole.Status, error) {
@@ -101,6 +111,20 @@ func TestPublicConsoleEndpoints(t *testing.T) {
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"enabled":true`) {
 		t.Fatalf("status = %d %s", rr.Code, rr.Body.String())
 	}
+	// The certificate check only runs when asked for.
+	if strings.Contains(rr.Body.String(), `"https"`) || pc.checks != 0 {
+		t.Fatalf("plain status must not check the certificate: %d checks, %s", pc.checks, rr.Body.String())
+	}
+	pc.https = publicconsole.Diagnosis{Code: publicconsole.CodeCertPending, Message: "证书还没有就绪", Hint: "通常一两分钟"}
+	rr = doJSON(t, h, http.MethodGet, "/v1/public-console?check=https", "")
+	if rr.Code != 200 || pc.checks != 1 || !strings.Contains(rr.Body.String(), `"https":{"code":"cert_pending"`) || !strings.Contains(rr.Body.String(), `"enabled":true`) {
+		t.Fatalf("status with check = %d (%d checks) %s", rr.Code, pc.checks, rr.Body.String())
+	}
+	pc.https = publicconsole.Diagnosis{Code: publicconsole.CodeOK}
+	rr = doJSON(t, h, http.MethodGet, "/v1/public-console?check=https", "")
+	if !strings.Contains(rr.Body.String(), `"https":{"code":"ok"`) {
+		t.Fatalf("status with check, ready = %s", rr.Body.String())
+	}
 
 	// An app cannot take the public console's domain.
 	if _, _, err := store.EnsureApp(context.Background(), "web"); err != nil {
@@ -114,6 +138,11 @@ func TestPublicConsoleEndpoints(t *testing.T) {
 	rr = doJSON(t, h, http.MethodDelete, "/v1/public-console", "")
 	if rr.Code != 200 || !pc.disabled || !strings.Contains(rr.Body.String(), `"was_enabled":true`) {
 		t.Fatalf("disable = %d %s", rr.Code, rr.Body.String())
+	}
+	n := pc.checks
+	rr = doJSON(t, h, http.MethodGet, "/v1/public-console?check=https", "")
+	if rr.Code != 200 || strings.Contains(rr.Body.String(), `"https"`) || pc.checks != n {
+		t.Fatalf("closed: no certificate check, got %d (%d -> %d checks) %s", rr.Code, n, pc.checks, rr.Body.String())
 	}
 }
 

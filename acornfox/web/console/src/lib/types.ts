@@ -172,12 +172,16 @@ export interface FaultDef { code: string; title: string; causes: string[]; next:
 export interface LANConsoleStatus { enabled: boolean; url?: string; port: number; password_set?: boolean; password_set_at?: string; password_set_from?: string; generated_password?: boolean; devices?: number }
 // GET /v1/lan-console/devices：登录时勾了“记住这台设备 90 天”的浏览器。
 export interface LANDevice { id: string; name: string; created_at: string; last_used_at: string; last_ip?: string; expires_at: string }
-// GET /v1/public-console。can_toggle、needs_password、suggested_domain、unsupported 是能在页面上开关以后才有的
+// GET /v1/public-console[?check=https]。can_toggle、needs_password、suggested_domain、unsupported 是能在页面上开关以后才有的
 // （旧服务端没有：页面只给服务器上的命令）。suggested_domain：有平台域名时是 console.<平台域名>。
 export interface PublicConsoleStatus {
   enabled: boolean; domain?: string; url?: string; enabled_at?: string; verifying?: string
   can_toggle?: boolean; needs_password?: boolean; suggested_domain?: string; unsupported?: CodeText
+  // 只在带 ?check=https 问、而且开着时才有：地址的证书好了没有（服务器自己查的）。
+  // code：ok 可以打开；cert_pending 正在申请；cert_failed 等了几分钟还没签下来；别的是这台服务器确认不了。
+  https?: HTTPSCheck
 }
+export interface HTTPSCheck { code: string; message?: string; hint?: string }
 // POST /v1/public-console/enable 的应答：新密码只在这一次给（password；也认 password_once）。
 export interface PublicConsoleEnableResult { domain?: string; url?: string; password?: string; password_once?: string; already_enabled?: boolean }
 
@@ -504,3 +508,9 @@ export interface InstallPlan {
 
 // GET /v1/apps/{app} 的 services：这个应用用了哪些服务。没接上时 service 为空（status 是 not_connected）。
 export interface AppServiceUse { use: string; kind: string; kind_label?: string; required?: boolean; service?: string; status: string; status_label?: string }
+
+// ---- 设置 › 服务里的“平台自动填的”一行 ----
+
+// GET /v1/catalog/platform-vars：平台按这台机器自动填给应用的那几项和现在的值（每一项的形状同 PlatformVarView）。
+// 服务端没启用应用中心或是旧版本时回 404。
+export interface PlatformVarList { vars?: PlatformVarView[] | null }

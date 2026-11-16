@@ -1228,14 +1228,14 @@ acornfox remove postgres --json [--volumes]
    | 列 | 意思 |
    | --- | --- |
    | `name` | `params.名字` 是这个应用自己的参数；`platform.名字` 是平台按这台机器给的（`platform.tz` 时区、`platform.app.url` 访问地址、`platform.app.scheme` 访问方式 http 或 https、`platform.app.host` 地址里的主机、`platform.mirror.pypi` 和 `platform.mirror.npm` 下载源、`platform.region` 网络区域） |
-   | `layer` | 哪一层：`custom` 自定义变量（应用自己的），`system` 系统变量（平台给的） |
+   | `layer` | 哪一层：`custom` 自定义变量（应用自己的），`system` 平台变量（平台给的） |
    | `class` | 类别：`system` 系统给、`generated` 平台生成、`default` 有默认值、`optional` 可选、`user_required` 必须用户填。空表示清单没存，分不出 |
    | `value` | 安装时保存的值。`masked: true` 表示被遮住了 |
    | `secret` | 是不是密码、密钥、Key 这一类 |
    | `origin` | 值从哪来：`user` 用户填的、`recipe` 配方预填的、`default` 清单默认值、`generated` 平台生成的、`platform` 平台算的、`platform_user` 用户安装时用 `--set platform.名字=值` 改的、`restored` 接上旧数据时恢复的、`install_time` 装时的值（旧版本装的，那时不记是谁给的）、`unset` 没填、`old_data` 沿用旧数据里的（平台不知道，`value` 是空） |
    | `editable` | 清单写的能不能改：`never` 不能改、`always` 随时能改、`reinstall` 重装才能改、`install_only` 只能在安装时用 `--set platform.名字=值` 改；空是清单没写或没存。**这只是清单的说法，现在哪一种都还改不了**（见下面） |
-   | `used` | 只有系统变量有：这个应用用没用到它。`false` 表示这个值对这个应用不起作用 |
-| `value_now` | 只有系统变量有（v0.6.0 起）：按现在的对外方式、域名和这台机器的设置算出来的值。`value` 是装时算好、应用现在用的 |
+   | `used` | 只有平台变量有：这个应用用没用到它。`false` 表示这个值对这个应用不起作用 |
+| `value_now` | 只有平台变量有（v0.6.0 起）：按现在的对外方式、域名和这台机器的设置算出来的值。`value` 是装时算好、应用现在用的 |
 | `differs`、`code`、`fix` | `differs` 是 `true`、`code` 是 `APP-VARS-01`：装时的值和现在的不一样，应用里用的还是装时的（多半是装完改了对外方式或绑了域名）；`fix` 是怎么办 |
 
    它需要的服务接了哪条、现在能不能用，不在这张表里：看 `acornfox --json status 应用名` 的 `services`（见“状态与诊断”）。

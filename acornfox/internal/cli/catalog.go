@@ -153,7 +153,7 @@ const catalogLintUsage = `用法：acornfox catalog lint 目录
 const catalogVarsUsage = `用法：acornfox catalog vars 目录 [--app 应用编号]
 
 用途：应用上架前检查用的变量报告，让看清单的人知道这个应用装的时候要不要用户动手、要接上什么、能给别的应用什么。
-  目录是应用目录仓库的根目录（含 apps/）。每份清单一份报告，先是变量表：它引用的每个系统变量、声明的每个参数各一行，
+  目录是应用目录仓库的根目录（含 apps/）。每份清单一份报告，先是变量表：它引用的每个平台变量、声明的每个参数各一行，
   归五类之一：
     系统给 system            引用的是平台变量（platform.名字）或需要的服务里的一项，平台按装在哪台机器自动填
     平台生成 generated       参数带 generate，由平台生成（密码、密钥）

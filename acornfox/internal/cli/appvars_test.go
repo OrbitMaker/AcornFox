@@ -27,8 +27,8 @@ const varsAnswer = `{"app":"new-api","from_catalog":true,"catalog_id":"new-api",
 "manifest":{"saved":true,"source":"backfill","source_label":"补存的（装的时候还不存清单，后来从本机的目录里找到的）","sha256":"ab"},
 "revealed":false,"can_change":false,"vars":[
 {"name":"params.admin_password","layer":"custom","layer_label":"自定义变量","class":"generated","class_label":"平台生成","label":"管理员密码","value":"******4567","secret":true,"masked":true,"origin":"install_time","origin_label":"装时的值（那时还不记是谁给的）","editable":"never","editable_label":"不能改"},
-{"name":"platform.region","layer":"system","layer_label":"系统变量","class":"system","class_label":"系统给","label":"网络区域（cn 或 global）","value":"cn","secret":false,"masked":false,"origin":"platform","origin_label":"平台算的","editable":"never","editable_label":"不能改","used":false},
-{"name":"platform.tz","layer":"system","layer_label":"系统变量","class":"system","class_label":"系统给","label":"时区","value":"Asia/Tokyo","secret":false,"masked":false,"origin":"platform_user","origin_label":"用户改的","editable":"install_only","editable_label":"只能在安装时用 --set platform.名字=值 改","used":true}],
+{"name":"platform.region","layer":"system","layer_label":"平台变量","class":"system","class_label":"系统给","label":"网络区域（cn 或 global）","value":"cn","secret":false,"masked":false,"origin":"platform","origin_label":"平台算的","editable":"never","editable_label":"不能改","used":false},
+{"name":"platform.tz","layer":"system","layer_label":"平台变量","class":"system","class_label":"系统给","label":"时区","value":"Asia/Tokyo","secret":false,"masked":false,"origin":"platform_user","origin_label":"用户改的","editable":"install_only","editable_label":"只能在安装时用 --set platform.名字=值 改","used":true}],
 "notes":["改设置的功能还没有：这里只能看，不能改。"]}`
 
 func (f *fakeVarsAPI) AppVars(_ context.Context, app string, reveal bool) (client.AppVars, error) {
@@ -85,7 +85,7 @@ func TestAppsVarsCommand(t *testing.T) {
 	if code != exitOK || f.gotApp != "new-api" || f.gotReveal {
 		t.Fatalf("exit %d stderr %s", code, errOut)
 	}
-	for _, want := range []string{"从应用中心装的 new-api v1.0.0-rc.48", "清单：补存的", "自定义变量：", "系统变量：",
+	for _, want := range []string{"从应用中心装的 new-api v1.0.0-rc.48", "清单：补存的", "自定义变量：", "平台变量：",
 		"params.admin_password（管理员密码） = ******4567", "[平台生成] 装时的值", "platform.tz（时区） = Asia/Tokyo", "用户改的",
 		"这个应用的清单没用到它", "改设置的功能还没有"} {
 		if !strings.Contains(out, want) {

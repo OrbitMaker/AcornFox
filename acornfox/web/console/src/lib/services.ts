@@ -7,7 +7,7 @@
 // 旧版本服务端没有这些接口（404 或 405）：读的函数返回 null，页面显示“这个版本的服务端还没有这项功能”。
 import { api, ApiError } from './api'
 import { quote, type InstallRequest } from './catalog'
-import type { AppServiceUse, InstallPlan, PlanApp, PlanNeed, RemovedService, ServiceField, ServiceKind, ServiceList, ServiceTestResult, ServiceUse, ServiceView } from './types'
+import type { AppServiceUse, InstallPlan, PlanApp, PlanNeed, PlatformVarList, PlatformVarView, RemovedService, ServiceField, ServiceKind, ServiceList, ServiceTestResult, ServiceUse, ServiceView } from './types'
 
 export const servicePath = (name: string, rest = '') => '/v1/services/' + encodeURIComponent(name) + rest
 
@@ -35,6 +35,12 @@ export function listServices(signal?: AbortSignal): Promise<ServiceList | null> 
       unreadable: Array.isArray(b.unreadable) ? b.unreadable.filter((x): x is string => typeof x === 'string' && x !== '') : [],
     })),
   )
+}
+
+// listPlatformVars：平台按这台机器自动填给应用的那几项（GET /v1/catalog/platform-vars）。
+// 旧服务端或没启用应用中心（404、405）返回 null，页面不显示“平台自动填的”那一行。
+export function listPlatformVars(signal?: AbortSignal): Promise<PlatformVarView[] | null> {
+  return orNull(api.get<PlatformVarList>('/v1/catalog/platform-vars', signal).then((b) => (Array.isArray(b?.vars) ? b.vars : [])))
 }
 
 export function listKinds(signal?: AbortSignal): Promise<ServiceKind[] | null> {
@@ -189,6 +195,33 @@ export function usedByText(s: ServiceView): string {
   const gone = goneUsers(s)
   const head = apps.length ? apps.join('、') + ' 在用' : gone.length ? '没有已装的应用在用' : '还没有应用在用'
   return gone.length ? head + '；' + gone.map(goneText).join('、') : head
+}
+
+// providerText：一行里“谁提供”那半句。应用提供的写“应用名 提供”；自己登记的写“你登记的“名字””。
+export function providerText(s: ServiceView): string {
+  return s.source === 'app' ? `${s.app || '（未知的应用）'} 提供` : `你登记的“${s.name}”`
+}
+
+// usersText：展开后“谁在用”那一项。已删、数据还留着的写成“名字（已删除，数据还留着）”；一个都没有时说“还没有”。
+export function usersText(s: ServiceView): string {
+  return [...usedByApps(s), ...goneUsers(s).map(goneText)].join('、') || '还没有'
+}
+
+// ---- 平台自动填的 ----
+
+// platformShown：“平台自动填的”展开后列出的项：这台机器上有值的；每个应用各算各的（名字以 app. 开头）不列。
+export function platformShown(vars: PlatformVarView[] | null | undefined): PlatformVarView[] {
+  return (vars || []).filter((v) => !!v && typeof v.name === 'string' && !v.name.startsWith('app.') && typeof v.value === 'string' && v.value.trim() !== '')
+}
+
+// platformLabel：一项的中文名，去掉括号里的补充（例如“网络区域（cn 或 global）”只写“网络区域”）。
+export function platformLabel(v: PlatformVarView): string {
+  return itemLabel((v.label || '').replace(/（[^）]*）/g, '').replace(/\([^)]*\)/g, '').trim())
+}
+
+// platformSummary：“平台自动填的”那一行收起时的一句话。
+export function platformSummary(n: number): string {
+  return n > 0 ? `时区、下载源等 ${n} 项。装应用时平台替你填好，不用管` : '这台机器上现在没有要平台替你填的项'
 }
 
 // removeConfirmText：删除前确认的那句话。有已装的应用在用：说要先把它们删掉或换掉（服务端会拒绝）；
