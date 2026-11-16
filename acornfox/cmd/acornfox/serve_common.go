@@ -70,7 +70,11 @@ type serverOptions struct {
 	EdgeAdminPort int
 
 	DefaultExposure string
-	LANHost         func() string // nil => PublicHost
+	// AppDefaultExposure is what a new app from the app center gets when the
+	// request and its manifest leave it to the machine (lan or local);
+	// "" => local. Only the Linux server sets it (appCenterExposure).
+	AppDefaultExposure string
+	LANHost            func() string // nil => PublicHost
 	// ServerLAN is a Linux server's address on the user's LAN for the open
 	// hint of local-only apps ("" on cloud servers); nil => none.
 	ServerLAN      func() string
@@ -182,6 +186,11 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		deployLogs = nil
 	}
 
+	// The platform domain: one domain for the whole machine; public apps
+	// also open at <app>.<platform domain> (platform_domain_wiring.go).
+	var recRef atomic.Pointer[reconcile.Reconciler]
+	platformDomain := newPlatformDomain(o, recRef.Load)
+
 	rec := reconcile.New(reconcile.Config{
 		Store:           st,
 		DeployLogs:      deployLogs,
@@ -194,7 +203,9 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		HTTPSCAFile:     o.HTTPSCAFile,
 		Edge:            edgeCfg,
 		DefaultExposure: o.DefaultExposure,
+		PlatformDomain:  func(context.Context) string { return platformDomain.Base() },
 	})
+	recRef.Store(rec)
 
 	lanHost := o.LANHost
 	if lanHost == nil {
@@ -214,6 +225,7 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		Version:         cli.Version,
 		Sources:         func() apiserver.DownloadSources { return downloadSources(o.DataDir) },
 		ServerLAN:       o.ServerLAN,
+		PlatformDomain:  platformDomain,
 	}
 	// The home dashboard's host history samples with its own provider (the
 	// /proc one computes CPU from its previous call).
@@ -242,7 +254,7 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	// The apps' addresses are worked out from the same options in the
 	// app center (app.url) and in the API's views (one provider for both).
 	appCenter := newAppCenter(st, o.DataDir, uploadDir, runnerAPI,
-		platformvar.Host{PublicHost: o.PublicHost, Desktop: o.LANHost != nil, HTTPSPort: o.HTTPS.HTTPSPort})
+		platformvar.Host{PublicHost: o.PublicHost, Desktop: o.LANHost != nil, HTTPSPort: o.HTTPS.HTTPSPort}, o.AppDefaultExposure)
 	defer appCenter.Close()
 	apiCfg.AppCenter = appCenter
 	apiCfg.PlatformVars = appCenter.PlatformVarProvider()
@@ -287,6 +299,9 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 			},
 		})
 		apiCfg.PublicConsole = pcManager
+		// The page suggests console.<platform domain> for the public
+		// console; with no platform domain set, no address is suggested.
+		apiCfg.PublicConsoleBase = func(context.Context) string { return platformDomain.Base() }
 	}
 
 	var lanRef atomic.Pointer[publicconsole.LANManager]

@@ -4,8 +4,11 @@ package appinstall
 // `install … --expose local|lan|public`, POST /v1/catalog/install
 // "expose").
 //
-// Without it an app gets its manifest's exposure.default (local when the
-// manifest says nothing), as before. With it the app is created with that
+// Without it an app gets what this machine gives new apps (Config.
+// DefaultExposure: lan on a LAN server installed fresh, local otherwise)
+// when its manifest says local or nothing, the catalog's standard; a
+// manifest that says internal, lan or public keeps it (manifestExposure).
+// With it the app is created with that
 // exposure instead, so the platform variables about its address (app.url,
 // app.scheme, app.host) are right from the start: changing it afterwards
 // (`acornfox app set --expose`) does not rewrite them in this version.
@@ -21,8 +24,29 @@ package appinstall
 // anything is created. Side effects: none here; create applies it.
 
 import (
+	"github.com/acornfox/acornfox/internal/catalog"
 	"github.com/acornfox/acornfox/internal/state"
 )
+
+// manifestExposure is the exposure an app of manifest m gets when the
+// request does not choose one: the manifest's own when it is internal, lan
+// or public; otherwise (local or nothing, the catalog's standard) what this
+// machine gives new apps, Config.DefaultExposure, or local when that is
+// unset. An app installed already keeps the exposure it has.
+func (e *Engine) manifestExposure(m *catalog.Manifest) string {
+	if m != nil {
+		switch d := m.Exposure.Default; d {
+		case "", catalog.DefaultExposure:
+		default:
+			return d
+		}
+	}
+	switch e.cfg.DefaultExposure {
+	case state.ExposureLAN, state.ExposureLocal:
+		return e.cfg.DefaultExposure
+	}
+	return catalog.DefaultExposure
+}
 
 // checkExpose validates the request's exposure and marks each app of plan
 // that gets it. "" changes nothing.

@@ -401,7 +401,8 @@ func TestStatusReportsVersion(t *testing.T) {
 }
 
 // The console entry shows whether the console is open on the LAN or the
-// internet, but opening or closing stays on the trusted entry.
+// internet. Opening or closing the LAN console stays on the trusted entry;
+// the public console has its own guarded handlers (public_console_page_test.go).
 func TestConsoleEntryConsoleStatusReadOnly(t *testing.T) {
 	cfg, _, _ := newTestConfig(t)
 	cfg.LANConsole = &fakeLANConsole{enabled: true}
@@ -423,7 +424,7 @@ func TestConsoleEntryConsoleStatusReadOnly(t *testing.T) {
 	if rec := call("GET", "/v1/public-console"); rec.Code != 200 {
 		t.Fatalf("GET public-console on console entry = %d", rec.Code)
 	}
-	for _, m := range [][2]string{{"POST", "/v1/lan-console"}, {"DELETE", "/v1/lan-console"}, {"POST", "/v1/lan-console/reset-password"}, {"POST", "/v1/public-console/enable"}, {"DELETE", "/v1/public-console"}} {
+	for _, m := range [][2]string{{"POST", "/v1/lan-console"}, {"DELETE", "/v1/lan-console"}, {"POST", "/v1/lan-console/reset-password"}, {"POST", "/v1/public-console/verify"}} {
 		if rec := call(m[0], m[1]); rec.Code == 200 || rec.Code == 201 {
 			t.Fatalf("%s %s must not work on the console entry (got %d)", m[0], m[1], rec.Code)
 		}

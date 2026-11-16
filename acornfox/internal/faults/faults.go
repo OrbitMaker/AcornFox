@@ -31,7 +31,7 @@
 // full checkout of the repository before merging.
 //
 // What is in it: the CAT-* (CAT-SVC-* among them), SETUP-*, EDGE-*, LAN-CONSOLE-*,
-// INSTALL-*, UPGRADE-*, UNINSTALL-*, OPEN-APP-*, APP-VARS-*, ID-KEY-* codes, the download gateway's GW-* codes
+// INSTALL-*, UPGRADE-*, UNINSTALL-*, OPEN-APP-*, APP-VARS-*, ID-KEY-*, PDOMAIN-*, PUBCON-* codes, the download gateway's GW-* codes
 // as this machine sees them, and the lower-case diagnosis codes of deploys
 // (stage upload … route, addon), of connecting to a server (stage connect),
 // of domains and the public console, of the LAN console and of installing
@@ -130,7 +130,7 @@ const FallbackCode = "ANY-00"
 
 // Catalog is every entry, grouped in the order of Groups, the fallback last.
 var Catalog = join(
-	installFaults, upgradeFaults, setupFaults, edgeFaults, lanFaults, linkFaults, deployFaults, domainFaults, openFaults, cliFaults,
+	installFaults, upgradeFaults, setupFaults, edgeFaults, lanFaults, linkFaults, deployFaults, domainFaults, pdomainFaults, openFaults, cliFaults,
 	instFaults, connFaults, svcFaults, syncFaults, pubFaults, gatewayFaults, idFaults, anyFaults,
 )
 

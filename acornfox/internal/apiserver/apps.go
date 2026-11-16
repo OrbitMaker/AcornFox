@@ -165,6 +165,9 @@ func (s *server) buildAppView(ctx context.Context, a state.App, detail bool) app
 	if doms, err := s.store.ListDomains(ctx, a.Name); err == nil {
 		v.Domains = doms
 	}
+	if base := s.platformBase(); base != "" {
+		v.PlatformDomain = appPlatformDomainOf(a, v.Exposure, base, s.takenNames(ctx), len(v.Domains) > 0)
+	}
 	if a.CatalogID != "" && s.appCenter != nil {
 		if uses, err := s.appCenter.AppServices(ctx, a.Name); err == nil && len(uses) > 0 {
 			v.Services = uses

@@ -55,6 +55,10 @@ type app struct {
 	openAppTunnel func(ctx context.Context, t client.Target, localPort, remotePort int) (*client.Tunnel, error)
 	openURL       func(url string) error // browser opener
 	freePort      func() (int, error)    // pick a free local TCP port
+	// `open --detach` / `--stop` (open_detach.go).
+	openDetached func(ctx context.Context, t client.Target, localPort int) (*client.DetachedTunnel, error)
+	tunnelAlive  func(pid, port int) bool
+	stopPID      func(pid int) error
 }
 
 // Main is the entry point invoked by cmd/acornfox for every non-server,
@@ -198,7 +202,8 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   open [应用]                      打开网页控制台；带应用名时在你电脑上打开这个应用（经 SSH 隧道，只本机的应用也能开）
   lan-console enable               在局域网打开控制台，第一次打开时在浏览器里设密码（disable、status、
                                    reset-password 清密码重设、devices 看记住的设备、forget 让设备失效；--help 看全）
-  public-console enable 域名        开放控制台公网访问（disable、status）
+  public-console enable 域名        开放控制台公网访问（disable、status）；登录后的控制台页面“设置 › 访问”
+                                   也能开关，要再输一次控制台密码（acornfox open 进来的不用）
 
 部署
   deploy                           部署当前目录（--image 镜像、--git 仓库）
@@ -220,7 +225,8 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   env set|unset|list               环境变量
   volume add 路径                  数据目录
   app set                          内存、CPU（立即生效）、端口、健康检查路径、--expose 暴露方式
-  domain add|remove|list           域名与 HTTPS
+  domain add|remove|list           应用自己的域名与 HTTPS
+  domain base [set 域名|clear]     整台服务器的平台域名：公网应用自动得到 应用名.平台域名（--plan 只看会怎样）
   add|remove postgres|mysql|redis  数据库与缓存；addons 查看已添加的
 
 应用中心
@@ -230,7 +236,8 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   install 应用 [--plan] [--use …]   从目录装一个应用（--recipe 配方 装一组；--plan 只看计划；--no-wait 只提交；acornfox install -h 看详情）
   install status 任务编号 [--wait]  查安装进度、首次登录信息（--wait 等到装好或失败，默认最多 90 秒；
                                    --show-secrets 显示密码）
-  装好的应用默认只本机能打开：在你自己的电脑上运行 acornfox open 应用名
+  装好的应用：局域网里新装的服务器上默认局域网能打开（用安装结果里的地址）；云主机上默认只本机能打开，
+                                   在你自己的电脑上运行 acornfox open 应用名
   services list / show 名字         这台机器上能给应用用的服务（应用提供的、自己登记的）：每一项、状态、谁在用（只读）
   services kinds                   有哪些服务类型、每种有哪些项（只读）
   services add 类型 --name 名字 --set 项=值   登记一条自己已有的服务（保密项写 项=-，从标准输入读）

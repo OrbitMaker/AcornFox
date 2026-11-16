@@ -980,6 +980,9 @@ parse_args() {
     # 局域网控制台：局域网服务器全新安装时默认打开；--no-lan-console 或 ACORNFOX_LAN_CONSOLE=0 不开
     LAN_CONSOLE=true
     case "${ACORNFOX_LAN_CONSOLE:-}" in 0|false|no|off) LAN_CONSOLE=false ;; esac
+    # 新应用默认的对外方式：空 = 按这台机器定（choose_default_exposure）；--default-exposure 或
+    # ACORNFOX_DEFAULT_EXPOSURE 给 lan、local 时照它
+    DEFAULT_EXPOSURE_ARG="${ACORNFOX_DEFAULT_EXPOSURE:-}"
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -1037,6 +1040,11 @@ parse_args() {
                 LAN_CONSOLE=false
                 shift
                 ;;
+            --default-exposure)
+                [[ $# -ge 2 ]] || error_exit "--default-exposure 需要一个值：lan（本机和局域网）或 local（只本机）"
+                DEFAULT_EXPOSURE_ARG="$2"
+                shift 2
+                ;;
             --allow-busy-80-443)
                 ALLOW_BUSY_WEB=true
                 shift
@@ -1055,6 +1063,10 @@ parse_args() {
                 ;;
         esac
     done
+    case "$DEFAULT_EXPOSURE_ARG" in
+        ""|lan|local) ;;
+        *) error_exit "--default-exposure（或 ACORNFOX_DEFAULT_EXPOSURE）只能是 lan（本机和局域网）或 local（只本机），不是 ${DEFAULT_EXPOSURE_ARG}" ;;
+    esac
     # --china / --global 在 detect_location 最后生效
 }
 
@@ -1094,7 +1106,13 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
                            （地址是 192.168.x.x 这类私网地址，并且不是云主机）、又是第一次安装，
                            装完就在 18802 端口打开控制台，第一次打开时在浏览器里设密码；
                            云主机、公网服务器、重装和升级都不会自动打开。以后开关:
-                           acornfox lan-console enable / disable
+                           acornfox lan-console enable / disable。这个参数只管控制台，不管应用
+    --default-exposure 方式  新应用默认的对外方式：lan（本机和局域网）或 local（只本机）。不加时：
+                           局域网服务器（同上：私网地址、不是云主机、第一次安装）上是 lan，从应用中心装的
+                           应用和自己部署的项目，同一局域网里的电脑、手机直接能打开；云主机、公网服务器上
+                           应用中心装的应用只本机能打开（经 acornfox open 打开），自己部署的项目照旧开在
+                           所有网卡上；重装时沿用上次的，升级不改。单个应用以后随时改：
+                           acornfox app set --app 应用名 --expose local|lan|public
     --force-os             在不在支持列表里的 Ubuntu/Debian 版本上也继续安装（自行承担风险）；
                            对 CentOS、Alibaba Cloud Linux、OpenCloudOS 等其他系统无效
     --cloud 名称           只用于测试：把本机当作某个云厂商的大陆地域，跳过元数据探测；
@@ -1116,6 +1134,7 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     ACORNFOX_GITEE_REPO       中国大陆优先使用的 Gitee 镜像，默认 VIP13390/AcornFox；设为空则不用
     ACORNFOX_CLOUD_OVERRIDE   同 --cloud，只用于测试
     ACORNFOX_LAN_CONSOLE      设为 0 同 --no-lan-console
+    ACORNFOX_DEFAULT_EXPOSURE 同 --default-exposure（lan 或 local）
     ACORNFOX_DOCKER_CE_MIRROR docker-ce 软件源地址（企业内网镜像，或用 apt 缓存代理时用 http
                               地址，如 http://mirrors.aliyun.com/docker-ce），排在所有
                               docker-ce 候选源最前面，先探测，用不了再按实测换别的源。
@@ -1785,7 +1804,7 @@ Requires=docker.service
 Type=simple
 User=acornfox
 Group=acornfox
-ExecStart=/usr/local/bin/acornfox server --runner-uid $ACORNFOX_EXEC_UID --listen-group acornfox-users${PUBLIC_HOST:+ --public-host $PUBLIC_HOST}
+ExecStart=/usr/local/bin/acornfox server --runner-uid $ACORNFOX_EXEC_UID --listen-group acornfox-users${PUBLIC_HOST:+ --public-host $PUBLIC_HOST}${DEFAULT_EXPOSURE:+ --default-exposure $DEFAULT_EXPOSURE}
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -1890,17 +1909,60 @@ private_ipv4() {
     return 1
 }
 
+# lan_server：这台机器算不算局域网服务器（没识别出云厂商，应用访问地址是私网地址），是就返回 0。
+# 默认打开局域网控制台（enable_lan_console）和新应用默认局域网能打开（choose_default_exposure）
+# 都用这一个判断。要在 detect_location、detect_public_host 之后调用。
+lan_server() {
+    [ -z "${CLOUD:-}" ] || return 1
+    private_ipv4 "${PUBLIC_HOST:-}"
+}
+
+# choose_default_exposure：定新应用默认的对外方式，写进 acornfox-server.service 的
+# --default-exposure（create_systemd_services）。结果放在 DEFAULT_EXPOSURE（空 = 不写，程序照旧：
+# 自己部署的项目开在所有网卡上，应用中心装的应用只本机）和 APPS_EXPOSURE（应用中心装的应用默认是
+# lan 还是 local，只给日志和摘要用）。顺序：
+#   1. 给了 --default-exposure（或 ACORNFOX_DEFAULT_EXPOSURE）：照它；
+#   2. 不是全新安装（重装、卸载后保留数据再装）：沿用现有服务文件里的 --default-exposure，没有就不写；
+#   3. 全新安装的局域网服务器（lan_server）：lan；
+#   4. 其余（云主机、公网服务器、取不到地址）：不写。
+# 只读，不改系统；要在 create_systemd_services 之前调用（它会重写服务文件）。重复运行结果一样。
+# upgrade.sh 不重写服务文件里的这一项，所以升级上来的机器保持原样。
+# AFX_SERVER_UNIT 只给测试用，默认 /etc/systemd/system/acornfox-server.service。
+choose_default_exposure() {
+    local unit="${AFX_SERVER_UNIT:-/etc/systemd/system/acornfox-server.service}"
+    DEFAULT_EXPOSURE=""
+    if [ -n "${DEFAULT_EXPOSURE_ARG:-}" ]; then
+        DEFAULT_EXPOSURE="$DEFAULT_EXPOSURE_ARG"
+    elif ! $FRESH_INSTALL; then
+        if [ -f "$unit" ]; then
+            DEFAULT_EXPOSURE=$(sed -n 's/^ExecStart=.* --default-exposure \([a-z]*\).*$/\1/p' "$unit" | head -n 1)
+        fi
+    elif lan_server; then
+        DEFAULT_EXPOSURE=lan
+    fi
+    case "$DEFAULT_EXPOSURE" in
+        lan|local|public) ;;
+        *) DEFAULT_EXPOSURE="" ;;
+    esac
+    APPS_EXPOSURE=local
+    if [ "$DEFAULT_EXPOSURE" = lan ]; then APPS_EXPOSURE=lan; fi
+    if [ -n "$DEFAULT_EXPOSURE" ]; then
+        log_info "新应用默认的对外方式: ${DEFAULT_EXPOSURE}（应用中心装的应用: ${APPS_EXPOSURE}）"
+    else
+        log_info "新应用默认的对外方式: 应用中心装的应用只本机能打开（local），自己部署的项目开在所有网卡上"
+    fi
+}
+
 # 局域网服务器全新安装时默认打开局域网控制台（第一次打开时在浏览器里设密码）。
-# 条件（都满足才开）：没有 --no-lan-console；这台机器以前没装过（FRESH_INSTALL）；没识别出云厂商；
-# 应用访问地址是私网地址。服务端还会自己再判断一次是不是云主机（探测云元数据地址），是就拒绝
+# 条件（都满足才开）：没有 --no-lan-console；这台机器以前没装过（FRESH_INSTALL）；lan_server（没识别出
+# 云厂商，应用访问地址是私网地址）。服务端还会自己再判断一次是不是云主机（探测云元数据地址），是就拒绝
 # （LAN-CONSOLE-01）；刚启动时还没探测完也会先拒绝，所以这里最多等 30 秒。
 # 没开成不影响安装结果，以后可以运行 acornfox lan-console enable。重复运行不会出错（已开着就不变）。
 enable_lan_console() {
     LAN_CONSOLE_RESULT=""
     $LAN_CONSOLE || return 0
     $FRESH_INSTALL || return 0
-    [ -z "${CLOUD:-}" ] || return 0
-    private_ipv4 "${PUBLIC_HOST:-}" || return 0
+    lan_server || return 0
     log_info "这台服务器在局域网里，打开局域网控制台（端口 18802）..."
     local i out=""
     for i in $(seq 1 15); do
@@ -1935,6 +1997,17 @@ show_summary() {
         新加的组在当前登录里还不生效：重新登录服务器后再用；或者这次登录里的每条 acornfox
         命令都包一层 ${YELLOW}sg acornfox-users -c \"…\"${NC}，例如
         ${YELLOW}sg acornfox-users -c \"acornfox target add local --url unix:///run/acornfox/api.sock\"${NC}
+"
+    fi
+    # 新应用默认局域网能打开时（choose_default_exposure 定的 lan）多一节说明
+    local apps_lan=""
+    if [ "${APPS_EXPOSURE:-local}" = lan ]; then
+        apps_lan="
+${BLUE}应用（默认局域网里能打开）:${NC}
+  从应用中心装的应用和你部署的项目，同一局域网里的电脑、手机用 ${YELLOW}http://${PUBLIC_HOST}:端口${NC} 打开
+  （端口在 18810-18899 之间，装好或部署好时会给出完整地址），不用开 SSH 隧道。
+  某个应用只想本机能打开: ${YELLOW}acornfox app set --app 应用名 --expose local${NC}
+  （以后新应用都只本机: 重装时加 --default-exposure local）
 "
     fi
     cat << EOF
@@ -1985,7 +2058,7 @@ ${BLUE}局域网控制台（已默认打开）:${NC}
   登录时可以勾“记住这台设备 90 天”。只在可信的网络里用（局域网里不加密）。
   看状态: ${YELLOW}acornfox lan-console status${NC}   忘了密码: ${YELLOW}acornfox lan-console reset-password${NC}
   关闭: ${YELLOW}acornfox lan-console disable${NC}   （安装时不想开: 加 --no-lan-console）
-}${PUBLIC_CONSOLE_RESULT:+
+}${apps_lan}${PUBLIC_CONSOLE_RESULT:+
 ${BLUE}公网访问控制台:${NC}
   ${PUBLIC_CONSOLE_RESULT}
   关闭: ${YELLOW}acornfox public-console disable${NC}
@@ -2014,6 +2087,8 @@ show_plan() {
   5. 生成管理员令牌（保存在 /root/.acornfox-token）
   6. 服务器在局域网里（私网地址、不是云主机）并且是第一次安装时：打开局域网控制台（端口 18802，
      第一次打开时在浏览器里设密码）。不想开加 --no-lan-console；云主机不会开
+  7. 新应用默认的对外方式：局域网服务器第一次安装时是局域网（同一局域网里的电脑、手机直接能打开），
+     云主机上应用中心装的应用只本机能打开。想只本机加 --default-exposure local
 
 EOF
 }
@@ -2081,6 +2156,7 @@ main() {
     record_installed_version
     generate_admin_token
     detect_public_host
+    choose_default_exposure
     create_systemd_services
     start_services
     wait_edge_container

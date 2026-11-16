@@ -987,6 +987,12 @@ type PlanApp struct {
 	Needs         []PlanNeed     `json:"needs"`
 	ParamsMissing []ParamMissing `json:"params_missing"`
 	Provides      []PlanProvide  `json:"provides"`
+	// Exposure is how the app will be reachable once installed: internal
+	// (a database, a cache: no web page), local (only this server), lan
+	// (this server and the local network) or public; what --expose gives,
+	// otherwise what this machine gives new apps (manifestExposure). Left
+	// out for an app of a recipe that is installed already.
+	Exposure string `json:"exposure,omitempty"`
 }
 
 // PlanNeed is one need and what became of it.
@@ -1038,7 +1044,25 @@ func (e *Engine) Plan(ctx context.Context, req Request) (PlanView, error) {
 	if err := e.checkPlatformSets(req.Platform); err != nil {
 		a.problems = append([]*Fault{AsFault(err)}, a.problems...)
 	}
-	return planView(a), nil
+	v := planView(a)
+	for i, p := range a.plan {
+		if i < len(v.Apps) && !p.reuse {
+			v.Apps[i].Exposure = e.plannedExposure(p)
+		}
+	}
+	return v, nil
+}
+
+// plannedExposure is the exposure app p of a plan gets when it is created
+// (taskRun.create works it out the same way).
+func (e *Engine) plannedExposure(p *planned) string {
+	switch {
+	case internalManifest(p.app.Manifest):
+		return catalog.ExposureInternal
+	case p.expose != "":
+		return p.expose
+	}
+	return e.manifestExposure(p.app.Manifest)
 }
 
 func planView(a *assessment) PlanView {

@@ -15,6 +15,8 @@ type fakePublicConsole struct {
 	domain   string
 	verified string
 	disabled bool
+	here     publicconsole.Diagnosis // what VerifyHere finds; zero => ok
+	password string                  // the new password Enable makes; "" => "pw"
 }
 
 func (f *fakePublicConsole) Status(context.Context) (publicconsole.Status, error) {
@@ -32,12 +34,30 @@ func (f *fakePublicConsole) StartVerify(_ context.Context, d string) (publiccons
 	return publicconsole.VerifyInfo{Domain: d, VerifyID: "v1", Path: "/.well-known/acornfox-verify/v1", Token: "t"}, nil
 }
 
-func (f *fakePublicConsole) Enable(_ context.Context, d, id string, _ bool) (publicconsole.EnableResult, error) {
+func (f *fakePublicConsole) VerifyHere(ctx context.Context, d string) (publicconsole.VerifyInfo, publicconsole.Diagnosis, error) {
+	info, err := f.StartVerify(ctx, d)
+	if err != nil {
+		return info, publicconsole.Diagnosis{}, err
+	}
+	if f.here.Code != "" {
+		return info, f.here, nil
+	}
+	return info, publicconsole.Diagnosis{Code: publicconsole.CodeOK}, nil
+}
+
+func (f *fakePublicConsole) Enable(_ context.Context, d, id string, reset bool) (publicconsole.EnableResult, error) {
+	if f.enabled && f.domain == d && !reset {
+		return publicconsole.EnableResult{Domain: d, URL: "https://" + d, AlreadyEnabled: true}, nil
+	}
 	if id != "v1" {
 		return publicconsole.EnableResult{}, &publicconsole.Error{Status: 409, Code: "verify_required", Message: "请先验证"}
 	}
 	f.enabled, f.domain = true, d
-	return publicconsole.EnableResult{Domain: d, URL: "https://" + d, Password: "pw"}, nil
+	pw := f.password
+	if pw == "" {
+		pw = "pw"
+	}
+	return publicconsole.EnableResult{Domain: d, URL: "https://" + d, Password: pw}, nil
 }
 
 func (f *fakePublicConsole) Disable(context.Context) (bool, error) {

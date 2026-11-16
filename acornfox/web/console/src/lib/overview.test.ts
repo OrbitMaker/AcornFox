@@ -84,6 +84,15 @@ describe('访问 accessInfo', () => {
     const x = accessInfo(app({ url: 'https://demo.example.com', lan_url: 'http://192.168.1.20:18810', exposure: 'public', domains: [{ app: 'web', name: 'demo.example.com', status: 'active', created_at: '' }] }))
     expect(x).toMatchObject({ address: 'demo.example.com', scheme: 'https', domain: 'demo.example.com', level: 'public', lanURL: 'http://192.168.1.20:18810' })
   })
+  it('平台给的域名生效时：地址是 https、没有端口，下面写这个域名；自己的域名优先；没生效时不算', () => {
+    const pd = { host: 'web.apps.example.com', active: true, note: '' }
+    const x = accessInfo(app({ url: 'https://web.apps.example.com', lan_url: 'http://192.168.1.20:18810', exposure: 'public', platform_domain: pd }))
+    expect(x).toMatchObject({ address: 'web.apps.example.com', scheme: 'https', domain: 'web.apps.example.com', lanURL: 'http://192.168.1.20:18810' })
+    const own = accessInfo(app({ url: 'https://demo.example.com', exposure: 'public', platform_domain: pd, domains: [{ app: 'web', name: 'demo.example.com', status: 'ready', created_at: '' }] }))
+    expect(own?.domain).toBe('demo.example.com')
+    const off = accessInfo(app({ url: 'http://192.168.1.20:18810', exposure: 'lan', platform_domain: { ...pd, active: false, note: '改成公网后自动生效' } }))
+    expect(off).toMatchObject({ domain: '', scheme: 'http' })
+  })
   it('只本机的 127.0.0.1 不能直接打开；没有地址时是 null；不认识的访问方式不标档位', () => {
     expect(accessInfo(app({ url: 'http://127.0.0.1:18810', exposure: 'local' }))?.openable).toBe(false)
     expect(accessInfo(app({ url: '', exposure: 'internal' }))).toBeNull()

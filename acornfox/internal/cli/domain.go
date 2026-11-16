@@ -10,12 +10,17 @@ import (
 // completed ICP filing or 80/443 traffic is blocked.
 const icpNotice = "中国大陆服务器的域名须已完成 ICP 备案，否则无法通过 80/443 访问。"
 
-// cmdDomain implements `domain add NAME` / `domain remove NAME` / `domain list`.
+// cmdDomain implements `domain add NAME` / `domain remove NAME` / `domain
+// list` (one app's own domains) and `domain base …` (the machine's platform
+// domain, domain_base.go).
 func (a *app) cmdDomain(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		return a.out.usageError("domain 需要子命令：add / remove / list")
+		return a.out.usageError("domain 需要子命令：add / remove / list（应用自己的域名），base（整台服务器的平台域名）")
 	}
 	sub, rest := args[0], args[1:]
+	if sub == "base" {
+		return a.cmdDomainBase(ctx, rest)
+	}
 
 	res, err := a.resolveTargetAndApp()
 	if err != nil {

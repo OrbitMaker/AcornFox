@@ -53,9 +53,12 @@ func NewConsole(cfg Config) http.Handler {
 	api.HandleFunc("GET /v1/console/session", s.consoleSession)
 	api.HandleFunc("POST /v1/console/logout", s.consoleLogout)
 	// The settings page shows whether the console is open on the LAN or the
-	// internet. Read-only here: opening or closing it stays on the trusted
-	// entry (acornfox lan-console / public-console on the server), so a
-	// browser session can never widen who reaches the console.
+	// internet. Opening or closing the LAN console stays on the trusted
+	// entry (acornfox lan-console on the server). The public console can be
+	// opened and closed here, behind three guards written into the handlers
+	// (public_console.go): the console password of the entry this browser
+	// logged in through is asked again, a new password is generated and
+	// shown once, and a machine on a local network cannot open it.
 	api.HandleFunc("GET /v1/lan-console", s.getLANConsole)
 	// A logged-in browser may see and remove remembered devices (removing
 	// only takes access away); clearing the password stays trusted-only.
@@ -63,6 +66,8 @@ func NewConsole(cfg Config) http.Handler {
 	api.HandleFunc("DELETE /v1/lan-console/devices", s.deleteLANConsoleDevices)
 	api.HandleFunc("DELETE /v1/lan-console/devices/{id}", s.deleteLANConsoleDevice)
 	api.HandleFunc("GET /v1/public-console", s.publicConsoleStatus)
+	api.HandleFunc("POST /v1/public-console/enable", s.consolePublicConsoleEnable)
+	api.HandleFunc("DELETE /v1/public-console", s.consolePublicConsoleDisable)
 
 	// Wrap the /v1 API with the session + CSRF middleware.
 	guardedAPI := s.sessionMiddleware(api)

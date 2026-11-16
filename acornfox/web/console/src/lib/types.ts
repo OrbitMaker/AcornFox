@@ -72,6 +72,8 @@ export interface AppView {
   env?: EnvVar[]
   volumes?: Volume[]
   domains?: Domain[]
+  // 平台给的域名（<应用名>.<平台域名>）。没设平台域名时没有；应用不是公网时 active 为 false，note 写怎样才生效。
+  platform_domain?: { host: string; active: boolean; note?: string }
   addons?: Addon[]
   catalog_id?: string
   catalog_version?: string
@@ -170,7 +172,32 @@ export interface FaultDef { code: string; title: string; causes: string[]; next:
 export interface LANConsoleStatus { enabled: boolean; url?: string; port: number; password_set?: boolean; password_set_at?: string; password_set_from?: string; generated_password?: boolean; devices?: number }
 // GET /v1/lan-console/devices：登录时勾了“记住这台设备 90 天”的浏览器。
 export interface LANDevice { id: string; name: string; created_at: string; last_used_at: string; last_ip?: string; expires_at: string }
-export interface PublicConsoleStatus { enabled: boolean; domain?: string; url?: string; enabled_at?: string; verifying?: string }
+// GET /v1/public-console。can_toggle、needs_password、suggested_domain、unsupported 是能在页面上开关以后才有的
+// （旧服务端没有：页面只给服务器上的命令）。suggested_domain：有平台域名时是 console.<平台域名>。
+export interface PublicConsoleStatus {
+  enabled: boolean; domain?: string; url?: string; enabled_at?: string; verifying?: string
+  can_toggle?: boolean; needs_password?: boolean; suggested_domain?: string; unsupported?: CodeText
+}
+// POST /v1/public-console/enable 的应答：新密码只在这一次给（password；也认 password_once）。
+export interface PublicConsoleEnableResult { domain?: string; url?: string; password?: string; password_once?: string; already_enabled?: boolean }
+
+export interface CodeText { code: string; text: string }
+// GET/PUT/DELETE /v1/platform/domain、POST /v1/platform/domain/check（四个返回同一个形状）：这台机器的平台域名。
+// 公网应用自动得到 <应用名>.<domain>。旧服务端没有这个接口（404）。
+export interface PlatformDomainView {
+  domain?: string
+  state: 'unset' | 'ok' | 'problem' | string
+  supported: boolean
+  unsupported?: CodeText
+  public_ip?: string
+  // 到买域名的地方要加的那一条记录：名字（例如 *.apps）、类型、指向。还没设域名时可能只有 type、value。
+  record?: { name?: string; type?: string; value?: string }
+  // waiting：这一项还没法检查（前一项没过，或者还没有开放到公网的应用），不算出问题
+  checks?: { key: string; ok: boolean; text: string; waiting?: boolean }[]
+  // 只在 state 是 problem 时有：第一项没过的检查
+  problem?: { code: string; text: string; detail?: string; next?: string }
+  console_host?: string
+}
 
 // GET /v1/catalog/sources：公共目录和连过的私有目录（已断开的也在）。
 export interface CatalogSourceView {

@@ -77,7 +77,18 @@ type ManagerConfig struct {
 	Domains  func(ctx context.Context) ([]string, error) // app domains; nil => none
 	Now      func() time.Time                            // nil => time.Now
 	Logger   *slog.Logger                                // nil => slog.Default()
+
+	// What VerifyHere checks with (opening from the console page, where no
+	// command line on the user's side does the checking): DNS servers asked
+	// directly and an HTTP getter. nil => NetResolver, DNSServersCN plus
+	// DNSServersGlobal, HTTPGetter(10s).
+	Resolver   Resolver
+	DNSServers []string
+	Getter     Getter
 }
+
+// verifyHereTimeout bounds VerifyHere's DNS lookups and HTTP probe together.
+const verifyHereTimeout = 30 * time.Second
 
 // Manager implements verify / enable / disable / status on the server.
 type Manager struct {
@@ -104,6 +115,15 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Resolver == nil {
+		cfg.Resolver = NetResolver{}
+	}
+	if cfg.DNSServers == nil {
+		cfg.DNSServers = append(append([]string(nil), DNSServersCN...), DNSServersGlobal...)
+	}
+	if cfg.Getter == nil {
+		cfg.Getter = HTTPGetter(10 * time.Second)
 	}
 	return &Manager{cfg: cfg}
 }
@@ -201,6 +221,26 @@ func (m *Manager) StartVerify(ctx context.Context, domain string) (VerifyInfo, e
 	m.timer = time.AfterFunc(VerifyTTL, func() { m.expire(id) })
 	m.mu.Unlock()
 	return VerifyInfo{Domain: d, VerifyID: id, Path: path, Token: token, IPs: ips, ExpiresIn: int(VerifyTTL.Seconds())}, nil
+}
+
+// VerifyHere starts a verification of domain and checks it from this server
+// once: the public DNS servers must point domain only at this server's public
+// addresses, then the HTTP challenge must come back on port 80. It is what
+// the command line does on the user's side, for the console page. A verdict
+// that is not ok is returned as the Diagnosis (err stays nil); the
+// verification stays pending, so a later Enable with its id still works.
+func (m *Manager) VerifyHere(ctx context.Context, domain string) (VerifyInfo, Diagnosis, error) {
+	info, err := m.StartVerify(ctx, domain)
+	if err != nil {
+		return VerifyInfo{}, Diagnosis{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, verifyHereTimeout)
+	defer cancel()
+	dns := CheckDNS(ctx, m.cfg.Resolver, m.cfg.DNSServers, info.Domain, info.IPs)
+	if !dns.OK() {
+		return info, dns.Diagnosis, nil
+	}
+	return info, ProbeHTTP(ctx, m.cfg.Getter, info.Domain, info.Path, info.Token), nil
 }
 
 // expire clears the challenge of verification id if it is still pending.

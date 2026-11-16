@@ -119,6 +119,10 @@ type appView struct {
 	// features need it installed again). Detail view only; left out for
 	// any other app.
 	LegacyNote string `json:"legacy_note,omitempty"`
+	// PlatformDomain is the app's name under the machine's platform domain:
+	// whether it opens at it now, and why not (detail view only; left out
+	// without a platform domain and for an internal app).
+	PlatformDomain *appPlatformDomain `json:"platform_domain,omitempty"`
 }
 
 // openHint is how to open a local-only app from the user's own computer.

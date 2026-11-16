@@ -1113,6 +1113,50 @@ describe('应用详情：名片、四个页签、设置', () => {
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web/domains/old.example.com')).toBe(true))
   })
 
+  it('设置 → 谁能打开：平台给的域名一行——生效、没生效、没有平台域名时不显示；两个都有时写明用自己的', async () => {
+    routes['GET /v1/apps/web'] = () => web({ exposure: 'public', url: 'https://web.apps.example.com', platform_domain: { host: 'web.apps.example.com', active: true, note: '' } })
+    location.hash = '#app-web/settings/access'
+    let r = render(<App />)
+    let row = await screen.findByTestId('platform-domain')
+    expect(within(row).getByText('平台给的')).toBeTruthy()
+    expect(within(row).getByText('web.apps.example.com')).toBeTruthy()
+    expect(within(row).getByText('已生效')).toBeTruthy()
+    expect(screen.getByTestId('summary-access').textContent).toBe('公网 · web.apps.example.com')
+    expect(screen.getByTestId('domain-precedence').textContent).toBe('两个都有时用自己的域名。')
+    expect(within(screen.getByTestId('own-domains')).getByText('没有')).toBeTruthy()
+    r.unmount()
+
+    routes['GET /v1/apps/web'] = () => web({ platform_domain: { host: 'web.apps.example.com', active: false, note: '改成公网后自动生效' } })
+    r = render(<App />)
+    row = await screen.findByTestId('platform-domain')
+    expect(within(row).getByText('没生效')).toBeTruthy()
+    expect(within(row).getByText('改成公网后自动生效')).toBeTruthy()
+    expect(screen.getByTestId('summary-access').textContent).toBe('局域网 · 没有绑定域名')
+    r.unmount()
+
+    routes['GET /v1/apps/web'] = () => web({ exposure: 'public', url: 'https://mine.example.com', platform_domain: { host: 'web.apps.example.com', active: true, note: '' }, domains: [{ app: 'web', name: 'mine.example.com', status: 'ready', created_at: '' }] })
+    r = render(<App />)
+    await screen.findByTestId('platform-domain')
+    expect(screen.getByTestId('domain-precedence').textContent).toBe('两个都有，现在用自己的域名。')
+    expect(screen.getByTestId('summary-access').textContent).toBe('公网 · 域名 mine.example.com')
+    r.unmount()
+
+    routes['GET /v1/apps/web'] = () => web()
+    render(<App />)
+    await screen.findByTestId('own-domains')
+    expect(screen.queryByTestId('platform-domain')).toBeNull()
+    expect(screen.queryByTestId('domain-precedence')).toBeNull()
+  })
+
+  it('概览的访问卡片：平台给的域名生效时地址是 https、没有端口，下面写这个域名', async () => {
+    routes['GET /v1/apps/web'] = () => web({ exposure: 'public', url: 'https://web.apps.example.com', lan_url: 'http://192.168.1.20:18810', platform_domain: { host: 'web.apps.example.com', active: true, note: '' } })
+    location.hash = '#app-web'
+    render(<App />)
+    const card = await screen.findByTestId('ov-access')
+    expect(within(card).getByTitle('https://web.apps.example.com').textContent).toBe('web.apps.example.com')
+    expect(within(card).getByTestId('ov-access-scheme').textContent).toBe('https · 域名 web.apps.example.com')
+  })
+
   it('设置 → 更多：改环境变量后保存并重新部署；改端口要合法；有常用命令', async () => {
     routes['PUT /v1/apps/web/env/TZ'] = () => ({})
     routes['POST /v1/apps/web/redeploy'] = () => ({})

@@ -109,6 +109,11 @@ type Config struct {
 	Edge *EdgeConfig
 	// DefaultExposure applies to apps whose exposure is "" ("public" when empty).
 	DefaultExposure string
+	// PlatformDomain returns this machine's platform domain ("" when none
+	// is set): a public app's route also carries <app>.<platform domain>
+	// (platformvar.PlatformHost), and the entry proxy gets its certificate
+	// like any domain on a route. Nil means none.
+	PlatformDomain func(ctx context.Context) string
 
 	// DeployLogs keeps each deployment's build log and, before its container
 	// is removed, its run log (see deploylogs.go). Nil keeps no logs and
@@ -1271,6 +1276,7 @@ func (r *Reconciler) desiredRoutes(ctx context.Context, thisApp string, override
 	if err != nil {
 		return nil, err
 	}
+	platformHost := r.platformHosts(ctx)
 	var routes []edge.Route
 	for _, a := range apps {
 		if a.Desired == state.DesiredStopped {
@@ -1293,6 +1299,9 @@ func (r *Reconciler) desiredRoutes(ctx context.Context, thisApp string, override
 			continue
 		}
 		rt.Domains = r.appDomainNames(ctx, a.Name)
+		if h := platformHost(a); h != "" {
+			rt.Domains = append(rt.Domains, h)
+		}
 		routes = append(routes, rt)
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].App < routes[j].App })
@@ -1423,6 +1432,7 @@ func (r *Reconciler) observedRoutes(ctx context.Context) ([]edge.Route, error) {
 	if err != nil {
 		return nil, err
 	}
+	platformHost := r.platformHosts(ctx)
 	var routes []edge.Route
 	for _, a := range apps {
 		if a.Desired == state.DesiredStopped || a.CurrentDeployment == "" {
@@ -1438,6 +1448,9 @@ func (r *Reconciler) observedRoutes(ctx context.Context) ([]edge.Route, error) {
 			continue
 		}
 		rt.Domains = r.appDomainNames(ctx, a.Name)
+		if h := platformHost(a); h != "" {
+			rt.Domains = append(rt.Domains, h)
+		}
 		routes = append(routes, rt)
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].App < routes[j].App })

@@ -101,6 +101,7 @@ func linuxHostChecks(ctx context.Context, r *doctorReport, dc *dockerclient.Clie
 	if svc.err == nil {
 		doctorCatalog(ctx, r, socket)
 		doctorAppServices(ctx, r, socket)
+		doctorPlatformDomain(ctx, r, socket)
 	}
 	doctorLANConsole(r, use.LANNoPassword)
 }

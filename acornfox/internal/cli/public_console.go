@@ -56,7 +56,7 @@ var newPublicConsoleNet = func() *publicConsoleNet {
 // cmdPublicConsole implements `public-console enable DOMAIN | disable | status`.
 func (a *app) cmdPublicConsole(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		return a.out.usageError("public-console 需要子命令：enable 域名 / disable / status")
+		return a.out.usageError("public-console 需要子命令：enable 域名 / disable / status（登录后的控制台页面“设置 › 访问”也能开关）")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("public-console "+sub, flag.ContinueOnError)
@@ -308,7 +308,7 @@ func (a *app) publicConsoleStatus(ctx context.Context, api client.API) int {
 			return exitOK
 		}
 		a.out.human("公网控制台未开启（默认只能经 SSH 用 acornfox open 打开）。")
-		a.out.human("需要从公网访问时：acornfox public-console enable 域名")
+		a.out.human("需要从公网访问时：acornfox public-console enable 域名（也可以在控制台页面“设置 › 访问”里开）")
 		return exitOK
 	}
 	https := publicconsole.ProbeHTTPS(ctx, newPublicConsoleNet().getter, st.Domain)

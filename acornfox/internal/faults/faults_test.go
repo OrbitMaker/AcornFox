@@ -11,7 +11,7 @@ import (
 // Code shapes: upper-case codes of the program and the scripts, lower-case
 // diagnosis codes, and the fallback.
 var (
-	upperCode = regexp.MustCompile(`^(CAT-(INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|OPEN-APP|APP-VARS|ID-KEY|GW-[A-Z]+)-\d{2}$`)
+	upperCode = regexp.MustCompile(`^(CAT-(INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|OPEN-APP|APP-VARS|ID-KEY|PDOMAIN|PUBCON|GW-[A-Z]+)-\d{2}$`)
 	lowerCode = regexp.MustCompile(`^[a-z][a-z_]*[a-z]$`)
 )
 
@@ -32,6 +32,8 @@ func groupOf(code string) string {
 		return "EDGE"
 	case strings.HasPrefix(code, "LAN-CONSOLE-"):
 		return "LAN"
+	case strings.HasPrefix(code, "PDOMAIN-"), strings.HasPrefix(code, "PUBCON-"):
+		return "DOMAIN"
 	case strings.HasPrefix(code, "OPEN-APP-"):
 		return "OPEN"
 	case strings.HasPrefix(code, "CAT-INST-"), strings.HasPrefix(code, "APP-VARS-"):

@@ -25,14 +25,16 @@ func addresserFor(cfg Config) platformvar.Addresser {
 }
 
 // where is where app a can be reached now: its exposure (the server's
-// default filled in; "" for an internal app), its port and the domains bound
-// to it, the first bound first.
+// default filled in; "" for an internal app), its port, the domains bound
+// to it, the first bound first, and the machine's platform domain
+// (platformDomainFor).
 func (s *server) where(ctx context.Context, a state.App) platformvar.Where {
 	w := platformvar.Where{Port: a.PublicPort}
 	if a.Internal {
 		return w
 	}
 	w.Exposure = s.effectiveExposure(a)
+	w.PlatformDomain = s.platformDomainFor(ctx, a, w.Exposure)
 	if doms, err := s.store.ListDomains(ctx, a.Name); err == nil && len(doms) > 0 {
 		sort.SliceStable(doms, func(i, j int) bool { return doms[i].CreatedAt.Before(doms[j].CreatedAt) })
 		for _, d := range doms {

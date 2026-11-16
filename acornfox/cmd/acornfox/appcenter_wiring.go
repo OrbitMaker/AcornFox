@@ -25,8 +25,10 @@ import (
 // used for large images that name an artifact and for private catalogs
 // (connect, their indexes and packages). The machine key is created only
 // when the gateway is actually contacted. host is what the apps' addresses
-// are worked out from (platformvar.Host).
-func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRunner, host platformvar.Host) *appinstall.Engine {
+// are worked out from (platformvar.Host). appExposure is what a new app
+// gets when neither the request nor its manifest chooses (lan or local;
+// "" => local, see appinstall.Config.DefaultExposure).
+func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRunner, host platformvar.Host, appExposure string) *appinstall.Engine {
 	var gw appinstall.Gateway
 	var cgw appinstall.CatalogGateway
 	network := setupNetwork(dataDir)
@@ -43,10 +45,11 @@ func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRu
 			Keys:     catalogKeys(),
 			Gateway:  cgw,
 		}),
-		DataDir:   dataDir,
-		UploadDir: uploadDir,
-		Gateway:   gw,
-		Version:   cli.Version,
+		DataDir:         dataDir,
+		UploadDir:       uploadDir,
+		Gateway:         gw,
+		Version:         cli.Version,
+		DefaultExposure: appExposure,
 		// The platform variables: the standalone edition's provider, filled
 		// from this machine's settings.
 		PlatformVars: platformvar.NewStandalone(platformvar.Machine{

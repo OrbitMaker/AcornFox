@@ -1,4 +1,6 @@
-// 设置 → 谁能打开：三档（同概览访问卡片那一套，选公网要确认；有平台默认时可以跟随默认）、域名的添加和删除。
+// 设置 → 谁能打开：三档（同概览访问卡片那一套，选公网要确认；有平台默认时可以跟随默认）和域名。
+//   域名分两行：“平台给的”（应用详情里的 platform_domain，跟着“设置 › 访问”里的平台域名，没设就没有这一行）、
+//   “自己的域名”（添加、删除）。两个都有时用自己的。
 // 设置 → 删除应用：确认框（默认保留数据卷，不保留要输入应用名）。
 // 接口：PATCH /v1/apps/{app}（exposure）、GET/POST/DELETE /v1/apps/{app}/domains、DELETE /v1/apps/{app}?volumes=true|false。
 import { useState } from 'react'
@@ -7,6 +9,7 @@ import { api, appPath } from '@/lib/api'
 import { ACCESS_LEVELS } from '@/lib/overview'
 import { go } from '@/lib/router'
 import type { AppView } from '@/lib/types'
+import { cn } from '@/lib/utils'
 import { useConsole } from '@/state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -17,6 +20,9 @@ import { useToast } from '@/components/ui/toast'
 import { EXPOSURE_TEXT, ExposureSwitch, exposureEditable } from './access'
 import type { TabProps } from './app-page'
 
+const LINE = 'flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t py-2'
+const LABEL = 'w-20 shrink-0 text-xs text-muted-foreground'
+
 const DOMAIN_STATE: Record<string, [string, 'success' | 'warning' | 'danger' | 'outline']> = {
   ready: ['已生效', 'success'], pending: ['等待证书', 'warning'], failed: ['没生效', 'danger'],
 }
@@ -26,7 +32,9 @@ export function accessSummary(a: AppView): string {
   const how = (EXPOSURE_TEXT[a.exposure] || a.exposure || '默认') + (a.exposure_is_default && a.default_exposure ? '（跟随默认）' : '')
   if (a.internal_only) return how
   const ds = (a.domains || []).map((d) => d.name).filter(Boolean)
-  return how + ' · ' + (ds.length ? '域名 ' + ds.join('、') : '没有绑定域名')
+  if (ds.length) return how + ' · 域名 ' + ds.join('、')
+  if (a.platform_domain?.active && a.platform_domain.host) return how + ' · ' + a.platform_domain.host
+  return how + ' · 没有绑定域名'
 }
 
 export function AccessSection({ app: a, reload }: TabProps) {
@@ -34,6 +42,7 @@ export function AccessSection({ app: a, reload }: TabProps) {
   const [domain, setDomain] = useState('')
   const [busy, setBusy] = useState('')
   const level = ACCESS_LEVELS.find((l) => l.key === a.exposure)
+  const pd = a.platform_domain?.host ? a.platform_domain : undefined
 
   const run = async (key: string, fn: () => Promise<void>) => {
     setBusy(key)
@@ -69,24 +78,38 @@ export function AccessSection({ app: a, reload }: TabProps) {
         </div>
       )}
       {!a.internal_only && (
-        <div className="flex flex-col gap-1.5" data-testid="domains">
-          <div className="text-2xs text-muted-foreground">域名</div>
-          {(a.domains || []).length === 0 && <div className="text-xs">没有绑定域名</div>}
-          {(a.domains || []).map((d) => {
-            const [t, v] = DOMAIN_STATE[d.status] || [d.status, 'outline']
-            return (
-              <div key={d.name} className="flex items-center gap-2 border-b py-1 text-sm last:border-0">
-                <Globe className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="mono min-w-0 flex-1 truncate text-xs">{d.name}</span>
-                <Badge variant={v} title={d.diagnosis?.message}>{t}</Badge>
-                <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => removeDomain(d.name)} aria-label={'删除域名 ' + d.name}>删除</Button>
+        <div className="flex flex-col" data-testid="domains">
+          <div className="mb-1 text-xs font-medium">域名</div>
+          {pd && (
+            <div className={LINE} data-testid="platform-domain">
+              <span className={LABEL}>平台给的</span>
+              <span className={cn('mono min-w-0 flex-1 truncate text-xs', !pd.active && 'text-muted-foreground')}>{pd.host}</span>
+              <Badge variant={pd.active ? 'success' : 'outline'}>{pd.active ? '已生效' : '没生效'}</Badge>
+              <span className="text-2xs text-muted-foreground">{pd.active ? '自动，跟着“设置 › 访问”里的平台域名' : pd.note || '改成“公网”后自动生效'}</span>
+            </div>
+          )}
+          <div className={cn(LINE, 'items-start')} data-testid="own-domains">
+            <span className={cn(LABEL, 'pt-1.5')}>自己的域名</span>
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              {(a.domains || []).map((d) => {
+                const [t, v] = DOMAIN_STATE[d.status] || [d.status, 'outline']
+                return (
+                  <div key={d.name} className="flex items-center gap-2 text-sm">
+                    <Globe className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="mono min-w-0 flex-1 truncate text-xs">{d.name}</span>
+                    <Badge variant={v} title={d.diagnosis?.message}>{t}</Badge>
+                    <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => removeDomain(d.name)} aria-label={'删除域名 ' + d.name}>删除</Button>
+                  </div>
+                )
+              })}
+              <div className="flex max-w-lg items-center gap-2">
+                {(a.domains || []).length === 0 && <span className="shrink-0 pr-2 text-xs">没有</span>}
+                <Input placeholder="例如 app.example.com" aria-label="新域名" value={domain} onChange={(e) => setDomain(e.target.value)} />
+                <Button variant="outline" disabled={!domain.trim() || !!busy} onClick={addDomain}>{busy === 'dom' && <Spinner />}添加域名</Button>
               </div>
-            )
-          })}
-          <div className="flex max-w-md gap-2">
-            <Input placeholder="例如 app.example.com" aria-label="新域名" value={domain} onChange={(e) => setDomain(e.target.value)} />
-            <Button variant="outline" disabled={!domain.trim() || !!busy} onClick={addDomain}>{busy === 'dom' && <Spinner />}添加域名</Button>
+            </div>
           </div>
+          {pd && <div className="mt-1.5 text-2xs text-muted-foreground" data-testid="domain-precedence">{(a.domains || []).length > 0 ? '两个都有，现在用自己的域名。' : '两个都有时用自己的域名。'}</div>}
         </div>
       )}
     </div>

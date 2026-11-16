@@ -532,7 +532,7 @@ var instFaults = []Fault{
 		Inject:  "测试机上用一份测试清单，环境变量写 {{platform.region | map \"x=1\"}}（没有 * 兜底），从本地目录装它"},
 	{Code: "APP-VARS-01", Group: "INST", Title: "应用装时算的平台变量和现在的不一样", Level: "P3",
 		Explain:  "应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。这一版平台不会去改已经装好的应用：应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行。这只是提醒，不是出错",
-		Next:     "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式不是清单默认的就加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装",
+		Next:     "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装",
 		Symptoms: []string{"acornfox apps vars 应用 里某个平台变量下面写着 APP-VARS-01 和现在的值", "acornfox --json apps vars 应用 的 vars[] 里有 differs 为 true、code 为 APP-VARS-01 的行，notes 里也有一句"},
 		Causes: []Cause{
 			{Text: "装好后用 acornfox app set --expose 改了对外方式", Check: "acornfox status 应用 --json 的 exposure 和装时不一样（只本机、局域网、公网）"},
@@ -540,7 +540,7 @@ var instFaults = []Fault{
 			{Text: "这台机器的设置变了（时区、国内或海外、服务器地址）", Check: "acornfox catalog platform-vars 看本机现在的值"},
 		},
 		Steps:   []string{"acornfox --json apps vars 应用 看哪几行 differs 为 true（value 是装时的，value_now 是现在的）", "acornfox status 应用 --json 看现在的对外方式和地址"},
-		Actions: []Action{{Text: "告诉用户哪几项不一样、应用里用的还是装时的值（应用照常运行）", Tier: 0}, {Text: "保留数据删掉应用，再用 --reuse-data 重装（对外方式不是清单默认的加 --expose）", Tier: 2}},
+		Actions: []Action{{Text: "告诉用户哪几项不一样、应用里用的还是装时的值（应用照常运行）", Tier: 0}, {Text: "保留数据删掉应用，再用 --reuse-data 重装（对外方式和这台机器给新应用的默认不一样时加 --expose）", Tier: 2}},
 		Ask:     "删应用（哪怕保留数据）、重装之前先问用户；不要自己去改应用的环境变量",
 		Verify:  "acornfox apps vars 应用 里这几行不再带 APP-VARS-01",
 		Related: []string{"CAT-INST-24"},

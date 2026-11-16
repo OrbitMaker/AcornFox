@@ -55,7 +55,8 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		acmeEmail     = fs_.String("acme-email", "", "optional ACME account email")
 		publicListen  = fs_.String("public-console-listen", "127.0.0.1:18801", "public console gateway behind the entry proxy (loopback TCP only; empty disables it)")
 		lanPort       = fs_.Int("lan-console-port", 0, "局域网控制台端口（开启后监听 0.0.0.0；默认 18802）")
-		exposure      = fs_.String("default-exposure", "public", "应用默认暴露方式：public、lan、local")
+		exposure      = fs_.String("default-exposure", "public", "新应用默认的对外方式：public、lan、local。不给时是 public（自己部署的项目），应用中心装的应用是 local；"+
+			"给了 lan 或 local 时两者都用它（install.sh 在局域网里新装的服务器上写 lan）")
 	)
 	if err := fs_.Parse(args); err != nil {
 		return 2
@@ -120,13 +121,14 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 			Issuer:    *httpsIssuer,
 			Email:     *acmeEmail,
 		},
-		HTTPSCAFile:     *httpsCAFile,
-		EdgeMode:        *edgeMode,
-		EdgeAdminPort:   *edgeAdminPort,
-		DefaultExposure: *exposure,
-		LANConsolePort:  *lanPort,
-		CheckPorts:      true,
-		ServerLAN:       serverLANAddress(*publicHost, platform.LinuxInstallCloud("/etc/acornfox/install.env")),
+		HTTPSCAFile:        *httpsCAFile,
+		EdgeMode:           *edgeMode,
+		EdgeAdminPort:      *edgeAdminPort,
+		DefaultExposure:    *exposure,
+		AppDefaultExposure: appCenterExposure(*exposure),
+		LANConsolePort:     *lanPort,
+		CheckPorts:         true,
+		ServerLAN:          serverLANAddress(*publicHost, platform.LinuxInstallCloud("/etc/acornfox/install.env")),
 		Setup: &setupDeps{
 			DataDir: *dataDir,
 			Console: "http://" + *consoleListen,
@@ -135,6 +137,20 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 			Log:     stdout,
 		},
 	}, rc, stdout, stderr)
+}
+
+// appCenterExposure is what a new app from the app center gets on a Linux
+// server whose default exposure (--default-exposure) is d: lan or local as
+// given; otherwise local. The flag's default, public, is what servers
+// installed before it existed run with: their app-center apps stay local
+// and an app from the catalog is never opened to every interface and its
+// domains without the user choosing it (install --expose public).
+func appCenterExposure(d string) string {
+	switch d {
+	case "lan", "local":
+		return d
+	}
+	return "local"
 }
 
 // runRunner implements `acornfox runner` (N1): connect to Docker via client

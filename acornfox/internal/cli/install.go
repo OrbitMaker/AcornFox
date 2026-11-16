@@ -82,8 +82,9 @@ const installUsage = `用法：acornfox install 应用 [--name 应用名] [--ver
 
 用途：从应用中心的目录在服务器上一次装好一个应用（或一个配方里的几个应用并连起来）：建应用、写配置、
   下载镜像、启动、健康检查、初始化。装成一个安装任务，可以查进度；任一步失败会自动清理这次建出来的东西。
-副作用：会改数据（建应用、数据卷、镜像、容器）。默认按清单写的对外方式，多数是只本机能打开（exposure local）；
-  加 --expose 时按它（见下面）。
+副作用：会改数据（建应用、数据卷、镜像、容器）。不加 --expose 时按这台机器给新应用的默认对外方式：
+  局域网里新装的服务器是本机和局域网（exposure lan），云主机和以前装的机器是只本机（exposure local）；
+  数据库、缓存这类只在内部网络。--plan 的 apps[].exposure 写着这次会是哪种。加 --expose 时按它（见下面）。
   应用需要的服务（例如大模型接口）接的是这台机器上别的应用提供的、要按使用方单独发凭据的，会在那个应用里
   给它建一份凭据（例如一把令牌）；提供服务的应用登记进服务登记表（acornfox services list 看）。
 参数：
@@ -116,8 +117,10 @@ const installUsage = `用法：acornfox install 应用 [--name 应用名] [--ver
                        还有哪些必填参数没填（params_missing）、装不了的原因（problems）。
                        平台不会替你装别的应用来提供服务：要几个应用一起装好、接好，装配方（--recipe）。
                        --json 时输出 {can_install, say, steps, apps, problems}：can_install 为 true 才能装；
-                       say 可以原样告诉用户。装之前先看计划，是推荐的做法
-  --expose 对外方式   装好时就用这个对外方式，不用装完再 acornfox app set --expose：local 只本机、lan 本机和局域网、
+                       say 可以原样告诉用户；apps[].exposure 是装好后的对外方式（internal 只在内部网络、local 只本机、
+                       lan 本机和局域网、public 所有网卡加域名）。装之前先看计划，是推荐的做法
+  --expose 对外方式   装好时就用这个对外方式（不加时用这台机器的默认，见上面），不用装完再 acornfox app set --expose：
+                       local 只本机、lan 本机和局域网、
                        public 所有网卡加域名。这样应用拿到的访问地址（平台变量 app.url、app.scheme、app.host，
                        例如应用里的 webhook 地址）一开始就是对的；装完再改对外方式，这一版不会改写已经写进应用的地址
                        （acornfox apps vars 应用 会标 APP-VARS-01）。开到局域网、公网是对外开放，要先问用户。
@@ -195,8 +198,9 @@ const installUsage = `用法：acornfox install 应用 [--name 应用名] [--ver
   acornfox install 应用 --plan                     # 先看计划：需要的服务接哪条、还缺什么（只读）
   acornfox --json install 应用 --plan
   acornfox install 应用 --use llm=我的上游          # 有几条同类服务时，指定用哪一条
-  acornfox install demo-app --expose lan          # 装好就能在局域网别的电脑上打开（先问用户）
+  acornfox install demo-app --expose lan          # 装好就能在局域网别的电脑上打开（先问用户；默认已是局域网的机器不用加）
 装好以后：
+  对外方式是 lan、public 的应用，用安装结果里的地址（url）在局域网里的电脑、手机上打开。
   只本机能打开的应用，在你自己的电脑上运行 acornfox open 应用名 打开（经 SSH 隧道，不用放行安全组）。
   应用接上的服务是别的应用发的凭据时，凭据有没有额度、会不会过期由那个应用决定；要控制花费，到那个应用里给它设上限。
 另：不带应用名的 acornfox install 是在这台电脑上安装 AcornFox 本身，这一版没有开放（Mac 上只有命令行客户端）；
@@ -644,6 +648,15 @@ var needStatusText = map[string]string{
 
 // showPlan prints the plan of req (POST /v1/catalog/plan): nothing is
 // installed. Exit 0 whatever the plan says: can_install tells.
+// planExposureText says in words how a planned app will be reachable
+// (PlanApp.Exposure); an unknown or missing one prints nothing.
+var planExposureText = map[string]string{
+	"internal": "只在内部网络，给别的应用用，没有网页",
+	"local":    "只本机能打开（从你自己的电脑打开用 acornfox open 应用名）",
+	"lan":      "本机和局域网里的电脑、手机都能打开",
+	"public":   "所有网卡和绑定的域名都能打开",
+}
+
 func (a *app) showPlan(ctx context.Context, api client.API, req client.InstallRequest) int {
 	pa, ok := api.(client.PlanAPI)
 	if !ok {
@@ -674,6 +687,9 @@ func (a *app) showPlan(ctx context.Context, api client.API, req client.InstallRe
 		}
 	}
 	for _, ap := range p.Apps {
+		if w := planExposureText[ap.Exposure]; w != "" {
+			a.out.human("%s 装好后：%s", ap.Name, w)
+		}
 		if len(ap.Needs) == 0 && len(ap.ParamsMissing) == 0 {
 			continue
 		}

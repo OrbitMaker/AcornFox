@@ -14,7 +14,7 @@
 | 安装弹窗：版本、需要的服务（见下）、更多设置、内存检查、命令行写法（私有目录带 `--catalog`）；进度、失败编号、首次登录；只本机的应用不给打不开的 127.0.0.1 链接，改成“怎么打开”（服务器在局域网、应用有自己的登录时可确认后改成局域网；总是给 `acornfox open 应用名`） | 完成 | `POST /v1/catalog/plan`、`POST /v1/catalog/install`、`GET /v1/catalog/install[/{task}]`、`GET /v1/apps/{app}/first-login[?reveal=true]` |
 | 我的应用：卡片和表格、筛选、搜索、只本机的标“只本机”；详情四个标签页（概览、日志、版本、设置；概览里有访问卡片（三档能点、首次登录信息并在里面）、只本机应用的“怎么打开”、用到的服务、旧格式清单装的应用的说明；能改的都在“设置”里，一行一项点开才展开，以前的配置、数据、资源、高级四个标签的地址跳到设置的对应项）；来自私有目录的标目录名，目录断开的标出来 | 完成 | `/v1/apps…`、`/v1/metrics/apps/{app}`、`/v1/deployments/{id}/logs` |
 | 运行环境：后台服务、Docker、网关、磁盘、端口的自检，每项带故障编号、原因和怎么办 | 完成 | `GET /v1/runtime/checks`、`GET /v1/setup/faults` |
-| 设置：通用、服务、访问、运行环境、存储、下载源、升级、开发者与 AI | 完成 | `GET /v1/services`、`GET /v1/services/kinds`、`POST /v1/services`、`PATCH /v1/services/{name}`、`POST /v1/services/{name}/test`、`DELETE /v1/services/{name}`、`GET /v1/lan-console`、`GET /v1/public-console`（控制台入口只读）、`GET /v1/runtime/checks`、`GET /v1/metrics/host`、`GET /v1/status`、`GET /v1/catalog`、`POST /v1/catalog/connect` |
+| 设置：通用、服务、访问、运行环境、存储、下载源、升级、开发者与 AI | 完成 | `GET /v1/services`、`GET /v1/services/kinds`、`POST /v1/services`、`PATCH /v1/services/{name}`、`POST /v1/services/{name}/test`、`DELETE /v1/services/{name}`、`GET/PUT/DELETE /v1/platform/domain`、`POST /v1/platform/domain/check`、`GET /v1/lan-console`、`GET /v1/public-console`、`POST /v1/public-console/enable`、`DELETE /v1/public-console`、`GET /v1/runtime/checks`、`GET /v1/metrics/host`、`GET /v1/status`、`GET /v1/catalog`、`POST /v1/catalog/connect` |
 
 ### 首页看板能选的图表
 
@@ -32,7 +32,7 @@
 
 ### 设置里没有的分区
 
-样稿的“提醒”（桌面通知、邮件、群机器人）和“账号”没有后端支撑，这一版不显示。“访问”只显示局域网控制台、公网控制台开没开和对应的命令：开关的接口只在受信入口（服务器上的命令行）开放，控制台页面不能把自己开放给更多人。“存储”里的清理没有接口，只给查看占用的命令。
+样稿的“提醒”（桌面通知、邮件、群机器人）和“账号”没有后端支撑，这一版不显示。“访问”（`src/pages/prefs/access.tsx`）和应用的“设置”一个样子，一行一项点开才展开（行在 `src/components/expand-row.tsx`）：域名（平台域名，四种样子：正常、还没有、还没生效、这台机器用不了；旧服务端没有接口时不显示这一行）、局域网里打开控制台（开关和清密码只给服务器上的命令，记住的设备能移除）、在外面打开控制台（服务端给 `can_toggle` 时页面上能开、能关，都先确认，`needs_password` 时要再输一次现在的控制台密码，开启后的新密码只显示一次；旧服务端只给命令）。应用“设置 › 谁能打开”的域名分“平台给的”（`platform_domain`）和“自己的域名”两行，两个都有时用自己的。“存储”里的清理没有接口，只给查看占用的命令。
 
 接口没有的东西不显示：
 - “找专人部署”：前端只在 `GET /v1/catalog` 返回 `expert`（带 `url`，可选 `price_cny`）时显示。服务端和目录格式**目前都没有这个字段**，所以现在不会出现。

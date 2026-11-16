@@ -58,3 +58,15 @@ func TestValidateConsoleListen(t *testing.T) {
 		}
 	}
 }
+
+// The app center follows --default-exposure only when it is lan or local
+// (install.sh writes lan on a LAN server installed fresh). Without it —
+// servers installed before, cloud servers — the flag's default is public,
+// and apps from the app center stay local as they always were.
+func TestAppCenterExposure(t *testing.T) {
+	for in, want := range map[string]string{"lan": "lan", "local": "local", "public": "local", "": "local"} {
+		if got := appCenterExposure(in); got != want {
+			t.Errorf("appCenterExposure(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

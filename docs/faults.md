@@ -155,6 +155,17 @@
 | public_ip_unknown | P2 | 查不到这台服务器的公网 IP | 确认服务器有公网 IP、能访问外网，稍后再运行同一条命令 |
 | edge_unavailable | P2 | 网关没准备好，设不了域名验证 | sudo acornfox doctor 看网关和端口两项，按里面的编号处理后再运行同一条命令 |
 | verify_required | P3 | 还没完成域名验证就要开通公网控制台 | 重新运行 acornfox public-console enable 域名 --json：它先验证域名，通过后才开通 |
+| PUBCON-01 | P3 | 在控制台页面开关公网控制台时，再输一次的控制台密码没输或不对 | 输这次登录用的控制台密码再试；忘了局域网控制台密码就在服务器上运行 acornfox lan-console reset-password 后重设，或者在服务器上用命令 acornfox public-console 开关 |
+| PUBCON-02 | P3 | 控制台密码试错次数太多，暂时不让再试 | 按 message 里的分钟数等一会儿再试；等的时候不要反复点，每次失败都会让等的时间变长 |
+| PUBCON-03 | P3 | 这台机器在局域网里，开不了公网控制台 | 在局域网里用局域网控制台（http://局域网地址:18802）；人在外面时在自己电脑上运行 acornfox open（经 SSH 隧道） |
+| PUBCON-04 | P3 | 从公网控制台登录时，页面上只能关闭公网控制台 | 要换地址，从局域网控制台或用 acornfox open 进控制台再开；或者在服务器上运行 acornfox public-console enable 新域名 |
+| PDOMAIN-01 | P2 | 平台域名没有指到这台机器 | 到你买域名的地方加（或改）一条记录：名字 *.子域、类型 A、指向这台服务器的公网地址（acornfox domain base 给出完整的一条），等几分钟再检查 |
+| PDOMAIN-02 | P3 | 这台机器没有公网地址，用不了平台域名 | 要在外面打开应用，用 acornfox open 应用名 经安全通道打开；要用域名，把应用装到有公网地址的云主机上 |
+| PDOMAIN-03 | P2 | 外面连不上这台机器的 80 或 443 | 在云厂商控制台的安全组里放行入方向 TCP 80 和 443（来源 0.0.0.0/0）；服务器自己的防火墙开着的也要放行 |
+| PDOMAIN-04 | P2 | 平台域名下的证书没签下来 | 中国大陆的服务器先确认域名已备案；再看入口代理的日志（sudo docker logs --tail 50 acornfox-edge） |
+| PDOMAIN-05 | P3 | 平台域名的写法不对 | 只填域名本身，例如 apps.example.com：不带 http://、不带路径和端口，不能是 IP 地址 |
+| PDOMAIN-06 | P3 | 某个应用用不了平台给的名字 | 给这个应用单独绑一个自己的域名（acornfox domain add 域名），或者让占着这个名字的一方换一个 |
+| PDOMAIN-07 | P3 | 换掉或清掉平台域名要先确认 | 先运行 acornfox domain base set 新域名 --plan（或 clear --plan）把会怎样告诉用户；用户同意后加 --yes 再运行 |
 | OPEN-APP-01 | P3 | 应用还没有访问端口 | 运行 acornfox status 应用名 看状态；部署成功后再打开 |
 | OPEN-APP-02 | P3 | 经网址登记的服务器上，只本机的应用打不开 | 用 acornfox target add 名称 --ssh 用户@主机 登记这台服务器后再运行 acornfox open 应用名；或经用户同意改成局域网：acornfox app set --app 应用名 --expose lan |
 | OPEN-APP-03 | P3 | 应用只在内部网络，没有网页可以打开 | 不用打开它：它是给别的应用用的（例如数据库、缓存），别的应用按它的名字在内部网络里连它；要用它的应用看 acornfox status 那个应用名 里的服务 |
@@ -198,7 +209,7 @@
 | CAT-INST-37 | P2 | 原来的凭据核对没过，按清单停下了 | 先查提供方：acornfox status 提供方 看它是否在运行，acornfox logs 提供方 --tail 200 看日志；提供方好了再装一次（还是 --reuse-data）。确认原来的数据还在不在（例如用户在提供方里删过库、改过密码就会这样）。只有用户确定不要原来的数据时，才改接别的服务：加 --use 需要名=服务名 再装；不要自己删库、改密码 |
 | CAT-INST-38 | P3 | 要接的服务被占着或已经接满 | acornfox services list 看每条服务被谁独占、还能接几个；acornfox install 应用 --plan 看现在能接哪条。有别的同类服务就用 --use 需要名=服务名 指定；没有就登记一条你已有的（acornfox services add …）。占着位置的是删了但数据还留着的应用、用户也确认它不要了：它已经删了，不能直接 delete --volumes，也不要手工 docker volume rm（接入记录还在，位置照样占着）；问过用户后先 acornfox install --name 原来的名字 --reuse-data 装回来，再 acornfox delete 原来的名字 --volumes 连数据一起删，位置才让出来。不要为了腾位置去删别的应用，要删先问用户 |
 | CAT-INST-39 | P3 | 清单里的一个值算不出来 | 看 message 是哪一处的哪个 {{…}}（message 里不带取到的值）。是 map 没对上、条件同时成立这类、要靠换一个值解决的（例如换一种对外方式、--set 改设置项；acornfox catalog platform-vars 看本机平台变量的值），问用户后再装；写法读不了、启动命令带保密值的，是目录的问题，把 message 反馈给我们，不要想办法绕过 |
-| APP-VARS-01 | P3 | 应用装时算的平台变量和现在的不一样 | apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式不是清单默认的就加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装 |
+| APP-VARS-01 | P3 | 应用装时算的平台变量和现在的不一样 | apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装 |
 | CAT-CONN-01 | P3 | 连接码格式不对 | 让用户照原样再抄一遍；0、1、8 会当成 O、I、B |
 | CAT-CONN-02 | P3 | 这台服务器关掉了下载网关 | 问用户是否打开下载网关（去掉 ACORNFOX_GATEWAY=off 或 network.json 里的 "gateway": "off"） |
 | CAT-CONN-03 | P3 | 连接码不存在、抄错了，或已被别的机器用过 | 让用户核对连接码；还不行就找给码的人要新码。不要反复试 |
@@ -3821,6 +3832,303 @@
 - 必须先停下问用户：开公网控制台就是对外开放：用户本来就要开的，那句话就是同意；不是用户要的不要开
 - 确认恢复：enable 返回 ok:true
 
+### PUBCON-01 在控制台页面开关公网控制台时，再输一次的控制台密码没输或不对
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：在“设置 › 访问”里开启或关闭公网控制台，要再输一次这次登录用的那个入口的密码：从局域网控制台登录的输局域网控制台密码，从公网控制台登录的输公网控制台密码。用 acornfox open 经 SSH 隧道进来的不用输。输错的次数和那个入口的登录页算在一起。
+- 下一步：输这次登录用的控制台密码再试；忘了局域网控制台密码就在服务器上运行 acornfox lan-console reset-password 后重设，或者在服务器上用命令 acornfox public-console 开关
+- 现象：页面开启或关闭公网控制台时提示“控制台密码不对”或“要再输一次现在的控制台密码”；POST /v1/public-console/enable 或 DELETE /v1/public-console 返回 code PUBCON-01（HTTP 403）
+
+可能原因（逐条判定）：
+
+1. 输的是别的密码（例如把公网控制台的密码输进了局域网控制台登录的页面） —— 判定：GET /v1/public-console 的 entry：lan 要局域网控制台密码，public 要公网控制台密码
+2. 密码框是空的 —— 判定：message 是“要再输一次现在的控制台密码”
+3. 忘了密码 —— 判定：问用户
+
+排查顺序：
+
+1. 看 GET /v1/public-console 的 entry 是哪种登录
+2. 请用户输这次登录用的密码再试
+
+处置：
+
+- ［0 级 只读］请用户输对密码再试
+- ［2 级 先问用户］在服务器上用 acornfox public-console enable 域名 或 disable 开关（不用密码）
+- ［2 级 先问用户］在服务器上运行 acornfox lan-console reset-password 清掉局域网控制台密码后重设（所有记住的设备和登录会话都失效）
+
+- 必须先停下问用户：要在服务器上开公网控制台或清密码之前
+- 确认恢复：页面开启或关闭成功
+- 相关编号：PUBCON-02
+
+### PUBCON-02 控制台密码试错次数太多，暂时不让再试
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：按 message 里的分钟数等一会儿再试；等的时候不要反复点，每次失败都会让等的时间变长
+- 现象：页面开启或关闭公网控制台时提示“密码试错次数太多，请 N 分钟后再试”；返回 code PUBCON-02（HTTP 429）
+
+可能原因（逐条判定）：
+
+1. 这个地址连续输错了 5 次以上（和这个入口的登录页算在一起） —— 判定：message 里有要等的分钟数
+2. 短时间内各处一共输错了很多次，整个入口暂停 10 分钟 —— 判定：换一台电脑也提示要等
+
+排查顺序：
+
+1. 读 message 里的分钟数
+
+处置：
+
+- ［0 级 只读］等够时间再试
+- ［2 级 先问用户］急用时在服务器上用 acornfox public-console 命令开关（不用密码）
+
+- 必须先停下问用户：要在服务器上开公网控制台之前；有人在反复猜密码时告诉用户
+- 确认恢复：等过之后输对密码，开启或关闭成功
+- 相关编号：PUBCON-01
+
+### PUBCON-03 这台机器在局域网里，开不了公网控制台
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：这台机器只有局域网地址，外面的人用域名连不到它，控制台页面上不能开公网控制台。已经开着的可以关。
+- 下一步：在局域网里用局域网控制台（http://局域网地址:18802）；人在外面时在自己电脑上运行 acornfox open（经 SSH 隧道）
+- 现象：“在外面打开控制台”一行写着“这台机器在局域网里，没有公网地址，开不了公网控制台”；POST /v1/public-console/enable 返回 code PUBCON-03（HTTP 409）
+
+可能原因（逐条判定）：
+
+1. 机器在家里或办公室的局域网里，没有公网地址 —— 判定：GET /v1/public-console 带 unsupported；acornfox doctor 里局域网控制台一项可用
+
+排查顺序：
+
+1. GET /v1/public-console 看 unsupported
+
+处置：
+
+- ［0 级 只读］告诉用户在局域网里用局域网控制台，在外面用 acornfox open
+
+- 必须先停下问用户：用户坚持要从外面直接用网址打开时（要路由器端口转发和域名，风险自担），先说清楚再定
+- 确认恢复：用户能用局域网控制台或 acornfox open 进控制台
+- 相关编号：LAN-CONSOLE-01
+
+### PUBCON-04 从公网控制台登录时，页面上只能关闭公网控制台
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：从公网控制台登录进来的页面，能关闭公网控制台，不能开启或换地址：换地址会让正在用的这次登录失效。
+- 下一步：要换地址，从局域网控制台或用 acornfox open 进控制台再开；或者在服务器上运行 acornfox public-console enable 新域名
+- 现象：POST /v1/public-console/enable 返回 code PUBCON-04（HTTP 403）
+
+可能原因（逐条判定）：
+
+1. 这次是从公网控制台的网址登录的 —— 判定：GET /v1/public-console 的 entry 是 public
+
+排查顺序：
+
+1. GET /v1/public-console 看 entry
+
+处置：
+
+- ［0 级 只读］告诉用户换一种方式进控制台再改
+- ［2 级 先问用户］在服务器上运行 acornfox public-console enable 新域名
+
+- 必须先停下问用户：换公网控制台地址之前
+- 确认恢复：换了地址后新地址能打开
+
+### PDOMAIN-01 平台域名没有指到这台机器
+
+- 分组：域名和公网控制台
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：随便一个 *.平台域名 下的名字，公共 DNS 查出来不是这台服务器的公网地址（或者查不到）。应用照常用原来带端口的地址打开，平台给的名字打不开、证书也签不下来。
+- 下一步：到你买域名的地方加（或改）一条记录：名字 *.子域、类型 A、指向这台服务器的公网地址（acornfox domain base 给出完整的一条），等几分钟再检查
+- 现象：控制台“设置 › 访问 › 域名”一行红字“还没生效：域名没有指到这台机器”；acornfox domain base 的“问题（PDOMAIN-01）”；doctor 的平台域名一项
+
+可能原因（逐条判定）：
+
+1. 还没有加 *.子域 这条记录，或者刚加、还没生效［doctor 自动判定］ —— 判定：acornfox domain base --json 的 problem.detail 写“还查不到”；dig +short 任意名字.平台域名 没有结果
+2. 记录指向了别的地址（旧服务器、CDN、代理）［doctor 自动判定］ —— 判定：problem.detail 写“现在指向 X，应该指向 Y”
+3. 只加了某一个名字（例如 hello.apps），没加通配的 *.apps —— 判定：dig +short 随便一个名字.平台域名 没结果，dig +short hello.平台域名 有结果
+4. 这台服务器连不上公共 DNS 服务器［doctor 自动判定］ —— 判定：problem.text 是“查不了域名指向哪里”
+
+排查顺序：
+
+1. acornfox --json domain base
+2. 看 problem.detail 和 record（要加的那一条）
+3. dig +short 随便一个名字.平台域名
+
+处置：
+
+- ［0 级 只读］把 record 里的名字、类型、指向原样告诉用户，请他到域名服务商那里加好
+- ［1 级 可以直接做］用户说加好了，等几分钟再运行 acornfox domain base（会重新检查）
+
+- 必须先停下问用户：改解析要用户自己在域名服务商那里做；记录指向别处、开着 CDN 时先问用户能不能改
+- 确认恢复：acornfox domain base 的第一项打勾“域名指过来了”
+- 相关编号：PDOMAIN-03、PDOMAIN-04
+- 演练方法：测试机上设一个没有解析的平台域名：acornfox domain base set nope.example.com
+
+### PDOMAIN-02 这台机器没有公网地址，用不了平台域名
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：平台域名下的名字要从互联网申请证书、被人访问，局域网里的机器（家里、公司内网，没有公网地址）和 Mac、Windows 电脑这一版用不了。这不是坏了，是这一版不支持。
+- 下一步：要在外面打开应用，用 acornfox open 应用名 经安全通道打开；要用域名，把应用装到有公网地址的云主机上
+- 现象：控制台“域名”一行写“这台机器在局域网里，没有公网地址，用不了域名”，没有输入框；acornfox domain base set 返回 PDOMAIN-02
+
+可能原因（逐条判定）：
+
+1. 服务器在用户的局域网里（地址是 192.168.x.x、10.x.x.x 这类）［doctor 自动判定］ —— 判定：acornfox --json domain base 的 supported 是 false；acornfox --json status 的地址是私有地址
+2. 这是一台 Mac 或 Windows 电脑［doctor 自动判定］ —— 判定：acornfox version 显示的系统
+3. 安装时记下的服务器地址（--public-host）是内网地址，其实这台云主机有公网地址 —— 判定：云厂商控制台里这台机器有公网 IP，而 domain base 的 public_ip 是空的
+
+排查顺序：
+
+1. acornfox --json domain base
+2. 问用户这台机器是云主机还是家里、公司里的电脑
+
+处置：
+
+- ［0 级 只读］照实告诉用户这一版用不了，给出 acornfox open 应用名 的办法
+- ［2 级 先问用户］第三种原因：照 Skill 里“改服务器地址”那一节改 --public-host（要重启服务，先问用户）
+
+- 必须先停下问用户：要改服务器地址、重启服务时
+- 确认恢复：acornfox --json domain base 的 supported 是 true
+- 演练方法：开发机（局域网）上运行 acornfox domain base
+
+### PDOMAIN-03 外面连不上这台机器的 80 或 443
+
+- 分组：域名和公网控制台
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：域名已经指过来了，但连这台服务器公网地址的 80 或 443 端口不通。证书要经 80 端口验证，访问走 443，所以平台给的名字打不开、证书也签不下来。
+- 下一步：在云厂商控制台的安全组里放行入方向 TCP 80 和 443（来源 0.0.0.0/0）；服务器自己的防火墙开着的也要放行
+- 现象：控制台“域名”一行展开后第二项是“外面连不上 80 / 443”；acornfox domain base 的“问题（PDOMAIN-03）”
+
+可能原因（逐条判定）：
+
+1. 云厂商安全组没有放行 80、443 —— 判定：problem.detail 写“超时”；云厂商控制台看安全组入方向规则
+2. 服务器自己的防火墙（ufw、firewalld）没放行 —— 判定：sudo ufw status 或 sudo firewall-cmd --list-all
+3. 80、443 被别的程序占着（宝塔、1Panel、nginx），入口代理没在听［doctor 自动判定］ —— 判定：problem.detail 写“被拒绝”；doctor 的 SETUP-PORT-01
+4. 入口代理没在运行［doctor 自动判定］ —— 判定：doctor 的入口代理一项（EDGE-01）
+5. 这台云主机从自己访问不了自己的公网地址（少数厂商的网络这样设计），其实外面是通的 —— 判定：在别的电脑上 curl -m 5 http://任意名字.平台域名 能连上
+
+排查顺序：
+
+1. acornfox --json domain base
+2. sudo acornfox doctor
+3. 问用户安全组有没有放行 80、443
+
+处置：
+
+- ［1 级 可以直接做］按 doctor 的编号处理入口代理、端口占用
+- ［2 级 先问用户］改安全组、服务器防火墙
+
+- 必须先停下问用户：改安全组、防火墙或停别的程序之前
+- 确认恢复：acornfox domain base 的第二项打勾“外面能连上”
+- 相关编号：SETUP-PORT-01、EDGE-01、port_unreachable
+
+### PDOMAIN-04 平台域名下的证书没签下来
+
+- 分组：域名和公网控制台
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：前两项都过了，可是某个应用在平台域名下的名字过了 10 分钟还没有有效的证书。浏览器打开会提示不安全。
+- 下一步：中国大陆的服务器先确认域名已备案；再看入口代理的日志（sudo docker logs --tail 50 acornfox-edge）
+- 现象：控制台“域名”一行展开后第三项是“证书没签下来”；acornfox domain base 的“问题（PDOMAIN-04）”
+
+可能原因（逐条判定）：
+
+1. 中国大陆服务器的域名没备案，80/443 被云厂商拦截 —— 判定：浏览器打开 http://应用名.平台域名 看到云厂商的拦截页
+2. 证书签发方的限额：同一个主域名一周最多 50 张证书（平台域名换来换去、应用很多时会碰到） —— 判定：入口日志里有 rateLimited、too many certificates
+3. 域名开了 CDN 或代理，验证请求没到这台机器 —— 判定：dig 结果不是这台服务器的地址
+4. 入口代理出了问题［doctor 自动判定］ —— 判定：doctor 的入口代理一项（EDGE-*）
+
+排查顺序：
+
+1. acornfox --json domain base
+2. sudo docker logs --tail 50 acornfox-edge
+3. 问用户域名有没有备案
+
+处置：
+
+- ［0 级 只读］把日志里和证书有关的几行告诉用户
+- ［2 级 先问用户］备案由用户自己办；碰到限额就等一周或给应用绑自己的域名
+
+- 必须先停下问用户：要备案、换域名时
+- 确认恢复：acornfox domain base 的第三项打勾“证书已自动申请”
+- 相关编号：PDOMAIN-01、PDOMAIN-03、icp_blocked
+
+### PDOMAIN-05 平台域名的写法不对
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：只填域名本身，例如 apps.example.com：不带 http://、不带路径和端口，不能是 IP 地址
+- 现象：acornfox domain base set 或控制台保存时返回 PDOMAIN-05；平台域名的设置文件读不了（problem 写“设置文件读不了”）
+
+可能原因（逐条判定）：
+
+1. 带了 http:// 或 https://、路径、端口 —— 判定：看错误信息里引号中的写法
+2. 填的是 IP 地址，或者没有点的名字（localhost） —— 判定：看错误信息
+3. 数据目录里的 platform-domain.json 坏了 —— 判定：acornfox --json domain base 的 problem.detail 写“损坏”
+
+排查顺序：
+
+1. 把用户给的写法去掉协议、路径、端口再试
+
+处置：
+
+- ［1 级 可以直接做］按正确写法重新运行 acornfox domain base set 域名（文件坏了也这样做，会覆盖它）
+
+- 必须先停下问用户：拿不准用户要的是哪个域名时
+- 确认恢复：acornfox domain base set 成功
+
+### PDOMAIN-06 某个应用用不了平台给的名字
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：应用名.平台域名 这个名字已经被别的应用自己绑走了，或者是公网控制台的地址，或者加起来超过 253 个字符。这个应用仍用原来的地址，别的应用不受影响。
+- 下一步：给这个应用单独绑一个自己的域名（acornfox domain add 域名），或者让占着这个名字的一方换一个
+- 现象：应用“设置 › 谁能打开”里平台给的那一行写“已经被…用了”或“太长”；acornfox domain base 的应用列表里这一行带 PDOMAIN-06
+
+可能原因（逐条判定）：
+
+1. 另一个应用自己绑了 这个应用名.平台域名 —— 判定：acornfox domain list（在那个应用的目录里）或看应用详情的 domains
+2. 应用名正好是 console，公网控制台开在 console.平台域名 —— 判定：acornfox public-console status
+3. 应用名加平台域名太长 —— 判定：数一下长度
+
+排查顺序：
+
+1. acornfox --json domain base 看 apps 里这一行的 note
+
+处置：
+
+- ［0 级 只读］告诉用户原因和两个办法
+- ［2 级 先问用户］给应用绑自己的域名或删掉另一个应用绑的域名
+
+- 必须先停下问用户：要改别的应用的域名时
+- 确认恢复：应用详情的 platform_domain.active 是 true
+
+### PDOMAIN-07 换掉或清掉平台域名要先确认
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：已经有平台域名，要换成别的或清掉：所有应用在旧域名下的地址都会打不开（装应用时写进应用里的旧地址也不会跟着变）。所以这一步要用户明确同意，接口不带确认一律拒绝。
+- 下一步：先运行 acornfox domain base set 新域名 --plan（或 clear --plan）把会怎样告诉用户；用户同意后加 --yes 再运行
+- 这一项要用户自己确认或操作
+- 现象：acornfox domain base set 或 clear 返回 PDOMAIN-07
+
+可能原因（逐条判定）：
+
+1. 换掉或清掉时没有带 --yes（接口请求体没带 "confirm": true） —— 判定：看命令有没有 --yes
+
+排查顺序：
+
+1. acornfox domain base set 新域名 --plan
+
+处置：
+
+- ［0 级 只读］把 --plan 的输出告诉用户
+- ［2 级 先问用户］用户同意后加 --yes 再运行
+
+- 必须先停下问用户：总是：换掉、清掉平台域名都要用户同意
+- 确认恢复：acornfox domain base 显示新的平台域名（或“还没有设平台域名”）
+
 ## 打开应用
 
 ### OPEN-APP-01 应用还没有访问端口
@@ -5012,7 +5320,7 @@
 - 分组：应用中心安装（CAT-INST）
 - 默认等级：P3（提示或用法问题，不急）
 - 是什么：应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。这一版平台不会去改已经装好的应用：应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行。这只是提醒，不是出错
-- 下一步：apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式不是清单默认的就加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装
+- 下一步：apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装
 - 现象：acornfox apps vars 应用 里某个平台变量下面写着 APP-VARS-01 和现在的值；acornfox --json apps vars 应用 的 vars[] 里有 differs 为 true、code 为 APP-VARS-01 的行，notes 里也有一句
 
 可能原因（逐条判定）：
@@ -5029,7 +5337,7 @@
 处置：
 
 - ［0 级 只读］告诉用户哪几项不一样、应用里用的还是装时的值（应用照常运行）
-- ［2 级 先问用户］保留数据删掉应用，再用 --reuse-data 重装（对外方式不是清单默认的加 --expose）
+- ［2 级 先问用户］保留数据删掉应用，再用 --reuse-data 重装（对外方式和这台机器给新应用的默认不一样时加 --expose）
 
 - 必须先停下问用户：删应用（哪怕保留数据）、重装之前先问用户；不要自己去改应用的环境变量
 - 确认恢复：acornfox apps vars 应用 里这几行不再带 APP-VARS-01

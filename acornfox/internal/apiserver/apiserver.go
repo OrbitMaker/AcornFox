@@ -23,6 +23,7 @@ import (
 	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/hostcheck"
+	"github.com/acornfox/acornfox/internal/platformdomain"
 	"github.com/acornfox/acornfox/internal/platformvar"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
@@ -137,8 +138,15 @@ type Config struct {
 	Resolver    Resolver     // DNS lookups for domain warnings; nil => net.DefaultResolver
 	DataDir     string       // data directory whose filesystem is reported by GET /v1/host
 
-	// Public console management, trusted entry only; nil => 404.
+	// Public console management; nil => 404. The trusted entry may do
+	// everything; a logged-in browser may open and close it after typing
+	// the console password again (public_console.go).
 	PublicConsole PublicConsole
+	// PublicConsoleBase returns the platform domain whose "console." name
+	// the console page suggests for the public console ("" => no
+	// suggestion); nil => no suggestion. Wired to the platform domain
+	// setting where the server is put together.
+	PublicConsoleBase func(ctx context.Context) string
 
 	// Three-platform architecture (2026-11-01).
 	// DefaultExposure applies to apps whose exposure is "" ("public" on Linux,
@@ -174,6 +182,11 @@ type Config struct {
 	// provider. nil => the standalone edition's algorithm with PublicHost
 	// (see address.go).
 	PlatformVars platformvar.Addresser
+	// PlatformDomain is this machine's platform domain (one for the whole
+	// machine; public apps also open at https://<app>.<platform domain>):
+	// the /v1/platform/domain routes, the apps' addresses and the app
+	// view's platform_domain. nil => none (the routes answer 404).
+	PlatformDomain *platformdomain.Service
 
 	// Console pages (runtime page, home dashboard, settings):
 	// HostHistory keeps the last 24 hours of host CPU, memory and disk in
@@ -219,7 +232,8 @@ type server struct {
 	resolver    Resolver
 	dataDir     string
 
-	publicConsole PublicConsole
+	publicConsole     PublicConsole
+	publicConsoleBase func(ctx context.Context) string
 
 	defaultExposure string
 	lanHost         func() string
@@ -230,6 +244,7 @@ type server struct {
 	deployLogs      *deploylog.Store
 	appCenter       *appinstall.Engine
 	addresser       platformvar.Addresser
+	platformDomain  *platformdomain.Service
 	hostHistory     *HostHistory
 	appHistory      *AppHistory
 	checkPorts      hostcheck.Ports
@@ -286,6 +301,8 @@ func newServer(cfg Config) *server {
 		dataDir:        cfg.DataDir,
 		publicConsole:  cfg.PublicConsole,
 
+		publicConsoleBase: cfg.PublicConsoleBase,
+
 		defaultExposure: cfg.DefaultExposure,
 		lanHost:         cfg.LANHost,
 		serverLAN:       cfg.ServerLAN,
@@ -295,6 +312,7 @@ func newServer(cfg Config) *server {
 		deployLogs:      cfg.DeployLogs,
 		appCenter:       cfg.AppCenter,
 		addresser:       addresserFor(cfg),
+		platformDomain:  cfg.PlatformDomain,
 		hostHistory:     cfg.HostHistory,
 		appHistory:      cfg.AppHistory,
 		checkPorts:      cfg.CheckPorts,
@@ -363,6 +381,7 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/runtime/checks", s.getRuntimeChecks)
 	s.registerCatalog(mux)
 	s.registerServices(mux)
+	s.registerPlatformDomain(mux)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the
@@ -376,7 +395,9 @@ func New(cfg Config) http.Handler {
 	s.registerV1(mux)
 	// The trusted entry mints console login tokens; the console entry must not.
 	mux.HandleFunc("POST /v1/console/tokens", s.createConsoleToken)
-	// Opening the console to the internet is trusted-entry only.
+	// Opening the console to the internet: the trusted entry may do it all
+	// without a password (verify, then enable with the verification id).
+	// The browser console has its own enable and close (console.go).
 	mux.HandleFunc("GET /v1/public-console", s.publicConsoleStatus)
 	mux.HandleFunc("POST /v1/public-console/verify", s.publicConsoleVerify)
 	mux.HandleFunc("POST /v1/public-console/enable", s.publicConsoleEnable)

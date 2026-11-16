@@ -195,16 +195,41 @@ describe('设置', () => {
     expect(calls.some((c) => c.method !== 'GET')).toBe(false)
   })
 
-  it('访问：只显示局域网、公网控制台的状态和命令，开关不能在页面上点', async () => {
+  // 设置 › 访问：一行一项、点开才展开。row(名字) 找到那一行能点的按钮（名字加现状）。
+  const row = (name: string) => screen.getByRole('button', { name: new RegExp('^' + name) })
+  const DOMAIN_OK = {
+    domain: 'apps.example.com', state: 'ok', supported: true, public_ip: '203.0.113.10',
+    record: { name: '*.apps', type: 'A', value: '203.0.113.10' },
+    checks: [{ key: 'dns', ok: true, text: '域名指过来了' }, { key: 'ports', ok: true, text: '外面能连上' }, { key: 'cert', ok: true, text: '证书自动申请' }],
+    console_host: 'console.apps.example.com',
+  }
+  const DOMAIN_UNSET = { state: 'unset', supported: true, public_ip: '203.0.113.10', record: { type: 'A', value: '203.0.113.10' }, checks: [] }
+  const DOMAIN_PROBLEM = {
+    ...DOMAIN_OK, state: 'problem',
+    checks: [{ key: 'dns', ok: false, text: '域名没有指到这台机器' }, { key: 'ports', ok: false, text: '等上一项' }, { key: 'cert', ok: false, text: '等上一项' }],
+    problem: { code: 'PDOMAIN-01', text: '域名没有指到这台机器', detail: '现在指向 198.51.100.7，应该指向 203.0.113.10', next: '到你买域名的地方，把 *.apps 这条记录改成 203.0.113.10，等几分钟再检查' },
+  }
+
+  it('访问：一行一项，都收起；点开才展开、同一时间只展开一项；旧服务端没有平台域名接口时不显示域名这一行，公网控制台只给命令', async () => {
     location.hash = '#prefs/access'
     render(<App />)
-    await screen.findByText('局域网控制台')
-    const sw = screen.getAllByRole('switch')
-    expect(sw.length).toBe(2)
-    expect(sw.every((s) => (s as HTMLButtonElement).disabled)).toBe(true)
-    expect(sw[0].getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByText('acornfox lan-console disable')).toBeTruthy()
+    expect((await screen.findByTestId('summary-lan')).textContent).toBe('已开启 · 192.168.1.10:18802')
+    expect(screen.getByTestId('summary-pub').textContent).toBe('没开启。开启后人在外面也能用浏览器打开')
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/v1/platform/domain')).toBe(true))
+    expect(screen.queryByTestId('summary-domain')).toBeNull()
+    expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
+    expect(screen.queryByText('acornfox lan-console disable')).toBeNull()
+    fireEvent.click(row('在外面打开控制台'))
+    expect(row('在外面打开控制台').getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByText('acornfox public-console enable 你的域名')).toBeTruthy()
+    expect(screen.getByText('acornfox open')).toBeTruthy()
+    expect(screen.queryByLabelText('公网控制台的域名')).toBeNull()
+    fireEvent.click(row('局域网里打开控制台'))
+    expect(row('在外面打开控制台').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText('acornfox open')).toBeNull()
+    expect(screen.getByText('acornfox lan-console disable')).toBeTruthy()
+    fireEvent.click(row('局域网里打开控制台'))
+    expect(screen.queryByText('acornfox lan-console disable')).toBeNull()
     expect(calls.some((c) => c.method !== 'GET')).toBe(false)
   })
 
@@ -218,8 +243,11 @@ describe('设置', () => {
     routes['DELETE /v1/lan-console/devices/d2'] = () => { devices = devices.filter((d) => d.id !== 'd2'); return { ok: true, removed: true } }
     location.hash = '#prefs/access'
     render(<App />)
+    expect((await screen.findByTestId('summary-lan')).textContent).toBe('已开启 · 192.168.1.10:18802 · 记住了 2 台设备')
+    fireEvent.click(row('局域网里打开控制台'))
     expect(await screen.findByText(/从 192\.168\.1\.23 设的/)).toBeTruthy()
     expect(screen.getByText('acornfox lan-console reset-password')).toBeTruthy()
+    expect(screen.getByText('acornfox lan-console disable')).toBeTruthy()
     const box = await screen.findByTestId('lan-devices')
     expect(within(box).getByText('Mac · Chrome')).toBeTruthy()
     expect(within(box).getByText(/192\.168\.1\.40 · 2027-02-08 到期/)).toBeTruthy()
@@ -235,13 +263,236 @@ describe('设置', () => {
     routes['GET /v1/lan-console/devices'] = () => ({ devices: [] })
     location.hash = '#prefs/access'
     const first = render(<App />)
+    expect((await screen.findByTestId('summary-lan')).textContent).toBe('已开启 · 192.168.1.10:18802 · 还没设密码')
+    fireEvent.click(row('局域网里打开控制台'))
     expect(await screen.findByText(/还没设密码：请现在就用局域网里的电脑打开它设一个/)).toBeTruthy()
     first.unmount()
     routes['GET /v1/lan-console'] = () => ({ enabled: false, port: 18802 })
     render(<App />)
+    expect((await screen.findByTestId('summary-lan')).textContent).toBe('没开启。局域网里的电脑、手机打不开控制台')
+    fireEvent.click(row('局域网里打开控制台'))
     await screen.findByText('acornfox lan-console enable')
     expect(screen.queryByTestId('lan-devices')).toBeNull()
     expect(screen.queryByText('acornfox lan-console reset-password')).toBeNull()
+  })
+
+  it('域名·正常：收起一句话；展开有说明和三个勾；“不用域名了”先确认再调 DELETE，回到“还没有”', async () => {
+    routes['GET /v1/platform/domain'] = () => DOMAIN_OK
+    routes['DELETE /v1/platform/domain'] = () => DOMAIN_UNSET
+    location.hash = '#prefs/access'
+    render(<App />)
+    expect((await screen.findByTestId('summary-domain')).textContent).toBe('apps.example.com · 正常')
+    expect(screen.queryByText('域名指过来了')).toBeNull()
+    expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
+    fireEvent.click(row('域名'))
+    expect(screen.getByText('应用名.apps.example.com')).toBeTruthy()
+    for (const t of ['域名指过来了', '外面能连上', '证书自动申请']) expect(screen.getByText(t)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '重新检查' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '不用域名了' }))
+    const dialog = await screen.findByRole('dialog', { name: '不用域名了？' })
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+    fireEvent.click(within(dialog).getByRole('button', { name: '不用了' }))
+    // 服务端要求带上“已确认”，不带会被拒（确认框就是页面上的确认）
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/platform/domain?confirm=true')).toBe(true))
+    await vi.waitFor(() => expect(screen.getByTestId('summary-domain').textContent).toBe('还没有。配一个域名，应用就不用记数字地址了'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('域名·正常：“换一个域名”在弹窗里填新域名，调 PUT；记录的名字跟着填的域名变', async () => {
+    routes['GET /v1/platform/domain'] = () => DOMAIN_OK
+    routes['PUT /v1/platform/domain'] = (_u, init) => ({ ...DOMAIN_OK, domain: JSON.parse(String(init?.body)).domain })
+    location.hash = '#prefs/access'
+    render(<App />)
+    await screen.findByTestId('summary-domain')
+    fireEvent.click(row('域名'))
+    fireEvent.click(screen.getByRole('button', { name: '换一个域名' }))
+    const dialog = await screen.findByRole('dialog', { name: '换一个域名' })
+    const save = within(dialog).getByRole('button', { name: '换成这个' }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    fireEvent.change(within(dialog).getByLabelText('平台域名'), { target: { value: ' https://Home.MyCo.cn/ ' } })
+    expect(within(within(dialog).getByTestId('domain-record')).getByText('*.home')).toBeTruthy()
+    fireEvent.click(save)
+    // 换掉已有的域名要带“已确认”；第一次设不带（见下面“还没有”那一条）
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ domain: 'home.myco.cn', confirm: true }))
+    await vi.waitFor(() => expect(screen.getByTestId('summary-domain').textContent).toBe('home.myco.cn · 正常'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('域名·还没有：一句话加“配置”按钮；展开是两步（记录的名字、类型、指向直接给出来），保存调 PUT；没生效时变成红字', async () => {
+    routes['GET /v1/platform/domain'] = () => DOMAIN_UNSET
+    routes['PUT /v1/platform/domain'] = () => DOMAIN_PROBLEM
+    location.hash = '#prefs/access'
+    render(<App />)
+    expect((await screen.findByTestId('summary-domain')).textContent).toBe('还没有。配一个域名，应用就不用记数字地址了')
+    fireEvent.click(screen.getByRole('button', { name: '配置' }))
+    expect(row('域名').getAttribute('aria-expanded')).toBe('true')
+    expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
+    expect(screen.getByText('第一步')).toBeTruthy()
+    const rec = screen.getByTestId('domain-record')
+    expect(within(rec).getByText('*.apps')).toBeTruthy()
+    expect(within(rec).getByText('A')).toBeTruthy()
+    expect(within(rec).getByText('203.0.113.10')).toBeTruthy()
+    expect(screen.getByText(/以 apps\.example\.com 为例/)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('平台域名'), { target: { value: 'my.home.example.com' } })
+    expect(within(rec).getByText('*.my.home')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PUT' && c.url === '/v1/platform/domain')?.body).toEqual({ domain: 'my.home.example.com' }))
+    const sum = screen.getByTestId('summary-domain')
+    await vi.waitFor(() => expect(sum.textContent).toBe('apps.example.com · 还没生效：域名没有指到这台机器'))
+    expect(sum.className).toMatch(/text-danger/)
+  })
+
+  it('域名·没生效：展开写现在指向哪、该改成什么、故障编号；“重新检查”调 check，过了变成正常', async () => {
+    routes['GET /v1/platform/domain'] = () => DOMAIN_PROBLEM
+    routes['POST /v1/platform/domain/check'] = () => DOMAIN_OK
+    location.hash = '#prefs/access'
+    render(<App />)
+    expect((await screen.findByTestId('summary-domain')).textContent).toBe('apps.example.com · 还没生效：域名没有指到这台机器')
+    fireEvent.click(row('域名'))
+    expect(screen.getByText('现在指向 198.51.100.7，应该指向 203.0.113.10')).toBeTruthy()
+    expect(screen.getByText(/把 \*\.apps 这条记录改成 203\.0\.113\.10/)).toBeTruthy()
+    expect(screen.getByText('PDOMAIN-01')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '重新检查' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/platform/domain/check')).toBe(true))
+    await vi.waitFor(() => expect(screen.getByTestId('summary-domain').textContent).toBe('apps.example.com · 正常'))
+  })
+
+  it('域名·这台机器用不了（局域网机器）：一句话，展开说明原因和编号，不给输入框', async () => {
+    routes['GET /v1/platform/domain'] = () => ({ state: 'unset', supported: false, unsupported: { code: 'PDOMAIN-02', text: '这台机器在局域网里，没有公网地址，用不了域名' } })
+    location.hash = '#prefs/access'
+    render(<App />)
+    expect((await screen.findByTestId('summary-domain')).textContent).toBe('这台机器在局域网里，没有公网地址，用不了域名')
+    expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
+    fireEvent.click(row('域名'))
+    expect(screen.getByText('PDOMAIN-02')).toBeTruthy()
+    expect(screen.getByText(/证书要从公网验证/)).toBeTruthy()
+    expect(screen.queryByLabelText('平台域名')).toBeNull()
+  })
+
+  it('在外面打开控制台·开启（要再输密码）：确认框三句后果；密码不对留在框里；成功后新密码显示一次', async () => {
+    let enabled = false
+    let tries = 0
+    routes['GET /v1/public-console'] = () => (enabled
+      ? { enabled: true, domain: 'console.apps.example.com', url: 'https://console.apps.example.com', can_toggle: true, needs_password: true }
+      : { enabled: false, can_toggle: true, needs_password: true, suggested_domain: 'console.apps.example.com' })
+    routes['POST /v1/public-console/enable'] = () => {
+      tries++
+      if (tries === 1) return json(403, { error: { code: 'PUBCON-01', message: '控制台密码不对' } })
+      enabled = true
+      return { domain: 'console.apps.example.com', url: 'https://console.apps.example.com', password: 'N3w-Pass-123' }
+    }
+    location.hash = '#prefs/access'
+    render(<App />)
+    await screen.findByTestId('summary-pub')
+    fireEvent.click(screen.getByRole('button', { name: '开启' }))
+    expect(row('在外面打开控制台').getAttribute('aria-expanded')).toBe('true')
+    expect((screen.getByLabelText('公网控制台的域名') as HTMLInputElement).value).toBe('console.apps.example.com')
+    expect(screen.getByText('已经按上面的域名填好了，也可以换成自己的域名。')).toBeTruthy()
+    expect(screen.getByText('acornfox open')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '开启公网控制台' }))
+    const dialog = await screen.findByRole('dialog', { name: '开启公网控制台？' })
+    expect(within(dialog).getByText('地址：https://console.apps.example.com')).toBeTruthy()
+    expect(within(dialog).getByText('互联网上任何人都能打开登录页，只靠密码挡着。')).toBeTruthy()
+    expect(within(dialog).getByText('会生成一个新密码，只显示这一次，请马上记下。')).toBeTruthy()
+    expect(within(dialog).getByText('随时可以回到这里关闭。')).toBeTruthy()
+    const ok = within(dialog).getByRole('button', { name: '开启' }) as HTMLButtonElement
+    expect(ok.disabled).toBe(true)
+    fireEvent.change(within(dialog).getByLabelText('再输一次现在的控制台密码'), { target: { value: 'wrong' } })
+    fireEvent.click(ok)
+    expect((await within(dialog).findByRole('alert')).textContent).toBe('控制台密码不对（PUBCON-01）')
+    expect(screen.queryByTestId('pub-new-password')).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('再输一次现在的控制台密码'), { target: { value: 'old-pass' } })
+    fireEvent.click(ok)
+    const pw = await screen.findByTestId('pub-new-password')
+    expect(pw.textContent).toContain('N3w-Pass-123')
+    expect(screen.getByText(/只显示这一次，请马上记下来/)).toBeTruthy()
+    const posts = calls.filter((c) => c.method === 'POST' && c.url === '/v1/public-console/enable')
+    expect(posts.map((c) => c.body)).toEqual([{ domain: 'console.apps.example.com', password: 'wrong' }, { domain: 'console.apps.example.com', password: 'old-pass' }])
+    expect(screen.queryByRole('dialog', { name: '开启公网控制台？' })).toBeNull()
+    await vi.waitFor(() => expect(screen.getByTestId('summary-pub').textContent).toBe('已开启 · console.apps.example.com · 要密码登录'))
+    fireEvent.click(screen.getByRole('button', { name: '我记下了' }))
+    expect(screen.queryByTestId('pub-new-password')).toBeNull()
+    expect(screen.queryByText('N3w-Pass-123')).toBeNull()
+  })
+
+  it('在外面打开控制台·开启（不用再输密码）：没有平台域名时自己填，发的请求不带密码；新密码也认 password_once', async () => {
+    routes['GET /v1/public-console'] = () => ({ enabled: false, can_toggle: true, needs_password: false, suggested_domain: '' })
+    routes['POST /v1/public-console/enable'] = () => ({ domain: 'c.mine.com', url: 'https://c.mine.com', password_once: 'Once-999' })
+    location.hash = '#prefs/access'
+    render(<App />)
+    await screen.findByTestId('summary-pub')
+    fireEvent.click(row('在外面打开控制台'))
+    expect(screen.getByText(/在上面“域名”那一行配好域名，这里会自动填上/)).toBeTruthy()
+    const btn = screen.getByRole('button', { name: '开启公网控制台' }) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('公网控制台的域名'), { target: { value: 'C.Mine.com' } })
+    fireEvent.click(btn)
+    const dialog = await screen.findByRole('dialog', { name: '开启公网控制台？' })
+    expect(within(dialog).queryByLabelText('再输一次现在的控制台密码')).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: '开启' }))
+    expect((await screen.findByTestId('pub-new-password')).textContent).toContain('Once-999')
+    expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ domain: 'c.mine.com' })
+  })
+
+  it('在外面打开控制台·已开启：地址、复制、关闭；关闭先确认，要密码时带上密码调 DELETE', async () => {
+    let enabled = true
+    routes['GET /v1/public-console'] = () => (enabled
+      ? { enabled: true, domain: 'console.apps.example.com', url: 'https://console.apps.example.com', enabled_at: '2026-11-16T01:00:00Z', can_toggle: true, needs_password: true }
+      : { enabled: false, can_toggle: true, needs_password: true, suggested_domain: 'console.apps.example.com' })
+    routes['DELETE /v1/public-console'] = () => { enabled = false; return { disabled: true, was_enabled: true } }
+    location.hash = '#prefs/access'
+    render(<App />)
+    expect((await screen.findByTestId('summary-pub')).textContent).toBe('已开启 · console.apps.example.com · 要密码登录')
+    expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
+    fireEvent.click(row('在外面打开控制台'))
+    expect(screen.getByTestId('pub-url').textContent).toBe('https://console.apps.example.com')
+    expect(screen.getByRole('button', { name: '复制地址' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '关闭公网控制台' }))
+    const dialog = await screen.findByRole('dialog', { name: '关闭公网控制台？' })
+    const off = within(dialog).getByRole('button', { name: '关闭公网控制台' }) as HTMLButtonElement
+    expect(off.disabled).toBe(true)
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+    fireEvent.change(within(dialog).getByLabelText('再输一次现在的控制台密码'), { target: { value: 'pw-now' } })
+    fireEvent.click(off)
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'DELETE')).toMatchObject({ url: '/v1/public-console', body: { password: 'pw-now' } }))
+    await vi.waitFor(() => expect(screen.getByTestId('summary-pub').textContent).toBe('没开启。开启后人在外面也能用浏览器打开'))
+  })
+
+  it('在外面打开控制台·已开启、不用再输密码：DELETE 不带请求体', async () => {
+    routes['GET /v1/public-console'] = () => ({ enabled: true, domain: 'c.mine.com', can_toggle: true, needs_password: false })
+    routes['DELETE /v1/public-console'] = () => ({ disabled: true })
+    location.hash = '#prefs/access'
+    render(<App />)
+    await screen.findByTestId('summary-pub')
+    fireEvent.click(row('在外面打开控制台'))
+    expect(screen.getByTestId('pub-url').textContent).toBe('https://c.mine.com')
+    fireEvent.click(screen.getByRole('button', { name: '关闭公网控制台' }))
+    const dialog = await screen.findByRole('dialog', { name: '关闭公网控制台？' })
+    expect(within(dialog).queryByLabelText('再输一次现在的控制台密码')).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭公网控制台' }))
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/public-console')).toBe(true))
+    expect(calls.find((c) => c.method === 'DELETE')?.body).toBeUndefined()
+  })
+
+  it('在外面打开控制台·纯局域网机器或这次登录不能开关：不给按钮，写原因', async () => {
+    routes['GET /v1/public-console'] = () => ({ enabled: false, can_toggle: false, unsupported: { code: 'PDOMAIN-02', text: '这台机器在局域网里，开不了公网控制台' } })
+    location.hash = '#prefs/access'
+    const r = render(<App />)
+    expect((await screen.findByTestId('summary-pub')).textContent).toBe('这台机器在局域网里，开不了公网控制台')
+    expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
+    fireEvent.click(row('在外面打开控制台'))
+    expect(screen.getByText('PDOMAIN-02')).toBeTruthy()
+    expect(screen.getByText('acornfox open')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '开启公网控制台' })).toBeNull()
+    r.unmount()
+
+    routes['GET /v1/public-console'] = () => ({ enabled: false, can_toggle: false, needs_password: false })
+    render(<App />)
+    await screen.findByTestId('summary-pub')
+    expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
+    fireEvent.click(row('在外面打开控制台'))
+    expect(screen.getByText(/这次登录不能在页面上开关公网控制台/)).toBeTruthy()
+    expect(screen.getByText('acornfox public-console enable 你的域名')).toBeTruthy()
   })
 
   it('没有后端支撑的分区（提醒、账号）不显示；升级给当前版本和命令', async () => {

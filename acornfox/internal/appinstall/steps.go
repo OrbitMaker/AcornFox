@@ -594,10 +594,7 @@ func (t *taskRun) create(ctx context.Context, p *planned) error {
 	}
 
 	ep := primaryEndpoint(m)
-	exposure := m.Exposure.Default
-	if exposure == "" {
-		exposure = catalog.DefaultExposure
-	}
+	exposure := e.manifestExposure(m)
 	if p.expose != "" {
 		// Chosen in the request (expose.go; never for an internal app).
 		exposure = p.expose

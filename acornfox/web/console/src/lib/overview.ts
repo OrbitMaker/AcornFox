@@ -94,7 +94,9 @@ export function accessInfo(app: AppView): Access | null {
   if (!url) return null
   let scheme = 'http'
   try { scheme = new URL(url).protocol.replace(':', '') } catch { /* 地址不是完整网址时按原样显示 */ }
-  const domain = (app.domains || []).map((d) => d.name).filter(Boolean)[0] || ''
+  // 自己绑的域名优先；没有时用平台给的（只在已生效时，例如 hello.apps.example.com）
+  const pd = app.platform_domain?.active ? app.platform_domain.host || '' : ''
+  const domain = (app.domains || []).map((d) => d.name).filter(Boolean)[0] || pd
   const level = (['local', 'lan', 'public'] as const).find((k) => k === app.exposure) || ''
   return {
     address: shortAddress(url), url,

@@ -149,6 +149,13 @@ type Config struct {
 	HTTP     *http.Client
 	Log      *slog.Logger
 
+	// DefaultExposure is what this machine gives a new app when neither the
+	// request (--expose) nor its manifest chooses something other than the
+	// catalog's standard (local): lan on a LAN server installed fresh, local
+	// otherwise. "" keeps catalog.DefaultExposure, so machines installed
+	// before and desktops go on as they did. See expose.go.
+	DefaultExposure string
+
 	DeployTimeout time.Duration // wait for the deployment to go live (0: 15 min)
 	Poll          time.Duration // progress polling (0: 1 s)
 	// TCPProbe connects once to addr for a tcp health check (nil:

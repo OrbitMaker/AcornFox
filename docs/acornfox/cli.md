@@ -31,7 +31,7 @@
 | `target list` | 列出登记过的服务器 | `acornfox target list` |
 | `target use 名称` | 切换默认服务器 | `acornfox target use my-server` |
 | `target remove 名称` | 删除登记（不动服务器） | `acornfox target remove my-server` |
-| `open` | 打开网页控制台：经 SSH 转发到你的电脑并打开浏览器，按 Ctrl+C 关闭（`--no-browser` 只打印登录链接） | `acornfox open` |
+| `open` | 打开网页控制台：经 SSH 转发到你的电脑并打开浏览器，按 Ctrl+C 关闭（`--no-browser` 只打印登录链接）。`--detach` 把隧道放到后台、命令马上结束（AI 工作台里用这个），`--stop` 关掉后台隧道 | `acornfox open`、`acornfox open --detach` |
 
 ## 部署和版本
 
@@ -102,13 +102,13 @@
 | `catalog sync` | 让服务器现在同步一次目录 | `acornfox catalog sync` |
 | `catalog platform-vars` | 平台按这台机器自动填给应用的时区、下载源、访问地址等，以及哪些能改 | `acornfox catalog platform-vars` |
 | `install 应用 --plan` | 只看安装前的计划，什么都不装：它需要的每一种服务接哪条（已接上、可选的没有先跳过、必须的没有、有好几条要选）、还缺哪些必填参数、装不了的原因。必须的没有时给出该运行的命令：登记一条（保密项写成 `项=-`），或者让这台机器上已有、现在用不了的那条能用（启动提供方、填上还差的项、用旧数据把已删的提供方装回来）。配方也能看（`--recipe 配方 --plan`）。只读，v0.6.0 起 | `acornfox install 应用 --plan` |
-| `install 应用` | 从目录装一个应用，默认只本机能打开（`--set 参数=值` 填参数，保密的参数写成 `--set 参数=-` 从键盘输入；`--use 需要名=服务名` 指定某个需要接哪条服务，`--no-wait` 只提交，`--reuse-data` 接上以前同名应用留下的数据）。必须的服务没有时停下，告诉你怎么登记一条；不会替你装别的应用。目录里一个可装的应用都没有时，直接说要等应用按新格式重新上架 | `acornfox install 应用` |
+| `install 应用` | 从目录装一个应用，默认按这台机器给新应用的对外方式（局域网里新装的服务器上局域网能打开，云主机上只本机能打开；`--expose` 可以改）（`--set 参数=值` 填参数，保密的参数写成 `--set 参数=-` 从键盘输入；`--use 需要名=服务名` 指定某个需要接哪条服务，`--no-wait` 只提交，`--reuse-data` 接上以前同名应用留下的数据）。必须的服务没有时停下，告诉你怎么登记一条；不会替你装别的应用。目录里一个可装的应用都没有时，直接说要等应用按新格式重新上架 | `acornfox install 应用` |
 | `install --name 应用名 --reuse-data` | 用以前留下的数据把删掉的应用装回来，不用写它是目录里哪个应用：平台按留下的数据找回来。v0.6.0 起 | `acornfox install --name 应用名 --reuse-data --plan` |
 | `install --recipe 配方` | 按配方的顺序装几个应用并接上：后装的应用接先装的应用提供的服务 | `acornfox install --recipe 配方` |
 | `install status 任务编号` | 查安装进度和首次登录信息（`--show-secrets` 显示密码）。加 `--wait` 等到装好或失败再返回（默认最多 90 秒，`--timeout 秒` 最多 600，没装完再运行一次），输出写明装到哪一步、用了多久、算不算比平常慢（`CAT-INST-30`）；v0.5.1 起 | `acornfox install status 3f9a0c1b2d4e --wait` |
 | `apps vars 应用` | 看一个从应用中心装的应用是用什么设置装的：每个变量的值、谁给的、能不能改；密码和 Key 默认只显示后 4 位（`--reveal` 显示全）。用旧格式清单装的应用会说明（`acornfox status 应用` 里也有这句说明）。只读，v0.5.1 起 | `acornfox apps vars 应用` |
 
-装好的应用默认只本机能打开，在你自己的电脑上用 `acornfox open 应用名` 打开。详细说明见 [使用手册的“应用中心”](../user-guide.md#应用中心)。
+局域网里新装的服务器上，装好的应用默认同一局域网里的电脑、手机就能打开（用安装结果里的地址）；云主机上默认只本机能打开，在你自己的电脑上用 `acornfox open 应用名` 打开。详细说明见 [使用手册的“应用中心”](../user-guide.md#应用中心)。
 
 ## 服务（v0.6.0 起）
 

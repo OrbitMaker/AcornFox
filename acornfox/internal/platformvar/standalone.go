@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/acornfox/acornfox/internal/catalog"
+	"github.com/acornfox/acornfox/internal/domainname"
 )
 
 // Machine is this machine's settings the standalone edition fills the
@@ -43,6 +44,9 @@ type Host struct {
 //   - only on the internal network: none;
 //   - a domain bound: https://<the first domain> (the entry proxy has the
 //     certificate and sends http on to https);
+//   - a platform domain set and the app public (PlatformHost):
+//     https://<app name>.<platform domain> (the entry proxy has that name
+//     on the app's route and gets its certificate the same way);
 //   - otherwise by its exposure, over http with its port: local is
 //     127.0.0.1 (localhost on a desktop), lan and public the server's
 //     address (PublicHost);
@@ -55,11 +59,10 @@ func (h Host) Address(app App) Address {
 		if d = strings.TrimSpace(d); d == "" {
 			continue
 		}
-		u := "https://" + d
-		if h.HTTPSPort != 0 && h.HTTPSPort != 443 {
-			u = "https://" + net.JoinHostPort(d, strconv.Itoa(h.HTTPSPort))
-		}
-		return Address{URL: u, Scheme: "https", Host: d}
+		return h.httpsAddress(d)
+	}
+	if d := PlatformHost(app.Name, app.Internal, app.Exposure, app.PlatformDomain); d != "" {
+		return h.httpsAddress(d)
 	}
 	if app.Port <= 0 {
 		return Address{}
@@ -77,9 +80,40 @@ func (h Host) Address(app App) Address {
 	return Address{URL: "http://" + net.JoinHostPort(host, strconv.Itoa(app.Port)), Scheme: "http", Host: host}
 }
 
+// httpsAddress is the address of an app opened at domain name d.
+func (h Host) httpsAddress(d string) Address {
+	u := "https://" + d
+	if h.HTTPSPort != 0 && h.HTTPSPort != 443 {
+		u = "https://" + net.JoinHostPort(d, strconv.Itoa(h.HTTPSPort))
+	}
+	return Address{URL: u, Scheme: "https", Host: d}
+}
+
 // exposureLocal is the exposure of an app only this machine opens (the
-// same word as state.ExposureLocal).
-const exposureLocal = "local"
+// same word as state.ExposureLocal); exposurePublic one opened on every
+// interface and by domain names (state.ExposurePublic).
+const (
+	exposureLocal  = "local"
+	exposurePublic = "public"
+)
+
+// PlatformHost is the name app gets under this machine's platform domain
+// base: "<app>.<base>" for an app whose exposure is public and that is not
+// only on the internal network; "" otherwise, when base is "", or when the
+// name would not be a valid host name (too long). It is the one rule for
+// who gets a platform subdomain: the address (Address), the entry proxy's
+// routes (package reconcile) and the API's views all ask it.
+func PlatformHost(app string, internal bool, exposure, base string) string {
+	base = strings.TrimSpace(base)
+	if internal || exposure != exposurePublic || base == "" || app == "" {
+		return ""
+	}
+	name := app + "." + base
+	if !domainname.Valid(name) {
+		return ""
+	}
+	return name
+}
 
 // Mirror addresses. Public mirrors only: every one answers from anywhere
 // (the vendors' internal-network addresses are faster on their own clouds

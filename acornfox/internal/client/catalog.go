@@ -314,6 +314,7 @@ type InstallPlan struct {
 			Kind      string `json:"kind"`
 			KindLabel string `json:"kind_label"`
 		} `json:"provides"`
+		Exposure string `json:"exposure,omitempty"`
 	} `json:"apps"`
 	Problems []struct {
 		Code    string `json:"code"`

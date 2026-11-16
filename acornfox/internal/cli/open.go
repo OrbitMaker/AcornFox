@@ -19,9 +19,15 @@ import (
 
 // openUsage is `acornfox open -h`.
 const openUsage = `用法：acornfox open [应用名] [--no-browser] [--port N]
+      acornfox open --detach [--no-browser] [--port N]
+      acornfox open --stop
 
 用途：
   不带应用名：在浏览器里打开网页控制台。经 SSH 登记的服务器会开一条 SSH 隧道，按 Ctrl+C 关闭。
+  --detach：同上，但隧道放到后台，命令打开浏览器后马上结束，不用一直开着终端；AI 工作台里打开控制台
+    用这个（工作台按不了 Ctrl+C，前台一直占着会卡住）。隧道一直开着，直到 acornfox open --stop、断网或
+    电脑重启；隧道还开着时再运行一次，沿用同一条隧道、给一个新的登录链接。只用于控制台，不能带应用名。
+  --stop：关掉这台服务器的后台隧道（没有开着的也不算错）。
   带应用名：在你自己的电脑上打开这个应用。只本机能打开的应用（对外方式 local）在你电脑上点
     127.0.0.1 的地址是打不开的，这个命令像打开控制台一样开一条 SSH 隧道，把应用转到你电脑的
     一个本地端口，再打开浏览器；看完按 Ctrl+C 关闭隧道。不用放行安全组，也不改应用的对外方式。
@@ -35,7 +41,12 @@ const openUsage = `用法：acornfox open [应用名] [--no-browser] [--port N]
   应用名         也可以用全局参数 --app 应用名 给出
   --no-browser   不自动打开浏览器，只打印地址
   --port N       本地转发端口（默认自动挑一个空闲端口）
-副作用：只在你的电脑上开一个本地端口和一条 SSH 连接，不改服务器上的任何东西。
+  --detach       隧道放到后台，命令马上结束（只用于控制台）。--json 时输出 url、pid、reused（是不是沿用
+                 已经开着的）、browser_opened、stop_command（关掉它的命令）、note；没打开浏览器时另有
+                 login_url（一次性、60 秒内有效的登录链接，交给用户在浏览器里打开）
+  --stop         关掉后台隧道。--json 时输出 stopped（关掉的进程号，没有开着的是空列表）
+副作用：只在你的电脑上开一个本地端口和一条 SSH 连接，不改服务器上的任何东西。--detach 另在
+  命令行配置目录里记下后台隧道（open-tunnels.json），--stop 关掉它并删掉这条记录。
 出错编号：
   OPEN-APP-01  应用还没有访问端口（没部署成功，或只在容器网络里）：acornfox status 应用名 看状态
   OPEN-APP-02  经网址登记的服务器上，只本机的应用打不开：用 acornfox target add 名称 --ssh 用户@主机
@@ -44,6 +55,8 @@ const openUsage = `用法：acornfox open [应用名] [--no-browser] [--port N]
   连不上服务器、SSH 隧道建不起来时，输出里是连接诊断（和 acornfox open 打开控制台时一样）。
 例子：
   acornfox open                 打开控制台
+  acornfox --json open --detach 打开控制台，隧道放到后台（AI 工作台里用这个）
+  acornfox open --stop          关掉后台隧道
   acornfox open demo-app        在自己电脑上打开应用 demo-app（看完按 Ctrl+C）
   acornfox open demo-app --port 9119
   acornfox --json open demo-app --no-browser`
@@ -68,6 +81,8 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 	var (
 		noBrowser = fs.Bool("no-browser", false, "不自动打开浏览器，只打印链接")
 		port      = fs.Int("port", 0, "本地转发端口（0 为自动挑选）")
+		detach    = fs.Bool("detach", false, "隧道放到后台，命令马上结束（只用于控制台）")
+		stop      = fs.Bool("stop", false, "关掉后台隧道")
 	)
 	pos, err := parseFlags(fs, args)
 	if err != nil {
@@ -82,6 +97,15 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 	appName := a.flagApp
 	if len(pos) == 1 {
 		appName = pos[0]
+	}
+	if *stop {
+		if appName != "" || *detach {
+			return a.out.usageError("--stop 不和应用名、--detach 一起用：acornfox open --stop")
+		}
+		return a.cmdOpenStop()
+	}
+	if *detach && appName != "" {
+		return a.out.usageError("--detach 只用于打开控制台；打开应用 %s 请在你自己电脑的终端运行 acornfox open %s（看完按 Ctrl+C）", appName, appName)
 	}
 	if appName != "" {
 		return a.cmdOpenApp(ctx, appName, *noBrowser, *port)
@@ -106,8 +130,10 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 	// 2. Establish the console base URL: url mode connects to the target's own
 	// host:port; ssh mode forwards a local port to the console listener.
 	var (
-		baseURL string
-		tunnel  *client.Tunnel
+		baseURL  string
+		tunnel   *client.Tunnel
+		detached *client.DetachedTunnel
+		reused   bool
 	)
 	local := strings.HasPrefix(t.URL, "unix:")
 	if local {
@@ -118,6 +144,13 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 		}
 	} else if t.URL != "" {
 		baseURL = strings.TrimRight(t.URL, "/")
+	} else if *detach {
+		dt, re, derr := a.detachedConsoleTunnel(ctx, t, *port)
+		if derr != nil {
+			return a.out.fail(derr)
+		}
+		detached, reused = dt, re
+		baseURL = dt.LocalURL
 	} else {
 		localPort := *port
 		if localPort == 0 {
@@ -154,6 +187,9 @@ func (a *app) cmdOpen(ctx context.Context, args []string) int {
 	}
 
 	// 5. Report. Human output never prints the token when the browser opened.
+	if *detach {
+		return a.reportDetached(baseURL, loginURL, browserOpened, detached, reused)
+	}
 	if a.out.json {
 		a.out.emitJSON(map[string]any{"url": baseURL})
 	} else if browserOpened {

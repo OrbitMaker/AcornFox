@@ -236,10 +236,7 @@ func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, erro
 	}
 	kinds := e.planKinds()
 	ep := primaryEndpoint(m)
-	exposure := m.Exposure.Default
-	if exposure == "" {
-		exposure = catalog.DefaultExposure
-	}
+	exposure := e.manifestExposure(m)
 	d := AppDetail{
 		ID: m.ID, Version: m.Release.Version, Versions: []string{m.Release.Version}, Name: m.App.Name, Summary: m.App.Summary,
 		Category: m.App.Category, Homepage: m.App.Homepage, License: m.App.License, SourceCode: m.App.SourceCode,

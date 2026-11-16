@@ -109,6 +109,12 @@ type Where struct {
 	// Domains are the domain names bound to the app, the first one bound
 	// first. With one the app opens at https://<the first>.
 	Domains []string
+	// PlatformDomain is this machine's platform domain (one for the whole
+	// machine, "" when none is set). A public app that has no domain of its
+	// own opens at https://<app name>.<PlatformDomain> (PlatformHost). The
+	// server leaves it "" for an app whose name under it is already bound
+	// to another app or to the public console.
+	PlatformDomain string
 }
 
 // Address is the address an app opens at, and its parts as the platform

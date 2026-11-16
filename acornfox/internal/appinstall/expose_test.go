@@ -68,7 +68,15 @@ func addressManifest(t *testing.T) string {
 // 192.0.2.10.
 func setupAddress(t *testing.T) *env {
 	t.Helper()
+	return setupAddressDefault(t, "")
+}
+
+// setupAddressDefault is setupAddress on a machine that gives new apps def
+// (Config.DefaultExposure).
+func setupAddressDefault(t *testing.T, def string) *env {
+	t.Helper()
 	v := setupWith(t, func(cfg *Config) {
+		cfg.DefaultExposure = def
 		b := withServiceTypes(t, fixtureBundle(t, 7, "", []fixApp{{manifest: addressManifest(t)}}, []catalog.Recipe{oneAppRecipe("demo-values")}, nil), valuesDir)
 		cfg.Catalog = NewCatalog(CatalogConfig{CacheDir: filepath.Join(t.TempDir(), "catalog"), Snapshot: bundleFS(b), Sources: []string{"http://127.0.0.1:1"}})
 		cfg.Platform = PlatformEnv{Host: platformvar.Host{PublicHost: "192.0.2.10"}}
@@ -207,5 +215,89 @@ func TestAppVarsValueNow(t *testing.T) {
 	fl, err := v.e.FirstLogin(ctx, "demo-values", false)
 	if err == nil && fl.URL != "https://demo.example.com" {
 		t.Fatalf("first login url %q", fl.URL)
+	}
+}
+
+// What an app gets without --expose: a manifest that says local or nothing
+// (the catalog's standard) follows what this machine gives new apps (lan on
+// a LAN server installed fresh, local otherwise, local when unset); one that
+// says internal, lan or public keeps it.
+func TestManifestExposure(t *testing.T) {
+	m := func(d string) *catalog.Manifest { return &catalog.Manifest{Exposure: catalog.Exposure{Default: d}} }
+	for _, c := range []struct{ machine, manifest, want string }{
+		{"", "", "local"}, {"", "local", "local"}, {"", "lan", "lan"}, {"", "internal", "internal"},
+		{"lan", "", "lan"}, {"lan", "local", "lan"}, {"lan", "internal", "internal"}, {"lan", "public", "public"},
+		{"local", "", "local"}, {"local", "lan", "lan"},
+		// Anything else the machine says is not followed: an app from the
+		// catalog is never opened to everything without the user choosing.
+		{"public", "", "local"}, {"bogus", "local", "local"},
+	} {
+		e := &Engine{cfg: Config{DefaultExposure: c.machine}}
+		if got := e.manifestExposure(m(c.manifest)); got != c.want {
+			t.Errorf("machine %q manifest %q: %q, want %q", c.machine, c.manifest, got, c.want)
+		}
+	}
+	if got := (&Engine{cfg: Config{DefaultExposure: "lan"}}).manifestExposure(nil); got != "lan" {
+		t.Errorf("no manifest: %q", got)
+	}
+}
+
+// On a LAN server installed fresh (DefaultExposure lan) an app installed
+// without --expose is opened to the LAN, its address is the LAN address
+// from the start, and the plan says so; --expose still wins.
+func TestInstallMachineDefaultLAN(t *testing.T) {
+	ctx := context.Background()
+	v := setupAddressDefault(t, state.ExposureLAN)
+	plan, err := v.e.Plan(ctx, Request{App: "demo-values"})
+	if err != nil || len(plan.Apps) != 1 || plan.Apps[0].Exposure != state.ExposureLAN {
+		t.Fatalf("plan %+v %v", plan.Apps, err)
+	}
+	if plan, err := v.e.Plan(ctx, Request{App: "demo-values", Expose: "local"}); err != nil || plan.Apps[0].Exposure != state.ExposureLocal {
+		t.Fatalf("plan with --expose local %+v %v", plan.Apps, err)
+	}
+	tv := v.install(t, Request{App: "demo-values"})
+	if tv.Status != state.TaskSucceeded {
+		t.Fatalf("task %+v %+v", tv, tv.Fault)
+	}
+	a, err := v.w.st.GetApp(ctx, "demo-values")
+	if err != nil || a.Exposure != state.ExposureLAN {
+		t.Fatalf("app %+v %v", a, err)
+	}
+	url := "http://192.0.2.10:" + strconv.Itoa(a.PublicPort)
+	if len(tv.Apps) != 1 || tv.Apps[0].URL != url {
+		t.Fatalf("result %+v", tv.Apps)
+	}
+	if env := appEnvVars(t, v, "demo-values"); env["APP_URL_SLASH"].Value != url+"/" {
+		t.Fatalf("env %+v", env["APP_URL_SLASH"])
+	}
+	d, err := v.e.Detail(ctx, "demo-values")
+	if err != nil || d.Exposure != state.ExposureLAN {
+		t.Fatalf("detail %q %v", d.Exposure, err)
+	}
+
+	// --expose local on the same machine: only this server.
+	w := setupAddressDefault(t, state.ExposureLAN)
+	if tv := w.install(t, Request{App: "demo-values", Expose: "local"}); tv.Status != state.TaskSucceeded {
+		t.Fatalf("task %+v", tv.Fault)
+	}
+	if a, err := w.w.st.GetApp(ctx, "demo-values"); err != nil || a.Exposure != state.ExposureLocal {
+		t.Fatalf("app %+v %v", a, err)
+	}
+}
+
+// A machine that gives nothing (installed before, a cloud server, a
+// desktop): the app stays only on this server, as before.
+func TestInstallMachineDefaultUnset(t *testing.T) {
+	ctx := context.Background()
+	v := setupAddressDefault(t, "")
+	plan, err := v.e.Plan(ctx, Request{App: "demo-values"})
+	if err != nil || len(plan.Apps) != 1 || plan.Apps[0].Exposure != state.ExposureLocal {
+		t.Fatalf("plan %+v %v", plan.Apps, err)
+	}
+	if tv := v.install(t, Request{App: "demo-values"}); tv.Status != state.TaskSucceeded {
+		t.Fatalf("task %+v", tv.Fault)
+	}
+	if a, err := v.w.st.GetApp(ctx, "demo-values"); err != nil || a.Exposure != state.ExposureLocal {
+		t.Fatalf("app %+v %v", a, err)
 	}
 }

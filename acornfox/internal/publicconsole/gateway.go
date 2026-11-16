@@ -151,7 +151,13 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := r.Clone(r.Context())
+	// Tell the console which door this came through (entry.go): opening or
+	// closing the public console from here asks for this entry's password.
+	entry := NewEntry(EntryPublic, clientIP(r), g.checkPassword)
+	if g.cfg.LAN {
+		entry = NewEntry(EntryLAN, hostOnly(r.RemoteAddr), g.checkPassword)
+	}
+	out := r.Clone(WithEntry(r.Context(), entry))
 	out.Host = "127.0.0.1"
 	for _, k := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
 		out.Header.Del(k)

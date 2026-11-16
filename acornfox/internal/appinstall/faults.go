@@ -265,7 +265,7 @@ const (
 	renderMeaning       = "清单里写的一个值算不出来：环境变量、启动命令、配置文件、首次登录信息或初始化步骤里的 {{…}} 写法读不了（检查工具会报 CAT-LINT-46、47），一个变换没做成（例如 map 对照表里没有取到的那个值，又没写 \"*=值\" 兜底），if 条件读不了，同名的两条环境变量的条件同时成立，或者启动命令引用了保密的值。这是清单的问题，不是操作不对；这次安装已失败并清理"
 	renderAction        = "看 message 是哪一处的哪个 {{…}}（message 里不带取到的值）。是 map 没对上、条件同时成立这类、要靠换一个值解决的（例如换一种对外方式、--set 改设置项；acornfox catalog platform-vars 看本机平台变量的值），问用户后再装；写法读不了、启动命令带保密值的，是目录的问题，把 message 反馈给我们，不要想办法绕过"
 	varsStaleMeaning    = "应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。这一版平台不会去改已经装好的应用：应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行。这只是提醒，不是出错"
-	varsStaleAction     = "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式不是清单默认的就加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装"
+	varsStaleAction     = "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装"
 	retiredMeaning      = "已不再使用的编号：以前是平台内置的大模型来源（--llm）出的错。大模型接口现在是一种普通的服务，这一类问题报 CAT-INST-31～35。编号保留，不会再分给别的错误"
 	retiredAction       = "这一版不会再出现这个编号。遇到了说明看的是旧版本的输出：按 acornfox faults CAT-INST-31 等新编号处理"
 )
