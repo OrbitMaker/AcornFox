@@ -13,7 +13,7 @@ import (
 
 // Exit codes of `setup` beyond the shared ones.
 const (
-	exitSetupNeedsUser = 5 // waiting for the user (a choice, an admin confirmation, a reboot)
+	exitSetupNeedsUser = 5 // waiting for the user (a choice)
 	exitSetupPaused    = 6 // paused
 )
 
@@ -23,7 +23,7 @@ const (
 // it until it is done, fails or needs the user.
 //
 //	setup [--runtime builtin|docker-desktop|existing] [--mirror URL]
-//	      [--confirm-admin] [--resume] [--pause] [--status] [--json]
+//	      [--resume] [--pause] [--status] [--json]
 //
 // With --json every event is printed as one JSON line (the console reads the
 // same events); the last line is the done or error event.
@@ -32,8 +32,6 @@ func (a *app) cmdSetup(ctx context.Context, args []string) int {
 	fs.SetOutput(a.out.stderr)
 	runtime := fs.String("runtime", "", "运行环境：builtin（AcornFox 自带，没有界面）、docker-desktop（打开已装的 Docker Desktop）、existing（用已经在运行的 Docker）")
 	mirror := fs.String("mirror", "", "先从这个下载源下载运行环境文件（地址前缀，文件在 <地址>/runtime/<文件名>）")
-	confirmAdmin := fs.Bool("confirm-admin", false, "Windows：同意弹出管理员确认（打开 WSL 2、加局域网防火墙规则要用）")
-	localOnly := fs.Bool("local-only", false, "Windows：不加局域网防火墙规则，应用只在本机打开（以后可用 --confirm-admin 再打开）")
 	resume := fs.Bool("resume", false, "从上次停下的地方接着做（失败、暂停或重启电脑之后）")
 	pause := fs.Bool("pause", false, "暂停（已下载的部分会保留）")
 	status := fs.Bool("status", false, "只看当前状态，不开始")
@@ -42,7 +40,7 @@ func (a *app) cmdSetup(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 	if len(rest) != 0 {
-		return a.out.usageError("用法：setup [--runtime builtin|docker-desktop|existing] [--mirror 地址] [--confirm-admin | --local-only] [--resume] [--pause] [--status]")
+		return a.out.usageError("用法：setup [--runtime builtin|docker-desktop|existing] [--mirror 地址] [--resume] [--pause] [--status]")
 	}
 	switch *runtime {
 	case "", setup.RuntimeBuiltin, setup.RuntimeDockerDesktop, setup.RuntimeExisting:
@@ -91,12 +89,9 @@ func (a *app) cmdSetup(ctx context.Context, args []string) int {
 		return exitOK
 	}
 
-	if *confirmAdmin && *localOnly {
-		return a.out.usageError("--confirm-admin 和 --local-only 只能选一个")
-	}
-	opts := setup.StartOptions{Runtime: *runtime, Mirror: *mirror, ConfirmAdmin: *confirmAdmin, LocalOnly: *localOnly}
+	opts := setup.StartOptions{Runtime: *runtime, Mirror: *mirror}
 	since := st.Seq
-	explicit := *runtime != "" || *mirror != "" || *confirmAdmin || *localOnly
+	explicit := *runtime != "" || *mirror != ""
 	switch {
 	case st.State == setup.StateRunning:
 		// Attach to the run in progress.
@@ -287,15 +282,6 @@ func (a *app) setupNeedHuman(n setup.Need) {
 			}
 			a.out.human("      acornfox setup --runtime %-15s %s%s", o.ID, o.Title, rec)
 		}
-	case setup.NeedAdmin:
-		a.out.human("      同意后运行：acornfox setup --confirm-admin")
-		for _, o := range n.Options {
-			if o.ID == "local-only" {
-				a.out.human("      只在本机用：acornfox setup --local-only")
-			}
-		}
-	case setup.NeedReboot:
-		a.out.human("      重启电脑后会自动接着装；也可以重启后运行 acornfox setup --resume")
 	}
 }
 

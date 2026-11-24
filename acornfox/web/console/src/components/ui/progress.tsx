@@ -5,7 +5,7 @@ export function Progress({ value, tone, className, label }: { value: number; ton
   const v = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0))
   return (
     <div role="progressbar" aria-valuenow={Math.round(v)} aria-valuemin={0} aria-valuemax={100} aria-label={label} className={cn('relative h-1.5 w-full overflow-hidden rounded-full bg-primary/10', className)}>
-      <div className={cn('h-full rounded-full transition-all', tone === 'warning' ? 'bg-warning' : tone === 'danger' ? 'bg-danger' : 'bg-primary')} style={{ width: v + '%' }} />
+      <div className={cn('h-full rounded-full transition-[width] duration-move ease-in-out', tone === 'warning' ? 'bg-warning' : tone === 'danger' ? 'bg-danger' : 'bg-primary')} style={{ width: v + '%' }} />
     </div>
   )
 }

@@ -696,6 +696,9 @@ func (a *app) cmdServicesSet(ctx context.Context, args []string) int {
 	a.printService(s)
 	for _, n := range s.Notes {
 		a.out.human("注：%s", n)
+		if strings.Contains(n, "重新应用设置后才生效") {
+			a.out.human("    哪些应用落后了：acornfox apps affected --var service:%s；让一个应用用上新的值：acornfox apps reapply 应用 --plan 先看，用户同意后加 --yes（会重启它）", name)
+		}
 	}
 	return exitOK
 }

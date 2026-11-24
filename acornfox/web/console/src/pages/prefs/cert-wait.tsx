@@ -1,6 +1,7 @@
-// 公网控制台开启以后，地址的证书好了没有。
-// 为什么要有：第一次开启时入口要现申请证书（通常一两分钟），这段时间浏览器打开地址会报“连接不安全”。
-// 页面在这段时间写明“正在申请证书”，好了再说“可以打开了”，不让人白跑一趟。
+// “从外面打开控制台”开启以后，地址的证书（地址前面的小锁）好了没有。
+// 为什么要有：第一次开启时入口要现申请证书（通常一两分钟），这段时间浏览器打开地址会报“不安全”。
+// 页面在这段时间写明“正在准备小锁”，好了再说“可以打开了”，不让人白跑一趟。
+// 样稿第 10 版（评估第 4 节）：给人看的话不说“证书”，说“地址前面的小锁”；服务端给的诊断原话不显示（只有 hint 这句建议照旧显示）。
 // 接口：GET /v1/public-console?check=https，应答里的 https（服务器自己查的）：
 //   code ok：可以打开；cert_pending：正在申请；cert_failed：等了几分钟还没签下来；
 //   别的 code：这台服务器确认不了（有的云不让服务器连自己的公网地址）。
@@ -60,28 +61,28 @@ export function useCertState(active: boolean, key: string): CertState {
   return state
 }
 
-// where：dialog 是刚开启时的弹窗（每种状态都写）；row 是“在外面打开控制台”那一行（证书一直是好的就不多说）。
+// where：dialog 是刚开启时的弹窗（每种状态都写）；row 是“从外面打开控制台”那一行（小锁一直是好的就不多说）。
 export function CertLine({ s, url, where }: { s: CertState; url: string; where: 'dialog' | 'row' }) {
   if (s.phase === 'none') return null
   if (where === 'row' && (s.phase === 'checking' || (s.phase === 'ready' && !s.waited))) return null
   let body: React.ReactNode
   if (s.phase === 'checking') {
-    body = <><Spinner className="mt-0.5" /><span>正在看证书好了没有…</span></>
+    body = <><Spinner className="mt-0.5" /><span>正在看地址前面的小锁好了没有…</span></>
   } else if (s.phase === 'pending') {
-    body = <><Spinner className="mt-0.5" /><span>正在申请证书，通常一两分钟，好了这里会提示。现在打开，浏览器会报“连接不安全”。</span></>
+    body = <><Spinner className="mt-0.5" /><span>正在准备地址前面的小锁，通常一两分钟，好了这里会提示。现在打开，浏览器会报“不安全”。</span></>
   } else if (s.phase === 'ready') {
     body = (
       <>
-        <Check className="mt-0.5 size-3.5 shrink-0 text-success" aria-hidden="true" />
-        <span>证书好了，可以打开了。{url && <a className="ml-1.5 inline-flex items-center gap-1 underline underline-offset-2" href={url} target="_blank" rel="noreferrer">打开<ExternalLink className="size-3" aria-hidden="true" /></a>}</span>
+        <Check className="mt-0.5 size-icon shrink-0 text-success" aria-hidden="true" />
+        <span>好了，地址前面有小锁，浏览器不会报不安全，可以打开了。{url && <a className="ml-1.5 inline-flex items-center gap-1 underline underline-offset-2" href={url} target="_blank" rel="noreferrer">打开<ExternalLink className="size-3" aria-hidden="true" /></a>}</span>
       </>
     )
   } else if (s.phase === 'failed') {
     body = (
       <>
-        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
+        <AlertTriangle className="mt-0.5 size-icon shrink-0 text-warning" aria-hidden="true" />
         <span>
-          证书还没签下来，地址现在打不开。服务器还在自己重试，好了这里会提示。
+          地址前面的小锁还没准备好，现在打不开。这台机器还在自己重试，好了这里会提示。
           {s.diag?.hint && <span className="mt-1 block text-2xs text-muted-foreground">{s.diag.hint}</span>}
         </span>
       </>
@@ -89,8 +90,8 @@ export function CertLine({ s, url, where }: { s: CertState; url: string; where: 
   } else {
     body = (
       <>
-        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <span>这台服务器自己确认不了证书好了没有{s.diag?.message ? '（' + s.diag.message + '）' : ''}。第一次开启要等一两分钟；到时候直接打开地址试试，浏览器报“连接不安全”就再等一会儿。</span>
+        <AlertTriangle className="mt-0.5 size-icon shrink-0 text-muted-foreground" aria-hidden="true" />
+        <span>这台机器自己确认不了小锁好了没有。第一次开启要等一两分钟；到时候直接打开地址试试，浏览器报“不安全”就再等一会儿。</span>
       </>
     )
   }

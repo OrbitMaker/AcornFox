@@ -49,3 +49,21 @@ export function sinceText(iso: string | undefined | null, now = Date.now()): str
   if (h < 24) return `${h} 小时`
   return `${Math.floor(h / 24)} 天`
 }
+
+// bytesText：字节数的中文显示（不到 1 MB 写 KB，不到 1 GB 写 MB，其余写 GB）。读不到时是“—”。
+export function bytesText(b: number | undefined | null): string {
+  if (b === undefined || b === null || !Number.isFinite(b) || b < 0) return '—'
+  if (b < 1024 * 1024) return Math.max(1, Math.round(b / 1024)) + ' KB'
+  const mb = b / 1024 / 1024
+  if (mb < 1024) return (mb >= 100 ? Math.round(mb) : Math.round(mb * 10) / 10) + ' MB'
+  return (Math.round((mb / 1024) * 10) / 10) + ' GB'
+}
+
+// etaText：还要多久（取整到秒、分钟、小时）。
+export function etaText(seconds: number | undefined | null): string {
+  if (seconds === undefined || seconds === null || !Number.isFinite(seconds) || seconds < 0) return ''
+  const s = Math.round(seconds)
+  if (s < 60) return Math.max(1, s) + ' 秒'
+  if (s < 3600) return Math.round(s / 60) + ' 分钟'
+  return Math.floor(s / 3600) + ' 小时 ' + Math.round((s % 3600) / 60) + ' 分'
+}

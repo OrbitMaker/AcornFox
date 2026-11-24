@@ -21,7 +21,7 @@ function ctx(p: Partial<DashCtx> = {}): DashCtx {
 
 describe('看板的数据', () => {
   it('CPU、内存来自整机历史；没有历史时说清楚，不画假数据', () => {
-    expect(SOURCES.cpu.gen(ctx())).toEqual({ kind: 'none', text: '这台服务器没有记录历史' })
+    expect(SOURCES.cpu.gen(ctx())).toEqual({ kind: 'none', text: '这台机器没有记录历史' })
     expect(SOURCES.cpu.gen(ctx({ history: { ...hist(0) } }))).toMatchObject({ kind: 'none' })
     const d = SOURCES.cpu.gen(ctx({ history: hist(3) }))
     expect(d.kind).toBe('ts')
@@ -62,7 +62,7 @@ describe('看板的数据', () => {
     const unknown = app({ name: 'db', current_deployment: 'd1', observed_state: 'unavailable' })
     const st2 = SOURCES.appStatus.gen(ctx({ apps: [run, stopped, deploying, unknown] }))
     if (st2.kind !== 'cat') throw new Error('kind')
-    expect(st2.items.map((i) => [i.name, i.value])).toEqual([['运行中', 1], ['处理中', 1], ['已停止', 1], ['有问题', 0], ['读不到状态', 1]])
+    expect(st2.items.map((i) => [i.name, i.value])).toEqual([['正常', 1], ['处理中', 1], ['停了', 1], ['要处理', 0], ['看不到状态', 1]])
     const mem = SOURCES.appMem.gen(ctx({ apps: [run, stopped], metrics: { web: { app: 'web', available: true, observed_state: 'running', memory_usage_mb: 300.4 } } }))
     expect(mem).toMatchObject({ kind: 'cat', unit: 'MB', items: [{ name: 'web', value: 300.4 }] })
     expect(SOURCES.appCpu.gen(ctx({ apps: [] }))).toEqual({ kind: 'none', text: '还没有应用' })
@@ -90,9 +90,9 @@ describe('需要你处理、最近发生的事', () => {
       apps: [failed, crashed, gone], tasks: [t, old],
       checks: { os: 'linux', checked_at: '', ok: false, items: [{ ok: false, level: 'fail', text: '磁盘：数据目录 /var/lib/acornfox 所在分区只剩 2.0 GB', code: 'SETUP-DISK-01' }, { ok: true, level: 'ok', text: 'Docker：27.3 运行中' }] },
     }))
-    expect(items.map((i) => i.title)).toEqual(['shop 部署失败', 'blog 没在运行', 'agent 的私有目录已断开', '磁盘 有问题', '安装 hermes-agent 失败'])
-    expect(items[0].sub).toContain('DEP-HEALTH-01')
-    expect(items[3]).toMatchObject({ href: '#runtime', sub: expect.stringContaining('SETUP-DISK-01') })
+    expect(items.map((i) => i.title)).toEqual(['shop 的新版本没启动成功，旧版本照常用', 'blog 停了，正在自动重新启动', 'agent 来自的“演示”连不上了，应用照常用', '磁盘', 'hermes-agent 没装成功'])
+    expect(items[0].ask).toContain('DEP-HEALTH-01')
+    expect(items[3]).toMatchObject({ href: '#prefs/checkup', ask: expect.stringContaining('SETUP-DISK-01') })
     expect(items[4].task).toEqual({ kind: 'app', id: 'hermes-agent', taskId: 'tk1' })
     expect(todoItems(ctx({ apps: [app({ name: 'web' })] }))).toEqual([])
   })
@@ -103,9 +103,9 @@ describe('需要你处理、最近发生的事', () => {
         { id: 'd1', app: 'web', seq: 1, source_kind: 'image', source_ref: 'nginx', status: 'retired', created_at: '2026-11-05T08:00:00Z', finished_at: '2026-11-05T08:01:00Z' },
         { id: 'd2', app: 'web', seq: 2, source_kind: 'image', source_ref: 'nginx', status: 'live', created_at: '2026-11-06T09:00:00Z', finished_at: '2026-11-06T09:01:00Z' },
       ],
-      tasks: [task({ id: 'tk', status: 'succeeded', target: 'new-api', finished_at: '2026-11-06T10:00:00Z' })],
+      tasks: [task({ id: 'tk', kind: 'recipe', status: 'succeeded', target: 'new-api', finished_at: '2026-11-06T10:00:00Z' })],
     }))
-    expect(items.map((i) => i.title)).toEqual(['new-api 安装完成', 'web 第 2 版上线', 'web 第 1 版上线'])
+    expect(items.map((i) => i.title)).toEqual(['new-api 一起装好了', 'web 更新好了', 'web 装好了'])
     expect(items[2].time).toBe('昨天 ' + new Date('2026-11-05T08:01:00Z').toTimeString().slice(0, 5))
   })
 })

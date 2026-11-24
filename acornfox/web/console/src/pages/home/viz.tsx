@@ -2,7 +2,7 @@
 // 条形图、分段条、数字、进度条、状态数、表格、列表是普通的页面元素。样子照控制台样稿。
 import * as React from 'react'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart, Tooltip, XAxis, YAxis, type TooltipContentProps } from 'recharts'
-import { AlertTriangle, ArrowUpCircle, Bell, CheckCircle2, History, Loader2, Package, Unlink, Wrench } from 'lucide-react'
+import { AlertTriangle, ArrowUpCircle, Bell, CheckCircle2, ChevronRight, History, Loader2, Package, Unlink, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { fmtValue, type CatItem, type Data, type ListItem } from '@/lib/dashboard'
 import { go } from '@/lib/router'
@@ -15,6 +15,7 @@ type Cat = Extract<Data, { kind: 'cat' }>
 type Val = Extract<Data, { kind: 'value' }>
 type List = Extract<Data, { kind: 'list' }>
 
+// 刻度的字号由 ChartContainer 的样式定（text-2xs，跟着“大小档位”走）；这里的数只给图表库排版时估宽度用。
 const AXIS = { fontSize: 10 }
 
 function niceMax(v: number): number {
@@ -124,14 +125,14 @@ function HBar({ d }: { d: Cat }) {
   const items = sortCat(d)
   const max = Math.max(...items.map((i) => i.value)) || 1
   return (
-    <div className="flex h-full flex-col justify-center gap-2 overflow-y-auto">
+    <div className="flex h-full flex-col justify-center gap-2.5 overflow-y-auto">
       {items.map((it) => (
-        <div key={it.name} className="group grid grid-cols-[minmax(0,96px)_1fr_auto] items-center gap-2 text-xs" title={it.name + '：' + fmtValue(it.value, d.unit)}>
+        <div key={it.name} className="group grid grid-cols-[minmax(0,7.5rem)_1fr_auto] items-center gap-2.5 text-xs" title={it.name + '：' + fmtValue(it.value, d.unit)}>
           <span className="truncate text-muted-foreground">{it.name}</span>
           <div className="h-2.5 rounded-sm bg-muted/60">
-            <div className="h-full rounded-sm transition-all group-hover:opacity-80" style={{ width: Math.max(2, (it.value / max) * 100) + '%', background: it.color }} />
+            <div className="h-full rounded-sm transition-[width,opacity] duration-move ease-in-out group-hover:opacity-80" style={{ width: Math.max(2, (it.value / max) * 100) + '%', background: it.color }} />
           </div>
-          <span className="tnum w-16 text-right font-medium">{fmtValue(it.value, d.unit)}</span>
+          <span className="tnum w-[4.5rem] text-right font-medium">{fmtValue(it.value, d.unit)}</span>
         </div>
       ))}
     </div>
@@ -207,12 +208,18 @@ function Donut({ d }: { d: Cat }) {
 function Kpi({ d }: { d: Cat }) {
   return (
     <div className="grid h-full items-center gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, d.items.length)}, minmax(0, 1fr))` }}>
-      {d.items.map((it) => (
-        <div key={it.name} className="flex min-w-0 flex-col gap-1">
-          <span className="tnum text-xl font-semibold leading-none">{it.value}</span>
-          <span className="flex items-center gap-1 truncate text-2xs text-muted-foreground"><span className="size-1.5 shrink-0 rounded-full" style={{ background: it.color }} />{it.name}</span>
-        </div>
-      ))}
+      {d.items.map((it) => {
+        const body = (
+          <>
+            <span className="tnum text-xl font-semibold leading-none">{it.value}</span>
+            <span className="flex items-center gap-1 truncate text-2xs text-muted-foreground"><span className="size-1.5 shrink-0 rounded-full" style={{ background: it.color }} />{it.name}{it.href && it.value > 0 && <ChevronRight className="-ml-0.5 size-3 transition-transform group-hover/kpi:translate-x-0.5" aria-hidden="true" />}</span>
+          </>
+        )
+        // 能点的一项（“要处理”不是 0 时）：整块是一个链接，去看是哪几个。
+        return it.href && it.value > 0
+          ? <a key={it.name} href={it.href} className="tap-h group/kpi -m-1 flex min-w-0 flex-col gap-1 rounded-md p-1 transition-colors hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring" title={'看看是哪 ' + it.value + ' 个'} data-testid="kpi-link">{body}</a>
+          : <div key={it.name} className="flex min-w-0 flex-col gap-1">{body}</div>
+      })}
     </div>
   )
 }
@@ -258,7 +265,9 @@ function Stat({ d }: { d: TS | Val }) {
   )
 }
 
-function Meter({ d }: { d: TS | Val }) {
+// compact：矮卡片（高度“矮”）里放不下三行，排成两行：上面一行左边数字、右边那一句（“剩 318 GB”），下面进度条。
+// 样稿第 13 版矮卡片里最下面一句被裁掉一半，就是因为照三行排的。
+function Meter({ d, compact }: { d: TS | Val; compact?: boolean }) {
   let v: number | null, max: number, unit: string, sub: string, tone: string | undefined
   if (d.kind === 'value') {
     v = d.value; max = d.max; unit = d.unit; sub = d.sub; tone = d.tone
@@ -267,6 +276,17 @@ function Meter({ d }: { d: TS | Val }) {
     tone = v !== null && v / max > 0.85 ? 'warning' : undefined
   }
   const pct = v === null || !max ? 0 : (v / max) * 100
+  if (compact) {
+    return (
+      <div className="flex h-full flex-col justify-center gap-2.5" data-testid="meter-compact">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="whitespace-nowrap"><span className="tnum text-xl font-semibold leading-none">{fmtValue(v, unit === '%' ? '%' : '')}</span>{unit !== '%' && <span className="text-xs text-muted-foreground"> / {fmtValue(max, unit)}</span>}</span>
+          <span className="tnum min-w-0 truncate text-xs text-muted-foreground" title={sub}>{sub}</span>
+        </div>
+        <Progress value={pct} tone={tone as 'warning' | 'danger' | undefined} />
+      </div>
+    )
+  }
   return (
     <div className="flex h-full flex-col justify-center gap-2">
       <div className="flex items-baseline justify-between gap-2">
@@ -313,13 +333,13 @@ function ListWidget({ d, onTask }: { d: List; onTask?: (t: NonNullable<ListItem[
   }
   if (d.type === 'events') {
     return (
-      <ol className="flex h-full flex-col gap-2.5 overflow-y-auto">
+      <ol className="list-fade no-scrollbar flex h-full flex-col gap-2.5 overflow-y-auto">
         {d.items.map((it) => {
           const Icon = LIST_ICON[it.icon] || History
           return (
             <li key={it.key} className="flex items-start gap-2 text-xs">
-              <Icon className={cn('mt-px size-3.5 shrink-0', it.tone === 'danger' ? 'text-danger' : 'text-muted-foreground')} />
-              {it.href ? <a href={it.href} className="min-w-0 flex-1 truncate hover:underline">{it.title}{it.sub && <span className="text-muted-foreground"> · {it.sub}</span>}</a> : <span className="min-w-0 flex-1 truncate">{it.title}{it.sub && <span className="text-muted-foreground"> · {it.sub}</span>}</span>}
+              <Icon className={cn('mt-px size-icon shrink-0', it.tone === 'danger' ? 'text-danger' : 'text-muted-foreground')} />
+              {it.href ? <a href={it.href} className="tap-h min-w-0 flex-1 truncate hover:underline">{it.title}{it.sub && <span className="text-muted-foreground"> · {it.sub}</span>}</a> : <span className="min-w-0 flex-1 truncate">{it.title}{it.sub && <span className="text-muted-foreground"> · {it.sub}</span>}</span>}
               <span className="tnum shrink-0 text-2xs text-muted-foreground">{it.time}</span>
             </li>
           )
@@ -334,7 +354,7 @@ function ListWidget({ d, onTask }: { d: List; onTask?: (t: NonNullable<ListItem[
         return (
           <div key={it.key} className="flex items-center gap-2.5 py-2 first:pt-0">
             <div className={cn('flex size-7 shrink-0 items-center justify-center rounded-md border', it.tone === 'danger' && 'border-danger/30 bg-danger/10 text-danger', it.tone === 'warning' && 'border-warning/30 bg-warning/10 text-warning')}>
-              <Icon className="size-3.5" />
+              <Icon className="size-icon" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-xs font-medium">{it.title}</div>
@@ -350,7 +370,8 @@ function ListWidget({ d, onTask }: { d: List; onTask?: (t: NonNullable<ListItem[
   )
 }
 
-export function Viz({ type, d, onTask }: { type: string; d: Data; onTask?: (t: NonNullable<ListItem['task']>) => void }) {
+// compact：这张图在矮卡片里（高度“矮”）。现在只有进度条用它换排法。
+export function Viz({ type, d, onTask, compact }: { type: string; d: Data; onTask?: (t: NonNullable<ListItem['task']>) => void; compact?: boolean }) {
   if (d.kind === 'none') return <div className="flex h-full items-center justify-center text-center text-xs text-muted-foreground">{d.text}</div>
   switch (type) {
     case 'area':
@@ -364,7 +385,7 @@ export function Viz({ type, d, onTask }: { type: string; d: Data; onTask?: (t: N
     case 'donut': if (d.kind === 'cat') return <Donut d={d} />; break
     case 'kpi': if (d.kind === 'cat') return <Kpi d={d} />; break
     case 'stat': if (d.kind === 'ts' || d.kind === 'value') return <Stat d={d} />; break
-    case 'meter': if (d.kind === 'ts' || d.kind === 'value') return <Meter d={d} />; break
+    case 'meter': if (d.kind === 'ts' || d.kind === 'value') return <Meter d={d} compact={compact} />; break
     case 'table': return <DataTable d={d} />
     case 'list': if (d.kind === 'list') return <ListWidget d={d} onTask={onTask} />; break
   }

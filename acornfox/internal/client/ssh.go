@@ -23,7 +23,7 @@ const stderrCap = 64 << 10
 
 // sshArgs builds the exact argv (excluding the program name) for launching ssh
 // against t. The contract fixes: -T, -o BatchMode=yes, -o ServerAliveInterval=15,
-// optional -p and -i, then user@host, then the remote command.
+// optional -p and -i, then any SSHOptions as -o, then user@host, then the remote command.
 func sshArgs(t Target) []string {
 	args := []string{
 		"-T",
@@ -35,6 +35,9 @@ func sshArgs(t Target) []string {
 	}
 	if t.Identity != "" {
 		args = append(args, "-i", t.Identity)
+	}
+	for _, o := range t.SSHOptions {
+		args = append(args, "-o", o)
 	}
 	args = append(args, t.SSH)
 	remote := t.RemoteCommand

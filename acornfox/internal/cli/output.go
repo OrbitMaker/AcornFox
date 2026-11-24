@@ -26,6 +26,9 @@ type outputWriter struct {
 	stdout  io.Writer
 	stderr  io.Writer
 	secrets []string
+	// notices travel with the result in --json mode (field "notices");
+	// without --json they were already written to stderr (addNotice).
+	notices []notice
 }
 
 // redact removes every registered secret value from s. Only values of length
@@ -52,6 +55,9 @@ func (o *outputWriter) emitJSON(fields map[string]any) {
 	for k, v := range fields {
 		obj[k] = v
 	}
+	if _, has := obj["notices"]; !has && len(o.notices) > 0 {
+		obj["notices"] = o.notices
+	}
 	o.encodeRedacted(o.stdout, obj)
 }
 
@@ -73,7 +79,11 @@ func (o *outputWriter) emitDiagnosisJSON(d client.Diagnosis) {
 	if d.NeedsPlatform != "" {
 		diag["needs_platform"] = d.NeedsPlatform
 	}
-	o.encodeRedacted(o.stdout, map[string]any{"ok": false, "diagnosis": diag})
+	out := map[string]any{"ok": false, "diagnosis": diag}
+	if len(o.notices) > 0 {
+		out["notices"] = o.notices
+	}
+	o.encodeRedacted(o.stdout, out)
 }
 
 // encodeRedacted marshals v, redacts secrets from the serialized form and

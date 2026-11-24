@@ -82,6 +82,32 @@ func TestTargetAddAndList(t *testing.T) {
 	}
 }
 
+func TestTargetAddSSHOption(t *testing.T) {
+	h := newHarness(t)
+	var got client.Target
+	orig := h.connect
+	h.connect = func(ctx context.Context, tgt client.Target) (client.API, error) {
+		got = tgt
+		return orig(ctx, tgt)
+	}
+	code, _, errOut := h.run("--json", "target", "add", "local", "--ssh", "root@127.0.0.1", "--port", "18808",
+		"--ssh-option", "UserKnownHostsFile=/k/kh", "--ssh-option", "StrictHostKeyChecking=yes")
+	if code != exitOK {
+		t.Fatalf("exit = %d stderr=%s", code, errOut)
+	}
+	if len(got.SSHOptions) != 2 || got.SSHOptions[0] != "UserKnownHostsFile=/k/kh" {
+		t.Fatalf("连接用的服务器没带上 ssh 选项：%+v", got)
+	}
+	tf, _ := loadTargets(h.configDir)
+	if saved := tf.Targets["local"]; saved == nil || len(saved.SSHOptions) != 2 || saved.Port != 18808 {
+		t.Fatalf("没有存进 targets.json：%+v", saved)
+	}
+	// A value without name=value is refused.
+	if code, _, _ := h.run("--json", "target", "add", "x", "--ssh", "u@h", "--ssh-option", "bad"); code != exitUsage {
+		t.Fatalf("写法不对的 --ssh-option 应是用法错误，退出码 %d", code)
+	}
+}
+
 func TestTargetAddConnectionErrorExit3(t *testing.T) {
 	h := newHarness(t)
 	h.connect = func(ctx context.Context, tgt client.Target) (client.API, error) {

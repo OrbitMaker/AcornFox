@@ -138,18 +138,7 @@ func setupChecks(d setupDeps, rec *reconcile.Reconciler) func(context.Context) [
 			// 2. The proxy's management endpoint answers only with the token
 			// (the proxy's own Health decides what that takes).
 			adminOK, detail := checkEdgeAdmin(ctx, d)
-			adminCode := "SETUP-CHK-03"
-			if !adminOK && platform.GOOS == "windows" {
-				// The edge runs but its 127.0.0.1 port does not reach Windows:
-				// WSL's localhost forwarding is off or broken.
-				if st, _ := rec.EdgeStatus(); st == reconcile.EdgeStateRunning {
-					if r, ok := platform.LoadBuiltinRuntime(d.DataDir); ok && r.Kind == setup.RuntimeBuiltin {
-						adminCode = "SETUP-WIN-05"
-						detail = "网关在运行，但 Windows 上连不上 127.0.0.1:" + strconv.Itoa(d.Options.EdgeAdminPort) + "（WSL 没有把端口转发到本机）"
-					}
-				}
-			}
-			add(setup.Check{ID: "edge_admin", Title: "网关管理口只在本机、要令牌", OK: adminOK, Required: true, Detail: detail, Code: code(adminOK, adminCode)})
+			add(setup.Check{ID: "edge_admin", Title: "网关管理口只在本机、要令牌", OK: adminOK, Required: true, Detail: detail, Code: code(adminOK, "SETUP-CHK-03")})
 			// 3. The app port range is published (bridge) / the edge runs (host).
 			portsOK, detail := checkPorts(ctx, d, rec)
 			add(setup.Check{ID: "ports", Title: "应用端口已预留", OK: portsOK, Required: true,
@@ -276,12 +265,6 @@ func checkLAN(ctx context.Context, d setupDeps, rec *reconcile.Reconciler) (bool
 		case len(failed) > 0:
 			return false, fmt.Sprintf("局域网转发有 %d 个端口被占用：%v", len(failed), failed)
 		}
-		if !platform.FirewallRulePresent() {
-			return false, lan + "：没有 AcornFox 防火墙规则（选了“只在本机用”就可以忽略；要打开运行 acornfox setup --confirm-admin）"
-		}
-		if platform.NetworkCategory(lan) == "Public" {
-			return false, lan + "：当前网络是“公用网络”，防火墙规则只在专用网络生效；到 设置 → 网络 改成“专用网络”"
-		}
 		return true, lan + "（由 AcornFox 转发）"
 	}
 	if d.Docker == nil {
@@ -396,9 +379,9 @@ func registryLabel(host string, china bool) string {
 // checkRegistrySources probes sources concurrently and judges them in
 // order: the first one that answers is the one the runner ends up using.
 // Docker Hub itself, when it comes after mirrors, is only probed once every
-// source before it has failed: in China it is blocked, and asking it on
-// every start would be a connection to a blocked address for nothing (the
-// runner only goes there when the mirrors fail too).
+// source before it has failed. In China it is not in the list at all unless
+// the user named it (runner.Registry.SkipsUpstream: it is blocked, and
+// asking it would be a connection to a blocked address for nothing).
 func checkRegistrySources(ctx context.Context, sources []string, china bool, probe func(context.Context, string) error) (bool, string) {
 	if len(sources) == 0 {
 		return false, "没有可用的镜像下载源"

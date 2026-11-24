@@ -100,7 +100,11 @@ func TestCheckRegistryAllDown(t *testing.T) {
 	if ok {
 		t.Fatalf("check passed with every source down: %q", detail)
 	}
-	want := append(append([]string{runner.TencentRegistryMirror}, runner.DefaultRegistryMirrors...), runner.DockerHubRegistry)
+	// Docker Hub itself is blocked in China: not asked, not listed.
+	want := append([]string{runner.TencentRegistryMirror}, runner.DefaultRegistryMirrors...)
+	if strings.Contains(detail, runner.DockerHubRegistry) {
+		t.Fatalf("detail lists Docker Hub: %q", detail)
+	}
 	last := -1
 	for _, h := range want {
 		i := strings.Index(detail, h)

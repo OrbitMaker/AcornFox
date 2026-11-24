@@ -19,6 +19,13 @@ type CatalogView struct {
 	Sources []SourceView     `json:"sources"`
 	Apps    []CatalogAppView `json:"apps"`
 	Recipes []RecipeView     `json:"recipes"`
+	// The public catalog's display content (catalog.Show): industries in the
+	// order to list them, the solutions the home page shows, the "find
+	// someone to deploy it" offer. Empty and not visible without one. What
+	// belongs to one app or recipe is its "show".
+	Industries []catalog.ShowIndustry `json:"industries"`
+	Home       catalog.ShowHome       `json:"home"`
+	Assist     catalog.ShowAssist     `json:"assist"`
 }
 
 // CatalogAppView is one app in the list.
@@ -40,6 +47,11 @@ type CatalogAppView struct {
 	Installed []string         `json:"installed"` // app names installed from it (this catalog) here
 	Source    SourceRef        `json:"source"`    // the catalog it comes from
 	Command   string           `json:"command"`   // CLI to install it
+	// Show is the display content of the public catalog for this app (name,
+	// one-line pitch, badge, colour, cover, document, order); left out when
+	// there is none and for apps of a private catalog. Keywords above already
+	// holds its search words.
+	Show *catalog.ShowAppView `json:"show,omitempty"`
 	// Icon and IconType as in AppDetail, only when the app's package is
 	// already on this machine (the list never downloads; see icons.go).
 	Icon     string `json:"icon,omitempty"`
@@ -64,6 +76,8 @@ type RecipeView struct {
 	catalog.Recipe
 	Source  SourceRef `json:"source"`
 	Command string    `json:"command"`
+	// Show is the display content for this solution as in CatalogAppView.
+	Show *catalog.ShowSolutionView `json:"show,omitempty"`
 	// NeedsPlatform as in CatalogAppView: the highest of the recipe's own
 	// min_platform and its apps', when this AcornFox is older than it.
 	NeedsPlatform string `json:"needs_platform"`
@@ -92,8 +106,15 @@ func (e *Engine) List(ctx context.Context) (CatalogView, error) {
 	if err != nil {
 		return CatalogView{}, fault(CodeInternal, err, "读应用列表失败")
 	}
+	show, showState := e.cfg.Catalog.Show()
 	v := CatalogView{Serial: idx.Serial, Origin: origin, Sync: e.cfg.Catalog.Status(), Sources: e.cfg.Catalog.Sources(),
-		Apps: []CatalogAppView{}, Recipes: []RecipeView{}}
+		Apps: []CatalogAppView{}, Recipes: []RecipeView{}, Industries: []catalog.ShowIndustry{}, Home: catalog.ShowHome{Solutions: []string{}}}
+	v.Sync.Show = &showState
+	skills, skillsState := e.cfg.Catalog.Skills()
+	v.Sync.Skills = &skillsState
+	if show != nil {
+		v.Industries, v.Home, v.Assist = show.Industries, show.Home, show.Assist
+	}
 	vs, err := e.cfg.Catalog.views()
 	if err != nil {
 		return CatalogView{}, fault(CodePackage, err, "目录读不了：%v", err)
@@ -115,6 +136,15 @@ func (e *Engine) List(ctx context.Context) (CatalogView, error) {
 				Installed: names, Source: src, Command: "acornfox install " + a.ID + catalogFlag(cv.origin),
 				Icon: icon, IconType: iconType, NeedsPlatform: e.needsPlatform(a.MinPlatform),
 			}
+			if cv.origin == "" {
+				if sa := show.App(a.ID); sa != nil {
+					if si, ok := skills[catalog.SkillKey(catalog.SkillKindApp, a.ID)]; ok {
+						sa.Skill = &si
+					}
+					av.Show = sa
+					av.Keywords = mergeKeywords(a.Keywords, sa.Keywords)
+				}
+			}
 			if av.NeedsPlatform == "" && catalog.FormerIndexApp(a) {
 				av.Former, av.Note = true, FormerNote
 			}
@@ -133,6 +163,12 @@ func (e *Engine) List(ctx context.Context) (CatalogView, error) {
 			}
 			rv := RecipeView{Recipe: r, Source: src, Command: "acornfox install --recipe " + r.ID + catalogFlag(cv.origin),
 				NeedsPlatform: e.needsPlatform(mins...)}
+			if cv.origin == "" {
+				rv.Show = show.Solution(r.ID)
+				if si, ok := skills[catalog.SkillKey(catalog.SkillKindRecipe, r.ID)]; ok && rv.Show != nil {
+					rv.Show.Skill = &si
+				}
+			}
 			if rv.NeedsPlatform == "" && former {
 				rv.Former, rv.Note = true, FormerNote
 			}
@@ -140,6 +176,26 @@ func (e *Engine) List(ctx context.Context) (CatalogView, error) {
 		}
 	}
 	return v, nil
+}
+
+// mergeKeywords is the manifest's search words followed by the display
+// content's that are not among them yet.
+func mergeKeywords(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	out := append([]string{}, base...)
+	have := map[string]bool{}
+	for _, k := range base {
+		have[k] = true
+	}
+	for _, k := range extra {
+		if !have[k] {
+			have[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // AppDetail is GET /v1/catalog/apps/{id}: what the detail page and the
@@ -180,6 +236,8 @@ type AppDetail struct {
 	Command        string        `json:"command"`
 	// NeedsPlatform as in CatalogAppView ("" when installable here).
 	NeedsPlatform string `json:"needs_platform"`
+	// Show is the display content as in CatalogAppView (public catalog only).
+	Show *catalog.ShowAppView `json:"show,omitempty"`
 }
 
 // ParamView is one form field.
@@ -249,6 +307,16 @@ func (e *Engine) DetailIn(ctx context.Context, from, id string) (AppDetail, erro
 	}
 	if icon, ok := a.Files[m.App.Icon]; ok && m.App.Icon != "" {
 		d.Icon, d.IconType = iconView(m.App.Icon, icon)
+	}
+	if a.Origin == "" {
+		show, _ := e.cfg.Catalog.Show()
+		d.Show = show.App(m.ID)
+		if d.Show != nil {
+			skills, _ := e.cfg.Catalog.Skills()
+			if si, ok := skills[catalog.SkillKey(catalog.SkillKindApp, m.ID)]; ok {
+				d.Show.Skill = &si
+			}
+		}
 	}
 	if len(m.Release.Images) > 0 {
 		d.Image = m.Release.Images[0].Repository + ":" + m.Release.Images[0].Tag

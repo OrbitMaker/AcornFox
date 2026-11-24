@@ -63,7 +63,7 @@ func (a *app) cmdPublicConsole(ctx context.Context, args []string) int {
 	fs.SetOutput(a.out.stderr)
 	local := fs.Bool("local", false, "在服务器本机经 "+localSocket+" 执行")
 	wait := fs.Duration("wait", 10*time.Minute, "等待域名解析与端口放行的最长时间（0 = 只检查一次）")
-	reset := fs.Bool("reset-password", false, "重新生成登录密码（旧密码与登录会话立即失效）")
+	reset := fs.Bool("reset-password", false, "重新生成登录密码（旧密码与登录会话立即失效；忘了公网控制台的密码，PUBCON-05，在服务器上用它；新密码只显示一次）")
 	rest, err := parseFlags(fs, args[1:])
 	if err != nil {
 		return exitUsage

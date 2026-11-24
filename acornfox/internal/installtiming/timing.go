@@ -103,6 +103,28 @@ var Limits = map[string]Limit{
 		Typical: "几秒",
 		Source:  "测试机上不到 1 秒（三步请求：建管理员、登录、关自助注册）；初始化请求连不上时最多试 5 次、每次最多等 15 秒，约 160 秒后判失败（CAT-INST-17），过了 4 分钟就不对了",
 	},
+	// snapshot and restore: the data of an app is copied (upgrade, rollback);
+	// the time follows its size.
+	"snapshot": {
+		Normal: 10 * time.Minute, StuckAfter: 90 * time.Minute,
+		Typical: "几秒到几分钟，看应用数据有多大（每 GB 大约半分钟到一分钟）",
+		Source:  "应用数据备份的实现：把数据卷打成 tar.gz 存本机，应用暂停到打完；没有实测大数据，按几十 MB 几秒、几 GB 几分钟估，超过 90 分钟才算卡住",
+	},
+	"restore": {
+		Normal: 15 * time.Minute, StuckAfter: 2 * time.Hour,
+		Typical: "几秒到十几分钟，看应用数据有多大：先把现在的数据另存一份，再换回快照里的数据，再等应用跑起来",
+		Source:  "应用数据恢复的实现：另存现在的数据、导入快照、重新部署并等健康检查；没有实测大数据，超过 2 小时才算卡住",
+	},
+	"save": {
+		Normal: 30 * time.Second, StuckAfter: 5 * time.Minute,
+		Typical: "不到 1 秒",
+		Source:  "只写本机的数据库",
+	},
+	"revert": {
+		Normal: 15 * time.Minute, StuckAfter: 2 * time.Hour,
+		Typical: "没出错时跳过；出错时用快照退回，时间同 restore",
+		Source:  "同 restore",
+	},
 	"reuse": {
 		Normal: 5 * time.Second, StuckAfter: time.Minute,
 		Typical: "不到 1 秒",
@@ -154,6 +176,12 @@ type Task struct {
 	FaultCode   string
 	FaultMsg    string
 	KeepVolumes bool // keep_volumes_on_failure
+	// Reapply: the task changes the settings of an installed app and
+	// applies them again (kind reapply), not an install: the words say so.
+	Reapply bool
+	// Upgrade and Rollback: the task upgrades an installed app to a newer
+	// version, or goes back to the snapshot taken before an upgrade.
+	Upgrade, Rollback bool
 	// HasSecrets: some first-login field of the task is a secret (a
 	// password the user looks up with ShowSecretsCommand). An app that lets
 	// the user make their own account on first open has none.
@@ -172,13 +200,16 @@ type Step struct {
 // pulled from the public sources (phase pull: the runner's status of the
 // pull, only what Docker reported). The engine's StepProgress is this type.
 type Progress struct {
-	Phase       string `json:"phase"` // download | load (docker load after the download) | pull (from the public sources)
+	Phase       string `json:"phase"` // download | verify (the downloaded file is being checked) | load (docker load after the download) | pull (from the public sources)
 	DoneBytes   int64  `json:"done_bytes"`
 	TotalBytes  int64  `json:"total_bytes,omitempty"`
 	BytesPerSec int64  `json:"bytes_per_sec,omitempty"`
 	ETASeconds  int64  `json:"eta_seconds,omitempty"`
 	// StalledSeconds is how long no byte has come in (download phase).
 	StalledSeconds int64 `json:"stalled_seconds,omitempty"`
+	// Conns is how many connections the download uses at the moment (a big
+	// file is fetched in segments over several at once; absent: one).
+	Conns int `json:"conns,omitempty"`
 	// Pull phase: Source is the image source pulling now (empty while the
 	// sources are measured first); Blind that Docker sends no progress now
 	// (done_bytes is its last figure, how far the pull is cannot be seen)
@@ -267,6 +298,19 @@ const (
 		"④ 逐条说 user_steps；⑤ must_tell 每一句照原话说，一句不漏；接上旧数据重装的，再说 apps[].carried、kept_files、file_backups；" +
 		"⑥ 最后：open_hint 有 ask 就把 ask 原样放在这条消息的结尾问用户，然后停下等他回答，同意了才运行 ask_yes_command，成功后告诉他可以用 lan_url_after_expose 打开了"
 	NextFailed = "装失败了：先运行 next_command 看这个编号怎么处理，照着做；处理好原因后重新安装"
+
+	// The same for a task that applies an installed app's settings again.
+	NextReapplied      = "重新生效好了：把 say 告诉用户；apps[].affected_apps 不是空的，说这些应用用的服务值变了、它们的设置落在后面了，问用户要不要一个个 acornfox apps reapply（会重启它们）；可以用 acornfox apps vars 应用 核对新的值"
+	NextReapplyFailed  = "重新生效没成功：先运行 next_command 看这个编号怎么处理；APP-APPLY-03 是已经退回原来的设置，应用照旧在运行，把原因告诉用户、改对再试；APP-APPLY-04 是退回也出了错，要先问用户再处理，不要重复运行"
+	NextReapplyRunning = "还没完成，结果还不知道：只把 say 告诉用户，不要自己估计还要多久，也不要再运行一次重新生效；接着运行 next_command 再等，直到 done 是 true"
+
+	// The same for a task that upgrades an installed app, and one that goes
+	// back to before the upgrade.
+	NextUpgraded       = "升级好了：把 say 告诉用户，说明升级前的快照还留着（apps[].snapshot_id），出问题可以 acornfox apps rollback 应用 退回到升级前（会丢升级后写进应用的新数据，要先问用户）；apps[].affected_apps 不是空的，说这些应用的设置落在后面了，问用户要不要 acornfox apps reapply；可以用 acornfox apps vars 应用 核对设置"
+	NextUpgradeFailed  = "升级没成功：先运行 next_command 看这个编号怎么处理；APP-UPG-05 是已经退回到升级前，应用照旧在运行，把原因告诉用户、处理好再升级；APP-UPG-06 是退回也出了错，要先问用户再处理，不要重复升级"
+	NextUpgradeRunning = "还没完成，结果还不知道：只把 say 告诉用户，不要自己估计还要多久，也不要再运行一次升级；接着运行 next_command 再等，直到 done 是 true"
+	NextRolledBack     = "已经退回到升级前：把 say 告诉用户，说明升级之后写进应用的新数据没有了，退回前的数据另存在 apps[].notes 里写的备份里，要找回可以恢复它（先问用户）；之后目录里的新版本会重新提醒"
+	NextRollbackFailed = "退回没成功：先运行 next_command 看这个编号怎么处理；APP-UPG-09 是应用保持退回前的样子，把原因告诉用户；APP-UPG-10 是回来时也出了错，要先问用户再处理，不要重复退回"
 )
 
 // ShowSecretsCommand is the command that shows the first-login passwords of
@@ -309,6 +353,18 @@ func Assess(t Task, now time.Time, clock string) Verdict {
 		v.Done = true
 		v.Say = "已装好，整次用了 " + durText(v.ElapsedSeconds) + "。"
 		v.Next = NextSucceeded
+		if t.Reapply {
+			v.Say = "已重新生效，整次用了 " + durText(v.ElapsedSeconds) + "。"
+			v.Next = NextReapplied
+		}
+		if t.Upgrade {
+			v.Say = "已升级，整次用了 " + durText(v.ElapsedSeconds) + "。"
+			v.Next = NextUpgraded
+		}
+		if t.Rollback {
+			v.Say = "已退回到升级前，整次用了 " + durText(v.ElapsedSeconds) + "。"
+			v.Next = NextRolledBack
+		}
 		if t.ID != "" && t.HasSecrets {
 			v.ShowSecretsCommand = ShowSecretsCommand(t.ID)
 		}
@@ -326,14 +382,42 @@ func Assess(t Task, now time.Time, clock string) Verdict {
 			v.Say += "。这次建出来的应用和数据卷已清理。"
 		}
 		v.Next = NextFailed
+		if t.Reapply {
+			v.Say = "重新生效没成功"
+			if t.FaultCode != "" {
+				v.Say += "：" + t.FaultCode + " " + t.FaultMsg
+			}
+			v.Next = NextReapplyFailed
+		}
+		if t.Upgrade || t.Rollback {
+			v.Say = "升级没成功"
+			v.Next = NextUpgradeFailed
+			if t.Rollback {
+				v.Say = "退回没成功"
+				v.Next = NextRollbackFailed
+			}
+			if t.FaultCode != "" {
+				v.Say += "：" + t.FaultCode + " " + t.FaultMsg
+			}
+		}
 		if t.FaultCode != "" {
 			v.NextCommand = "acornfox faults " + t.FaultCode + " --json"
 		}
 	default:
 		v.Next, v.NextCommand = NextRunning, WaitCommand(t.ID)
+		verb := "还在装"
+		if t.Reapply {
+			v.Next, verb = NextReapplyRunning, "还在重新生效"
+		}
+		if t.Upgrade {
+			v.Next, verb = NextUpgradeRunning, "还在升级"
+		}
+		if t.Rollback {
+			v.Next, verb = NextUpgradeRunning, "还在退回"
+		}
 		cur := v.Step
 		if cur == nil {
-			v.Say = "还在装：正在准备下一步，整次已用 " + durText(v.ElapsedSeconds) + "。"
+			v.Say = verb + "：正在准备下一步，整次已用 " + durText(v.ElapsedSeconds) + "。"
 			break
 		}
 		v.Slow, v.Stuck = cur.Slow, cur.Stuck
@@ -343,12 +427,21 @@ func Assess(t Task, now time.Time, clock string) Verdict {
 				msg = "：" + s.Message
 			}
 		}
-		v.Say = fmt.Sprintf("还在装：%s 正在“%s”（第 %d/%d 步），这一步已用 %s%s。整次已用 %s。",
-			cur.App, cur.Label, cur.Index, v.TotalSteps, durText(cur.ElapsedSeconds), msg, durText(v.ElapsedSeconds))
+		v.Say = fmt.Sprintf("%s：%s 正在“%s”（第 %d/%d 步），这一步已用 %s%s。整次已用 %s。",
+			verb, cur.App, cur.Label, cur.Index, v.TotalSteps, durText(cur.ElapsedSeconds), msg, durText(v.ElapsedSeconds))
 		switch {
 		case cur.Stuck:
 			v.Code = CodeStuck
 			v.Say += "这一步比平常（" + cur.Typical + "）慢很多，可能卡住了，但安装还没有失败。"
+			if t.Reapply {
+				v.Say = strings.Replace(v.Say, "但安装还没有失败", "但重新生效还没有失败", 1)
+			}
+			if t.Upgrade {
+				v.Say = strings.Replace(v.Say, "但安装还没有失败", "但升级还没有失败", 1)
+			}
+			if t.Rollback {
+				v.Say = strings.Replace(v.Say, "但安装还没有失败", "但退回还没有失败", 1)
+			}
 			v.Next, v.NextCommand = NextStuck, cur.Look
 		case cur.Slow:
 			v.Say += "这一步比平常（" + cur.Typical + "）慢一些，还在进行。"

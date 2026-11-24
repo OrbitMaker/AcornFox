@@ -1,12 +1,14 @@
-// 设置 → 更多：环境变量（密钥类不回显，留空表示不改）、运行设置（容器端口、健康检查路径）、常用命令。
-// 环境变量和运行设置的改动先保存到期望状态，重新部署后生效。接口：PUT/DELETE /v1/apps/{app}/env/{key}、PATCH /v1/apps/{app}、POST /v1/apps/{app}/redeploy。
+// 设置 → 开发者设置（原来叫“更多”；样稿第 10 版只给开发者自己部署的项目，应用中心装的应用不显示这一行，评估 H8）：
+// 环境变量（密钥类不回显，留空表示不改）、运行设置（程序端口、健康检查路径）、常用命令（收在“用命令行”里）。
+// 只在内部网络的应用（数据库这类）不是靠网页路径检查的，是在应用里执行命令检查：运行设置里“健康检查”写“在应用里执行命令检查”，没有路径输入框（W5-6）。
+// 环境变量和运行设置的改动先保存，重装一遍后生效。接口：PUT/DELETE /v1/apps/{app}/env/{key}、PATCH /v1/apps/{app}、POST /v1/apps/{app}/redeploy。
 import { useEffect, useState } from 'react'
 import { Lock, Plus, Trash2, Unlock } from 'lucide-react'
 import { api, appPath } from '@/lib/api'
 import type { AppView } from '@/lib/types'
 import { Button } from '@/components/ui/button'
-import { Spinner } from '@/components/ui/controls'
 import { CopyLine } from '@/components/ui/copy'
+import { CliFold } from '@/components/fold'
 import { Input, Label } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
 import type { TabProps } from './app-page'
@@ -60,6 +62,9 @@ export function MoreSection({ app: a, reload }: TabProps) {
   const [health, setHealth] = useState(a.health_path || '/')
   const [busy, setBusy] = useState('')
   const [problems, setProblems] = useState<string[]>([])
+  // 出错留在出错的那一组上，不用会消失的提示（样稿第 12 版）：envErr 环境变量那一组，runErr 运行设置那一组
+  const [envErr, setEnvErr] = useState('')
+  const [runErr, setRunErr] = useState('')
   const envKey = JSON.stringify(a.env || [])
   useEffect(() => { setRows(rowsFrom(a)) }, [envKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const changes = envChanges(rows)
@@ -69,17 +74,18 @@ export function MoreSection({ app: a, reload }: TabProps) {
   const saveEnv = async (redeploy: boolean) => {
     if (changes.problems.length) { setProblems(changes.problems); return }
     setProblems([])
+    setEnvErr('')
     setBusy(redeploy ? 'env-re' : 'env')
     try {
       for (const k of changes.del) await api.del(appPath(a.name, '/env/' + encodeURIComponent(k)))
       for (const r of changes.put) await api.put(appPath(a.name, '/env/' + encodeURIComponent(r.key)), { value: r.value, secret: r.secret })
       if (redeploy && a.current_deployment) {
         await api.post(appPath(a.name, '/redeploy'), {})
-        toast('已保存，正在重新部署', a.name)
-      } else toast('已保存', '重新部署后生效')
+        toast('已保存，正在重装一遍', a.name)
+      } else toast('已保存', '重装一遍后生效')
       await reload()
     } catch (e) {
-      toast('没能保存', (e as Error).message, 'error')
+      setEnvErr('没能保存：' + (e as Error).message)
     } finally {
       setBusy('')
     }
@@ -87,15 +93,16 @@ export function MoreSection({ app: a, reload }: TabProps) {
 
   const saveRun = async () => {
     const p = Number(port)
-    if (!Number.isInteger(p) || p < 1 || p > 65535) { toast('端口不对', '要是 1～65535 的整数', 'error'); return }
-    if (!health.startsWith('/')) { toast('健康检查路径不对', '要以 / 开头', 'error'); return }
+    if (!Number.isInteger(p) || p < 1 || p > 65535) { setRunErr('端口不对：要是 1～65535 的整数'); return }
+    if (!a.internal_only && !health.startsWith('/')) { setRunErr('健康检查路径不对：要以 / 开头'); return }
+    setRunErr('')
     setBusy('run')
     try {
-      await api.patch(appPath(a.name), { port: p, health_path: health })
-      toast('已保存', '重新部署后生效')
+      await api.patch(appPath(a.name), a.internal_only ? { port: p } : { port: p, health_path: health })
+      toast('已保存', '重装一遍后生效')
       await reload()
     } catch (e) {
-      toast('没能保存', (e as Error).message, 'error')
+      setRunErr('没能保存：' + (e as Error).message)
     } finally {
       setBusy('')
     }
@@ -106,7 +113,7 @@ export function MoreSection({ app: a, reload }: TabProps) {
       <section className="flex flex-col gap-1.5" aria-label="环境变量">
         <div className="flex items-center justify-between">
           <span className="text-2xs text-muted-foreground">环境变量</span>
-          <Button variant="ghost" size="sm" onClick={() => setRows((rs) => [...rs, { key: '', value: '', secret: false }])}><Plus className="size-3.5" />添加</Button>
+          <Button variant="ghost" size="sm" onClick={() => setRows((rs) => [...rs, { key: '', value: '', secret: false }])}><Plus className="size-icon" />添加</Button>
         </div>
         {rows.every((r) => r.removed) && <div className="text-xs text-muted-foreground">还没有环境变量</div>}
         {rows.map((r, i) => r.removed ? null : (
@@ -123,37 +130,40 @@ export function MoreSection({ app: a, reload }: TabProps) {
             />
             <div className="flex">
               <Button variant="ghost" size="icon" onClick={() => set(i, { secret: !r.secret })} aria-label={r.secret ? '改成普通变量' : '改成密钥'} title={r.secret ? '密钥：不回显，日志里会遮住' : '普通变量'}>
-                {r.secret ? <Lock className="size-3.5" /> : <Unlock className="size-3.5 text-muted-foreground" />}
+                {r.secret ? <Lock className="size-icon" /> : <Unlock className="size-icon text-muted-foreground" />}
               </Button>
-              <Button variant="ghost" size="icon" onClick={() => set(i, { removed: true })} aria-label={'删除 ' + r.key}><Trash2 className="size-3.5" /></Button>
+              <Button variant="ghost" size="icon" onClick={() => set(i, { removed: true })} aria-label={'删除 ' + r.key}><Trash2 className="size-icon" /></Button>
             </div>
           </div>
         ))}
         {problems.map((p) => <p key={p} className="text-2xs text-danger">{p}</p>)}
+        {envErr && <p className="text-xs text-danger" role="alert">{envErr}</p>}
         <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-          <span className="mr-auto text-2xs text-muted-foreground">改动在重新部署后生效</span>
-          <Button variant="outline" disabled={!dirty || !!busy} onClick={() => saveEnv(false)}>{busy === 'env' && <Spinner />}只保存</Button>
-          <Button disabled={!dirty || !!busy || !a.current_deployment} onClick={() => saveEnv(true)}>{busy === 'env-re' && <Spinner />}保存并重新部署</Button>
+          <span className="mr-auto text-2xs text-muted-foreground">改动要重装一遍才生效</span>
+          <Button variant="outline" disabled={!dirty || !!busy} loading={busy === 'env'} onClick={() => saveEnv(false)}>只保存</Button>
+          <Button disabled={!dirty || !!busy || !a.current_deployment} loading={busy === 'env-re'} onClick={() => saveEnv(true)}>保存并重装一遍</Button>
         </div>
       </section>
       <section className="flex flex-col gap-1.5" aria-label="运行设置">
         <span className="text-2xs text-muted-foreground">运行设置</span>
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-          <div className="flex flex-col gap-1.5"><Label htmlFor="cfg-port">容器端口</Label><Input id="cfg-port" className="tnum" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} /></div>
-          <div className="flex flex-col gap-1.5"><Label htmlFor="cfg-health">健康检查路径</Label><Input id="cfg-health" className="mono" value={health} onChange={(e) => setHealth(e.target.value)} /></div>
-          <Button variant="outline" disabled={!!busy || (String(a.port) === port && a.health_path === health)} onClick={saveRun}>{busy === 'run' && <Spinner />}保存</Button>
+          <div className="flex flex-col gap-1.5"><Label htmlFor="cfg-port">程序端口</Label><Input id="cfg-port" className="tnum" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} /></div>
+          {a.internal_only
+            ? <div className="flex flex-col gap-1.5" data-testid="health-exec"><span className="text-xs font-medium leading-none">健康检查</span><span className="flex h-ctl items-center text-xs text-muted-foreground">在应用里执行命令检查</span></div>
+            : <div className="flex flex-col gap-1.5"><Label htmlFor="cfg-health">健康检查路径</Label><Input id="cfg-health" className="mono" value={health} onChange={(e) => setHealth(e.target.value)} /></div>}
+          <Button variant="outline" disabled={!!busy || (String(a.port) === port && (a.internal_only || a.health_path === health))} onClick={saveRun} loading={busy === 'run'}>保存</Button>
         </div>
+        {runErr && <p className="text-xs text-danger" role="alert" data-testid="run-error">{runErr}</p>}
       </section>
-      <section className="flex flex-col gap-1.5" aria-label="命令行">
-        <span className="text-2xs text-muted-foreground">命令行</span>
+      <CliFold>
         <CopyLine text={'acornfox status ' + a.name} />
         <CopyLine text={'acornfox logs ' + a.name + ' -f'} />
-      </section>
+      </CliFold>
     </div>
   )
 }
 
-// moreSummary：设置里“更多”那一行的摘要。
+// moreSummary：设置里“开发者设置”那一行的摘要。
 export function moreSummary(a: AppView): string {
-  return '环境变量 ' + (a.env || []).length + ' 个 · 端口和健康检查 · 命令行'
+  return '环境变量 ' + (a.env || []).length + ' 个 · 端口和健康检查'
 }

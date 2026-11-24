@@ -16,6 +16,22 @@
 | 运行环境：后台服务、Docker、网关、磁盘、端口的自检，每项带故障编号、原因和怎么办 | 完成 | `GET /v1/runtime/checks`、`GET /v1/setup/faults` |
 | 设置：通用、服务、访问、运行环境、存储、下载源、升级、开发者与 AI | 完成 | `GET /v1/services`、`GET /v1/services/kinds`、`POST /v1/services`、`PATCH /v1/services/{name}`、`POST /v1/services/{name}/test`、`DELETE /v1/services/{name}`、`GET/PUT/DELETE /v1/platform/domain`、`POST /v1/platform/domain/check`、`GET /v1/lan-console`、`GET /v1/public-console`、`POST /v1/public-console/enable`、`DELETE /v1/public-console`、`GET /v1/runtime/checks`、`GET /v1/metrics/host`、`GET /v1/status`、`GET /v1/catalog`、`POST /v1/catalog/connect` |
 
+### 接新接口（路 K，W3-5、W3-6、W8、W9、W10）
+
+页面一律先读“计划”（只读）、说清楚后果、用户同意再做、做的时候看一列步骤（`src/components/operation-dialog.tsx`，红色按钮只在确认窗里）；服务端没有对应字段或接口时“有数据才显示”，不猜。
+
+| 功能 | 在哪 | 接口 |
+| --- | --- | --- |
+| 安装时选谁能打开（W3-5） | 安装弹窗里一行三档，默认是应用详情的 `exposure`，改了才发 `expose` | `GET /v1/catalog/apps/{id}`、`POST /v1/catalog/install` |
+| 下载按字节的进度条（W3-6） | 安装、更新、升级的步骤里：已下 / 一共、速度、还要多久、一阵子没收到数据（`src/components/step-bar.tsx`、`lib/catalog.ts` 的 `progressLine`） | 任务步骤的 `progress`（phase download、load、pull） |
+| 展示内容、找专人部署（W3-10、W3-11） | `show`、`industries`、`home` 早已接好；`assist`（visible、price_cny、url）控制“找专人部署”；`sync.show.state` 是 `failed` 时体检多一行、算一件要处理的事 | `GET /v1/catalog` |
+| 只在内部网络的应用（W5-6） | 设置里没有域名、开发者设置，数据里没有附加服务；开发者设置里健康检查写“在应用里执行命令检查”，没有路径输入框 | `internal_only` |
+| 改安装设置、让它生效（W8-1、W8-2） | 设置 › 安装设置里能改的项有“改”（`can_edit`）；保存先读计划，有变化才弹确认窗 | `PATCH /v1/apps/{app}/vars`、`POST /v1/apps/{app}/reapply`、`GET /v1/catalog/install/{task}` |
+| 落后的应用要跟上（W8-3） | 概览最上面的提示条、我的应用卡片的“设置要跟上”、铃铛、安装设置里“让它跟上” | `GET /v1/platform/affected` |
+| 改谁能打开、加删域名后地址跟着变（W6-3） | 对用到应用地址的应用，服务端 409（`APP-APPLY-05`，体里带计划）：弹确认窗；也可以“先改，稍后再让应用跟上”（`reapply: skip`） | `PATCH /v1/apps/{app}`、`…/domains` |
+| 备份、恢复（W10-1、W10-2） | 设置里的“备份”一行：立即备份、一列备份（手动、更新前自动、恢复前自动）、恢复、删除；服务端不支持备份时整行不显示 | `/v1/apps/{app}/backups…`、`GET /v1/backups/tasks/{id}` |
+| 更新、退回到更新前（W9-1～W9-3） | “更新”页签：`catalog_update`、`upgrade`（`can_upgrade`、`blocked`、`snapshot`、`can_rollback`）有才显示按钮；“退回到更新前”旁边写明会丢掉更新后新增的数据；我的应用页顶栏写“N 个应用有新版本”（`apps_outdated`） | `POST /v1/apps/{app}/upgrade`、`POST /v1/apps/{app}/rollback`、`GET /v1/status` |
+
 ### 首页看板能选的图表
 
 数据只用服务端真有的，图表方式只列适合这类数据的（`src/lib/dashboard.ts` 的 `SOURCES`、`typesFor`）：
@@ -35,7 +51,7 @@
 样稿的“提醒”（桌面通知、邮件、群机器人）和“账号”没有后端支撑，这一版不显示。“访问”（`src/pages/prefs/access.tsx`）和应用的“设置”一个样子，一行一项点开才展开（行在 `src/components/expand-row.tsx`）：域名（平台域名，四种样子：正常、还没有、还没生效、这台机器用不了；旧服务端没有接口时不显示这一行）、局域网里打开控制台（开关和清密码只给服务器上的命令，记住的设备能移除）、在外面打开控制台（服务端给 `can_toggle` 时页面上能开、能关，都先确认，`needs_password` 时要再输一次现在的控制台密码，开启后的新密码只显示一次；旧服务端只给命令）。应用“设置 › 谁能打开”的域名分“平台给的”（`platform_domain`）和“自己的域名”两行，两个都有时用自己的。“存储”里的清理没有接口，只给查看占用的命令。
 
 接口没有的东西不显示：
-- “找专人部署”：前端只在 `GET /v1/catalog` 返回 `expert`（带 `url`，可选 `price_cny`）时显示。服务端和目录格式**目前都没有这个字段**，所以现在不会出现。
+- “找专人部署”：前端读 `GET /v1/catalog` 的 `assist`（经营系统发布的展示内容：`visible`、`price_cny`、`url`），可见且 `url` 是 https 才显示；`url` 是空串不显示。老的 `expert` 写法也认。
 - 视频：清单里有 `delivery.video` 才出现。
 - 主页、视频、找专人这几个链接只认 `http://`、`https://`，其他写法不显示；目录打包检查也会拦下（`CAT-LINT-15`）。
 - 端口由服务端自动分配，弹窗里不能改。

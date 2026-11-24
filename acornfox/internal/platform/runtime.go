@@ -7,7 +7,7 @@ import (
 )
 
 // BuiltinRuntime records the built-in runtime that "acornfox setup" installed
-// (macOS: Colima + Lima; Windows: WSL 2 + Docker Engine), so every acornfox
+// (macOS: Colima + Lima), so every acornfox
 // command finds its Docker without DOCKER_HOST. Kept in the data directory as
 // runtime.json; absent when the user runs their own Docker.
 type BuiltinRuntime struct {

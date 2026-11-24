@@ -35,6 +35,9 @@ func (s *server) listDomains(w http.ResponseWriter, r *http.Request) {
 // domainRequest is the POST /v1/apps/{app}/domains body.
 type domainRequest struct {
 	Name string `json:"name"`
+	// A domain changes the app's address: see patchAppRequest.
+	ConfirmRestart bool   `json:"confirm_restart,omitempty"`
+	Reapply        string `json:"reapply,omitempty"`
 }
 
 // addDomain implements POST /v1/apps/{app}/domains. It validates the name,
@@ -73,6 +76,16 @@ func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "domain_taken", "该域名已用于公网控制台")
 		return
 	}
+	if body.Reapply != "" && body.Reapply != "skip" {
+		writeError(w, http.StatusBadRequest, "invalid_reapply", "reapply 只能不写或写 skip")
+		return
+	}
+	where := s.where(ctx, cur)
+	where.Domains = append(append([]string{}, where.Domains...), body.Name)
+	follow := s.planAddress(ctx, cur, where)
+	if follow.refuseUnconfirmed(w, body.ConfirmRestart, body.Reapply == "skip") {
+		return
+	}
 	dom, _, err := s.store.AddDomain(ctx, app, body.Name)
 	if err != nil {
 		if errors.Is(err, state.ErrConflict) {
@@ -91,6 +104,9 @@ func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
 	if len(warnings) > 0 {
 		resp["warnings"] = warnings
 	}
+	if r := s.followAddress(ctx, app, follow, body.Reapply == "skip"); r != nil {
+		resp["reapply"] = r
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -107,12 +123,32 @@ func (s *server) removeDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_domain", "域名不合法")
 		return
 	}
+	skip := r.URL.Query().Get("reapply") == "skip"
+	var follow addressChange
+	if cur, err := s.store.GetApp(ctx, app); err == nil {
+		where := s.where(ctx, cur)
+		var rest []string
+		for _, d := range where.Domains {
+			if d != name {
+				rest = append(rest, d)
+			}
+		}
+		where.Domains = rest
+		follow = s.planAddress(ctx, cur, where)
+		if follow.refuseUnconfirmed(w, r.URL.Query().Get("confirm_restart") == "true", skip) {
+			return
+		}
+	}
 	if err := s.store.RemoveDomain(ctx, app, name); err != nil {
 		s.mapStoreError(w, err)
 		return
 	}
 	s.kicker.Kick(app)
-	writeJSON(w, http.StatusOK, map[string]any{"name": name, "deleted": true})
+	resp := map[string]any{"name": name, "deleted": true}
+	if r := s.followAddress(ctx, app, follow, skip); r != nil {
+		resp["reapply"] = r
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // domainDNSWarnings resolves the domain's A/AAAA records and returns a

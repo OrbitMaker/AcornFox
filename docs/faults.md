@@ -41,6 +41,53 @@
 | UPGRADE-FAIL-03 | P2 | 升级中途出错或被中断（包括 SSH 断开），已自动恢复到升级前 | 没有升上，服务照常运行。可以再运行一次升级命令 |
 | UPGRADE-RESTORE-01 | P1 | 升级失败后没能恢复到升级前（要人处理） | 停下。把输出原样给用户，请用户把 journalctl -u acornfox-server -n 50 和 -u acornfox-runner -n 50 反馈给维护者；不要删备份、不要重装、不要自己拷备份里的文件 |
 | UNINSTALL-TTY-01 | P3 | 卸载脚本没有终端、没法询问确认，又没加 -y | 什么都没改。请用户在自己的终端里运行卸载命令；只有用户明确要你代为卸载时才加 -y |
+| WIN-OS-01 | P2 | Windows 版本太旧 | 先升级 Windows（Windows 10 22H2 或 Windows 11）再重新运行安装命令 |
+| WIN-ARCH-01 | P2 | 这台电脑的 CPU 架构暂时不支持 | ARM 版 Windows 暂时用不了；可以改把 AcornFox 装在一台 Linux 服务器上，用这台电脑通过 SSH 管理 |
+| WIN-POLICY-01 | P2 | 公司或学校的策略禁止了 WSL | 请联系管理这台电脑的 IT 人员放开 WSL；自己改注册表可能违反规定，安装脚本不会替你改 |
+| WIN-VIRT-01 | P2 | CPU 的虚拟化功能没打开 | 重启电脑进 BIOS/UEFI，打开 Intel VT-x（Intel Virtualization Technology）或 AMD-V（SVM Mode），保存后再运行安装命令 |
+| WIN-DISK-01 | P2 | 系统盘剩余空间不够 | 清理系统盘，至少留 10 GB 再运行安装命令（Debian 加 Docker 加几个应用大约要 3～5 GB） |
+| WIN-PS-01 | P2 | 缺少必要的系统组件 | 升级 Windows 10 到 22H2 后再运行；需要 PowerShell 5.1 和 System32 里的 curl.exe |
+| WIN-SRC-01 | P3 | 这是源码里的脚本，没有绑定版本 | 用引导脚本 get.ps1 安装（它取要装的那个版本自带的 install-windows.ps1）；开发测试时加 -Version 或 -LocalPackage |
+| WIN-ADMIN-01 | P3 | 管理员确认被取消，什么都没安装 | 想继续就重新运行安装命令；弹窗上写 Windows PowerShell、发布者 Microsoft Windows 时选“是”。已经下载的文件会留着，不用重下 |
+| WIN-ADMIN-02 | P2 | 管理员那一步出错了 | 看 %LOCALAPPDATA%\AcornFox\logs\admin-step.log 里最后几行，再重新运行安装命令（做过的步骤会跳过） |
+| WIN-REBOOT-01 | P3 | 需要重启电脑才能继续 | 保存手上的工作后重启电脑；重启后登录，会自动弹出窗口接着装（也可以自己再运行一次同样的安装命令） |
+| WIN-DL-01 | P2 | 下载没成功（所有下载来源都试过） | 确认能上网、关掉代理后重新运行；已经下好的部分会保留，不会从头来 |
+| WIN-DL-02 | P2 | 取不到这个版本的安装脚本，或校验不过 | 多半是下载被截断或被替换：换一个源再试（加 -China 或 -Global）；两个源都不过时不要强行安装，先反馈 |
+| WIN-WSL-01 | P1 | WSL 用不了 | 运行 wsl --status 看原因；多半是还没重启，或虚拟机平台没打开，或 WSL 被升级到一半 |
+| WIN-WSL-02 | P2 | 导入 Linux 发行版失败 | 看 install-windows.log 里 wsl --import 的输出；磁盘空间、杀毒软件拦截、文件被占用是常见原因；解决后重新运行安装命令 |
+| WIN-WSL-03 | P1 | Linux 发行版里的 systemd 没有起来 | 运行 wsl --shutdown 后重新运行安装命令；还不行看 wsl -d AcornFox -u root -- systemctl status |
+| WIN-LINUX-01 | P1 | 在 WSL 里安装 AcornFox 没成功 | 看 WSL 里的 /root/acornfox-install.log 和它最后打印的故障编号（INSTALL-…、EDGE-… 等，acornfox faults 编号 能查）；解决后重新运行安装命令 |
+| WIN-START-01 | P2 | 开机自启没登记成功，或 WSL 没设成一直开着 | 重新运行安装命令（要管理员确认一次），或运行 acornfox windows lan-on / lan-off 重新登记；没有 .wslconfig 里的设置时，没人用 WSL 一会儿它就会停 |
+| WIN-LAN-01 | P2 | 局域网转发没生效 | 运行 acornfox windows doctor 看是哪一项；360 等安全软件常拦 netsh，弹窗里选“允许操作”；还不行运行 acornfox windows lan-off 再 lan-on 重来 |
+| WIN-LAN-02 | P3 | 当前账号不是管理员，局域网访问没打开 | 应用只在这台电脑上能打开。想让局域网里的设备访问：用管理员账号运行 acornfox windows lan-on |
+| WIN-LAN-03 | P3 | 这台电脑的网络类型是“公用”，防火墙会挡住局域网里的设备 | 在 Windows 设置里把这个网络改成“专用”（家里或办公室这类可信的网络），再试；公共场所的网络（咖啡店、机场）不要改 |
+| WIN-CLI-01 | P3 | acornfox 命令没能写进去 | 也可以直接用 wsl -d AcornFox -u root -- acornfox …；重新运行安装命令会补写；新开一个 PowerShell 窗口让 PATH 生效 |
+| WIN-NET-01 | P1 | 控制台打不开（localhost 上没有应答） | 运行 acornfox windows doctor；多半是 WSL 里的服务没起来：wsl -d AcornFox -u root -- systemctl status acornfox-server |
+| WIN-UNINST-01 | P3 | 卸载要确认，但这里没有终端可以问 | 确定要卸载就加 -Yes（acornfox windows uninstall --yes）；加 --purge 会连应用数据和发行版一起删，不可恢复，只在用户明确说要全部删掉时加 |
+| WIN-UNINST-02 | P2 | WSL 里的 AcornFox 没卸干净，卸载停下了 | 先看 %LOCALAPPDATA%\AcornFox\logs\uninstall-wsl.log 最后几行和它报的编号（INSTALL-GET-…、UNINSTALL-…，acornfox faults 编号 能查）；确认这台电脑能上网后，用屏幕上给的完整路径命令重新运行卸载 |
+| WIN-UNINST-03 | P2 | -Purge 没能注销 WSL 发行版，数据还在 | 运行 wsl --shutdown 关掉所有 WSL（会关掉用户别的发行版，先问用户），再用屏幕上给的完整路径命令重新运行卸载 |
+| WIN-SKILL-01 | P3 | Windows 用户目录里已装的 AcornFox Skill 和 WSL 里的程序不是同一个版本 | 运行 acornfox skill install 更新（它把 WSL 里程序带的 Skill 装进 Windows 用户目录）；升级 AcornFox 之后都要做一次 |
+| MAC-OS-01 | P2 | 这不是 Mac，或 macOS 版本太旧 | Mac 要 macOS 26 或更新才能用苹果的 container；先在“系统设置 → 通用 → 软件更新”升级再重新运行安装命令 |
+| MAC-ARCH-01 | P2 | 这台 Mac 不是苹果芯片 | Intel 的 Mac 装不了（苹果的 container 只在苹果芯片上运行）；可以把 AcornFox 装在一台 Linux 服务器上，用这台 Mac 的命令行管理（get.sh cli，再 acornfox target add） |
+| MAC-DISK-01 | P2 | 磁盘剩余空间不够 | 清理磁盘，至少留 12 GB 再运行安装命令（苹果的 container 约 0.5 GB、虚拟机镜像约 1 GB，Docker 和应用另算） |
+| MAC-DL-01 | P2 | 下载安装需要的大文件失败 | 网络不好：过一会儿重新运行安装命令（已下的部分会接着下）；国内加 --china，海外加 --global 换一个先试的源 |
+| MAC-DL-02 | P2 | 取不到这个版本的安装文件 | 核对版本号存在（https://gitee.com/VIP13390/AcornFox/releases）；网络不通时过一会儿再试，或加 --china、--global 换一个先试的源 |
+| MAC-SRC-01 | P3 | 这是源码里的脚本或程序，没有版本号 | 用 get.sh 安装（它取带版本号的发行版脚本），或加 --version vX.Y.Z、--local-package 目录 |
+| MAC-ADMIN-01 | P2 | 要管理员密码，但没输成 | 装苹果签名的 container 安装包要管理员权限：请你自己在“终端”里运行屏幕上给的那一行 sudo installer …（输入密码时屏幕不显示字符，是正常的），装好后重新运行安装命令 |
+| MAC-CTR-01 | P1 | 苹果的 container 装了但用不了 | 运行 container system start 看报错；还不行就重新运行安装命令，或到 https://github.com/apple/container 看有没有已知问题 |
+| MAC-KERNEL-01 | P2 | 虚拟机内核没装上 | 重新运行安装命令（会重新下载并装内核）；内核约 676 MB，经下载网关分段下载，慢的话请耐心等 |
+| MAC-IMG-01 | P2 | 虚拟机用的镜像准备不好 | 重新运行安装命令（已下的根文件系统会直接用）；还不行带屏幕输出反馈 |
+| MAC-VM-01 | P1 | 建不了虚拟机 | 看屏幕上的原因：同名虚拟机已存在就换名字（环境变量 ACORNFOX_MAC_VM）或先自己处理；其余重新运行安装命令 |
+| MAC-VM-02 | P1 | 虚拟机起不来或没有应答 | acornfox mac stop 再 acornfox mac start；还不行 container system stop 再 container system start（会停掉你别的容器，先问用户） |
+| MAC-PROV-01 | P2 | 虚拟机里的准备没做成 | 重新运行安装命令；软件源连不上时程序会自己换源再试 |
+| MAC-LINUX-01 | P1 | 虚拟机里装 AcornFox 没成功 | 屏幕上写了虚拟机里脚本最后报的故障编号（INSTALL-…、EDGE-… 等）：acornfox faults 那个编号看办法；整个输出也记在虚拟机里的 /root/acornfox-install.log |
+| MAC-LAUNCH-01 | P1 | 常驻转发程序没在运行 | 重新运行安装命令会装回去；手动：launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.acornfox.mac.plist；看日志 ~/Library/Application Support/AcornFox/mac/logs/daemon.log |
+| MAC-PORT-01 | P2 | Mac 上的端口被别的程序占了 | 找出占用的程序（lsof -nP -iTCP:端口 -sTCP:LISTEN）退出它，或换一个 AcornFox 要用的端口；占着的端口转发程序不会转发 |
+| MAC-NET-01 | P3 | 这台 Mac 的局域网地址变了 | acornfox mac set --public-host auto（把应用地址里写的地址改成现在的；虚拟机里的 AcornFox 服务会重启一下，应用不停） |
+| MAC-SSH-01 | P2 | acornfox 命令连不上虚拟机 | acornfox mac doctor 看原因；多半是转发程序没运行（MAC-LAUNCH-01）或虚拟机刚起来还没好，等十几秒再试 |
+| MAC-CLI-01 | P3 | 放不下 acornfox 命令 | 换一个目录：ACORNFOX_INSTALL_DIR=某个可写目录 重新运行安装命令；或自己把 ~/Library/Application Support/AcornFox/mac/bin/acornfox 拷到 PATH 里 |
+| MAC-UNINST-01 | P3 | --purge 没有确认 | --purge 会连虚拟机里的应用和数据一起删掉，删了就找不回来；确认要删请加 --yes |
+| MAC-UNINST-02 | P2 | 卸载没卸干净 | 看屏幕上哪一步失败：停不掉常驻程序用 launchctl bootout gui/$(id -u)/com.acornfox.mac；停不下虚拟机用 container machine stop acornfox；然后重新运行卸载命令 |
 | SETUP-NET-01 | P2 | 下载源都连不上 | 确认能上网后点“重试”（或运行 acornfox setup --resume）；国内网络可以换下载源：acornfox setup --resume --mirror <地址> |
 | SETUP-NET-02 | P2 | 下载 45 秒没有进展，所有下载源都试过了 | 已下载的部分会保留，点“重试”从断点接着下；一直不行就换下载源或关掉代理再试 |
 | SETUP-SUM-01 | P2 | 下载的文件校验不通过 | 已删掉坏文件，点“重试”会重新下载；换一个下载源更稳妥。反复出现请把诊断信息发给我们 |
@@ -48,11 +95,6 @@
 | SETUP-RT-02 | P1 | 自带的运行环境没能启动 | 点“重试”；还不行运行 acornfox doctor 看具体哪一项，再把诊断信息发给我们 |
 | SETUP-RT-03 | P1 | 连不上 Docker | Linux 服务器用 install.sh 安装会自动装好 Docker；已经装了就 sudo systemctl start docker 后重试 |
 | SETUP-RT-04 | P2 | Docker Desktop 没有按时启动 | 看一眼 Docker Desktop 的窗口，处理完它的提示后点“重试”；或者改用 AcornFox 自带的运行环境 |
-| SETUP-WIN-01 | P2 | 需要管理员确认才能打开 WSL 2 | 点“继续”，在 Windows 弹出的管理员确认里选“是” |
-| SETUP-WIN-02 | P2 | 需要重启电脑 | 保存好手上的工作后重启电脑；重启后 AcornFox 会自动接着装 |
-| SETUP-WIN-03 | P2 | 这台电脑不能运行 WSL 2 虚拟机 | 在 BIOS 里打开虚拟化后重试；虚拟机里运行的话，要在宿主机上为它打开嵌套虚拟化 |
-| SETUP-WIN-04 | P3 | 管理员确认被取消或失败 | 点“继续”再试一次，在弹窗里选“是”；不是管理员账号的话，请管理员登录后操作 |
-| SETUP-WIN-05 | P2 | WSL 没有把端口转发到本机 | 把 .wslconfig 里的 localhostForwarding 改回 true 或删掉这一行，运行 wsl --shutdown，再运行 acornfox setup --resume |
 | SETUP-EDGE-01 | P1 | 网关组件没有准备好 | 点“重试”；端口被占时运行 acornfox doctor 看是哪个端口，关掉占用的程序后再试 |
 | SETUP-CHK-01 | P2 | 自检没有通过 | 按没通过那一项的说明处理后点“重试” |
 | SETUP-CHK-02 | P1 | Docker 不能创建和删除容器 | 清理 Docker 空间（docker system prune）或重启运行环境后重试 |
@@ -67,11 +109,12 @@
 | SETUP-PORT-04 | P3 | 局域网控制台端口 18802 被别的程序占用 | 不开局域网控制台可以忽略；要开的话先停掉占用的程序再运行 acornfox lan-console enable |
 | SETUP-PORT-05 | P3 | 没有权限查看是哪个程序占用了端口 | 普通用户运行时出现是正常的：后台服务正常时，AcornFox 自己的端口（18807、应用端口、开着的局域网控制台端口）已经认出，不在这里；剩下的要确认就用 sudo acornfox doctor 再查一次 |
 | SETUP-CLOCK-01 | P2 | 本机时钟不准，或者没开网络对时 | 先问用户，再运行 sudo timedatectl set-ntp true 打开网络对时，过一两分钟用 timedatectl 看 System clock synchronized 是否为 yes，然后再运行 acornfox doctor；一直同步不上的云主机，按云厂商文档把 chrony 或 systemd-timesyncd 改成内网时间服务器。时钟和下载网关差 300 秒以上时，下载网关会拒绝这台机器（GW-AUTH-01）：应用中心的镜像改从公共源拉，私有目录连不上；AcornFox 会按网关时间自动重试一次，但还是要把时钟校准 |
-| SETUP-MAC-01 | P3 | Mac 版只有命令行客户端 | Mac 版只有命令行客户端，不能在 Mac 本机运行 AcornFox 服务；请把 AcornFox 装在一台 Linux 服务器上，用这台 Mac 上的命令行管理（acornfox target add …）。1. 在一台 Linux 服务器（amd64 或 arm64）上按使用文档用 install.sh 安装 AcornFox；2. 在这台 Mac 上运行 acornfox target add 名称 --ssh 用户@服务器地址；3. 之后 acornfox deploy、status、logs 等命令都作用在这台服务器上。检查服务器用 ssh 用户@服务器地址 sudo acornfox doctor |
+| SETUP-MAC-01 | P3 | Mac 版的 install、serve 不能直接装本机服务 | Mac 版只有命令行客户端，acornfox install、serve 不能在 Mac 上直接装本机服务；要把 AcornFox 装在这台 Mac 上（苹果芯片、macOS 26 起），运行：curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh \| bash。1. 要装在这台 Mac 上：运行上面那行命令（装进苹果 container 开的一台 Debian 虚拟机），或先运行 acornfox mac install --plan 看会做什么；2. 要管理 Linux 服务器：在服务器上按使用文档用 install.sh 安装 AcornFox，再在这台 Mac 上运行 acornfox target add 名称 --ssh 用户@服务器地址；3. 之后 acornfox deploy、status、logs 等命令都作用在登记的服务器上。检查服务器用 ssh 用户@服务器地址 sudo acornfox doctor |
 | SETUP-GEN-01 | P2 | 准备运行环境时出错 | 点“重试”；还不行运行 acornfox doctor，把诊断信息发给我们 |
 | SETUP-SYNC-01 | P3 | 应用目录上次同步失败，或者很久没同步 | 运行 acornfox catalog sync 看这次的结果；同步不上不影响已装的应用，安装时用手上的目录（缓存或程序内置的） |
 | SETUP-GW-01 | P3 | 下载网关连不上或应答不对 | 公共目录的应用照常能装（镜像改从公共源拉，会慢一些），私有目录连不上、装不了。先看网络和代理，再看 ACORNFOX_GATEWAY 或 network.json 里的 gateway 有没有写错 |
 | SETUP-NET-03 | P3 | 有镜像下载源不能用或很慢（拉镜像时已跳过或排到后面），或 Docker 的镜像加速配置里有不能用的地址 | 只是提醒：平台拉应用镜像时会自动跳过不能用的源、把慢的排到后面。要看每个源现在怎样运行 acornfox sources --probe；daemon.json 里不能用的加速地址只影响自己 docker pull 和构建项目，要去掉先问用户 |
+| SETUP-SKILL-01 | P3 | 电脑上已装的 AcornFox Skill 和命令行不是同一个版本 | 运行 acornfox skill install 更新 Skill；如果提示 Skill 比命令行新，先更新电脑上的命令行（get.sh 的 cli 那条命令，见 Skill 里 maintain.md 的“更新 Skill 和命令行”），再运行 acornfox skill install |
 | EDGE-01 | P1 | 入口代理没有在运行 | 运行 sudo acornfox doctor 看入口代理一项；容器停了就 sudo systemctl restart acornfox-server（会重建或拉起入口容器，应用容器不停） |
 | EDGE-02 | P1 | 入口镜像缺失或导入失败 | 升级时报的：服务没停、什么都没改，处理好网络或磁盘后重新运行升级命令。平时报的：重新运行一次升级命令（同一版本加 -y）就会补上入口镜像 |
 | EDGE-03 | P1 | 入口代理的管理口连不上或拒绝了令牌 | 运行 sudo acornfox doctor 看入口代理一项；sudo systemctl restart acornfox-server（启动时发现入口容器不接受数据目录里的令牌，会按这个令牌在原地重建入口容器一次，应用网址断几秒） |
@@ -82,6 +125,7 @@
 | LAN-CONSOLE-02 | P3 | 局域网控制台拒绝了不在局域网里的访问 | 这是保护，不用修。自己要从外面进控制台就用 acornfox open（经 SSH 隧道）。日志里反复出现陌生地址时，去路由器上把 18802 的端口映射删掉 |
 | LAN-CONSOLE-03 | P2 | 局域网控制台开着但还没设密码 | 现在就用局域网里的电脑打开 acornfox lan-console status 给的地址设一个密码（至少 8 位），局域网里谁先打开谁设。不用局域网控制台就运行 acornfox lan-console disable。设好后 status 会显示是什么时间、从哪个地址设的；不是用户自己就运行 acornfox lan-console reset-password 重设 |
 | lan_console_off | P3 | 局域网控制台没开，没有密码可清 | 不用重设密码：局域网控制台是关着的。用户要用它时先问用户，再 acornfox lan-console enable（对局域网开放 18802），然后请用户打开给出的地址设密码 |
+| LAN-CONSOLE-04 | P3 | 忘了局域网控制台的密码 | 在装着 AcornFox 的服务器上（经 SSH）运行 acornfox lan-console reset-password：清掉密码，所有登录状态和记住的设备一起作废；然后在局域网里用浏览器打开控制台地址，重新设一个密码（谁先打开谁设，别拖） |
 | ssh_missing | P2 | 本机找不到 ssh 命令 | 安装 OpenSSH 客户端（Windows：设置 → 可选功能） |
 | host_unreachable | P2 | 连不上服务器 | 检查地址、端口、安全组是否放行 22 |
 | auth_failed | P2 | SSH 认证失败 | 先在终端里 `ssh user@host` 确认能免密登录（`ssh-copy-id`） |
@@ -90,7 +134,7 @@
 | acornfox_missing | P2 | 服务器上没装 AcornFox | 服务器上尚未安装 AcornFox |
 | permission_denied | P2 | 无权访问 acornfox 服务 | 把该用户加入 `acornfox-users` 组后重新登录 |
 | server_down | P1 | acornfox 服务未运行 | 在服务器上执行 `systemctl status acornfox-server` |
-| local_server_down | P1 | 连不上本机的 acornfox 服务 | Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机运行 AcornFox 服务还没发布，请把 AcornFox 装到 Linux 服务器上，再用 `acornfox target add 名字 --ssh 用户@地址` 连接 |
+| local_server_down | P1 | 连不上本机的 acornfox 服务 | Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机的 AcornFox 在虚拟机里：Mac 用 `acornfox mac status`、`acornfox mac doctor` 看，Windows 用 `acornfox windows status`；管理别的服务器则先 `acornfox target add 名字 --ssh 用户@地址` 登记 |
 | version_mismatch | P3 | 命令行和服务器版本对不上 | 升级 CLI 或服务器 |
 | forwarding_disabled | P2 | 服务器禁止了 SSH 端口转发 | 服务器 sshd 需要 `AllowTcpForwarding yes` |
 | connect_failed | P2 | SSH 连接失败（其他原因） | 先在终端里手动 `ssh user@host` 排查 |
@@ -159,6 +203,7 @@
 | PUBCON-02 | P3 | 控制台密码试错次数太多，暂时不让再试 | 按 message 里的分钟数等一会儿再试；等的时候不要反复点，每次失败都会让等的时间变长 |
 | PUBCON-03 | P3 | 这台机器在局域网里，开不了公网控制台 | 在局域网里用局域网控制台（http://局域网地址:18802）；人在外面时在自己电脑上运行 acornfox open（经 SSH 隧道） |
 | PUBCON-04 | P3 | 从公网控制台登录时，页面上只能关闭公网控制台 | 要换地址，从局域网控制台或用 acornfox open 进控制台再开；或者在服务器上运行 acornfox public-console enable 新域名 |
+| PUBCON-05 | P3 | 忘了公网控制台的密码 | 在服务器上（经 SSH）运行 acornfox public-console enable 公网控制台的域名 --reset-password：生成新密码，只显示这一次，旧密码和旧的登录都立刻失效 |
 | PDOMAIN-01 | P2 | 平台域名没有指到这台机器 | 到你买域名的地方加（或改）一条记录：名字 *.子域、类型 A、指向这台服务器的公网地址（acornfox domain base 给出完整的一条），等几分钟再检查 |
 | PDOMAIN-02 | P3 | 这台机器没有公网地址，用不了平台域名 | 要在外面打开应用，用 acornfox open 应用名 经安全通道打开；要用域名，把应用装到有公网地址的云主机上 |
 | PDOMAIN-03 | P2 | 外面连不上这台机器的 80 或 443 | 在云厂商控制台的安全组里放行入方向 TCP 80 和 443（来源 0.0.0.0/0）；服务器自己的防火墙开着的也要放行 |
@@ -166,10 +211,27 @@
 | PDOMAIN-05 | P3 | 平台域名的写法不对 | 只填域名本身，例如 apps.example.com：不带 http://、不带路径和端口，不能是 IP 地址 |
 | PDOMAIN-06 | P3 | 某个应用用不了平台给的名字 | 给这个应用单独绑一个自己的域名（acornfox domain add 域名），或者让占着这个名字的一方换一个 |
 | PDOMAIN-07 | P3 | 换掉或清掉平台域名要先确认 | 先运行 acornfox domain base set 新域名 --plan（或 clear --plan）把会怎样告诉用户；用户同意后加 --yes 再运行 |
+| BKP-01 | P2 | 磁盘空间不够，不能做备份或恢复 | 先清理磁盘（删掉不用的旧备份：acornfox backup rm 应用名 备份编号 --yes），或把备份目录所在的磁盘扩一扩，再重试；没有动过应用 |
+| BKP-02 | P2 | 读数据卷或写备份文件时出错 | 看 acornfox logs 和备份目录的 operations.log；应用已经照原样重新启动，重试一次，还不行就把日志给负责的人 |
+| BKP-03 | P3 | 这个应用正忙：在备份、恢复或部署 | 等这件事做完再试（acornfox backup task 任务编号 看进度） |
+| BKP-04 | P3 | 找不到这份备份 | acornfox backup list 应用名 看现有的备份和编号 |
+| BKP-05 | P2 | 备份文件不完整或被改过，不能用来恢复 | 这份备份不能用来恢复，现在的数据没动；换一份备份，或重新做一份 |
+| BKP-06 | P3 | 恢复和删除备份都要用户先同意 | 恢复会用备份里的数据覆盖现在的数据：先告诉用户，用户同意后加 --yes 再运行（先 --plan 看会怎样） |
+| BKP-07 | P2 | 恢复没成功，数据已经自动退回到恢复之前 | 数据已经退回到恢复之前的样子；看任务里写的失败原因，处理后再试 |
+| BKP-08 | P1 | 恢复没成功，自动退回也没成功 | 不要再动这个应用；恢复之前的备份还在（编号见任务结果的 pre_restore_id），马上告诉负责的人 |
+| BKP-09 | P2 | 备份时那个版本的程序已经不在这台机器上 | 备份时的程序版本已不在本机；要在现在的版本上用这份数据，加 --allow-current-version（先问用户） |
+| BKP-10 | P3 | 备份或恢复被中断，留下半截东西 | 运行 acornfox doctor 看有没有半截的备份；重新做一份备份，残留的会自己清掉 |
+| BKP-11 | P3 | 这台机器上的执行器还不支持备份 | 升级 AcornFox 到最新版（acornfox 的执行器要和主程序同版本） |
+| BKP-12 | P3 | 这个应用没有装在这台机器上 | 恢复要先有这个应用：先重新安装一个同名应用（acornfox install），再恢复 |
+| BKP-13 | P3 | 这个应用没有数据可备份 | 这个应用没有存数据的目录（数据卷），没有东西可备份；先让应用跑起来、产生数据，或确认它的数据目录登记过（acornfox volume add） |
+| BKP-14 | P2 | 备份目录写不了 | 检查备份目录的权限和所在磁盘（acornfox doctor 会指出是哪个目录） |
+| BKP-15 | P3 | 恢复之后，有些服务连接和账号要重新接 | 照提示的应用逐个重新接上服务（acornfox services 看，装应用时会重新发账号） |
+| BKP-16 | P3 | 备份的请求写得不对 | 按提示改请求后重试 |
 | OPEN-APP-01 | P3 | 应用还没有访问端口 | 运行 acornfox status 应用名 看状态；部署成功后再打开 |
 | OPEN-APP-02 | P3 | 经网址登记的服务器上，只本机的应用打不开 | 用 acornfox target add 名称 --ssh 用户@主机 登记这台服务器后再运行 acornfox open 应用名；或经用户同意改成局域网：acornfox app set --app 应用名 --expose lan |
 | OPEN-APP-03 | P3 | 应用只在内部网络，没有网页可以打开 | 不用打开它：它是给别的应用用的（例如数据库、缓存），别的应用按它的名字在内部网络里连它；要用它的应用看 acornfox status 那个应用名 里的服务 |
 | install_failed | P3 | Skill 一个也没装上 | 不加 --json 再运行一次 acornfox skill install，看每个工作台后面写的原因；也可以 acornfox skill install --dir 一个能写的 skills 目录，或 acornfox skill print 把内容交给工作台 |
+| CLI-UPDATE-01 | P3 | 服务器上的 AcornFox 比这台电脑上的命令行新 | 在这台电脑上更新命令行：国内 curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh \| bash -s -- cli，海外把地址换成 https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh；再运行 acornfox skill install 更新 AI 工作台里的 Skill |
 | CAT-INST-01 | P3 | 目录里没有这个应用、配方或版本 | acornfox catalog list 看有哪些；目录太旧就 acornfox catalog sync |
 | CAT-INST-02 | P3 | 安装参数不对 | 按 message 改 --set；acornfox catalog info <应用> 看参数。必填项要用户提供内容的（例如要用的模型名），先问用户 |
 | CAT-INST-03 | P3 | 已经有同名的应用 | 用 --name 换个名字；要重装先由用户确认后 acornfox delete 旧的 |
@@ -209,7 +271,23 @@
 | CAT-INST-37 | P2 | 原来的凭据核对没过，按清单停下了 | 先查提供方：acornfox status 提供方 看它是否在运行，acornfox logs 提供方 --tail 200 看日志；提供方好了再装一次（还是 --reuse-data）。确认原来的数据还在不在（例如用户在提供方里删过库、改过密码就会这样）。只有用户确定不要原来的数据时，才改接别的服务：加 --use 需要名=服务名 再装；不要自己删库、改密码 |
 | CAT-INST-38 | P3 | 要接的服务被占着或已经接满 | acornfox services list 看每条服务被谁独占、还能接几个；acornfox install 应用 --plan 看现在能接哪条。有别的同类服务就用 --use 需要名=服务名 指定；没有就登记一条你已有的（acornfox services add …）。占着位置的是删了但数据还留着的应用、用户也确认它不要了：它已经删了，不能直接 delete --volumes，也不要手工 docker volume rm（接入记录还在，位置照样占着）；问过用户后先 acornfox install --name 原来的名字 --reuse-data 装回来，再 acornfox delete 原来的名字 --volumes 连数据一起删，位置才让出来。不要为了腾位置去删别的应用，要删先问用户 |
 | CAT-INST-39 | P3 | 清单里的一个值算不出来 | 看 message 是哪一处的哪个 {{…}}（message 里不带取到的值）。是 map 没对上、条件同时成立这类、要靠换一个值解决的（例如换一种对外方式、--set 改设置项；acornfox catalog platform-vars 看本机平台变量的值），问用户后再装；写法读不了、启动命令带保密值的，是目录的问题，把 message 反馈给我们，不要想办法绕过 |
-| APP-VARS-01 | P3 | 应用装时算的平台变量和现在的不一样 | apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装 |
+| CAT-INST-40 | P2 | 镜像包经下载网关分段下载没成 | 看 message 是哪一种：写缓存失败先看磁盘空间和权限（acornfox doctor 的 SETUP-DISK-01）；某一段多次下不下来，多半是网络或网盘暂时不通，稍后重装会从缓存接着下，已下的不用重下；缓存在数据目录 uploads/dl-cache，3 天没动会自己清，磁盘紧张时可以由用户确认后删；要退回单连接下载，环境变量 ACORNFOX_DL_SEGMENTED=0 |
+| APP-VARS-01 | P3 | 应用装时算的平台变量和现在的不一样 | apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：先 acornfox apps reapply 应用 --plan 看会改什么、会不会重启它，经用户同意后 acornfox apps reapply 应用 --yes（会按现在的值重写它的环境变量和配置文件并重启，数据不动，失败自动退回）；一次看有哪些应用落后了：acornfox apps affected |
+| APP-APPLY-01 | P3 | 这个应用现在不能重新生效 | 看 message 是哪一种：正在装或正在重新生效的，用 acornfox install status 任务编号 --wait 等它结束再来；停着的先问用户，同意后 acornfox start 应用，再重新生效；清单没存或是旧格式的，这个应用只能删了重装（保留数据 --reuse-data，要先问用户） |
+| APP-APPLY-02 | P3 | 这一项设置装好以后不能改 | 按 message 说的做：不能改的，不要想办法绕过（不要手工 env set）；写了“重装才能改”的，问用户同意后保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data）；值不对的，改对再试。acornfox apps vars 应用 看每一项能不能改 |
+| APP-APPLY-03 | P2 | 重新生效没成功，已经退回原来的设置 | 把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；多半是用户改的值让应用起不来（例如端口、地址写错），改对了再试一次；先用 acornfox apps set … --plan 看会改什么。应用已经退回，不用再处理 |
+| APP-APPLY-04 | P1 | 重新生效没成功，退回原来的设置时也出了错 | 这是要人处理的：先把 message 告诉用户，不要再重复运行重新生效，不要改密钥或删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；acornfox apps vars 应用 看环境变量是新的还是旧的；用户同意后可以 acornfox restart 应用，或 acornfox apps reapply 应用 --force 再按保存的设置生效一次 |
+| APP-APPLY-05 | P3 | 这次改动会重启应用，要用户先同意 | 把 message 里写的会改什么、会重启哪个应用告诉用户，问他同意后在同一条命令上加 --yes（接口里是 confirm_restart: true）再运行一次；用户不想重启，可以加 --no-reapply（接口里 reapply: skip）只改访问方式，应用里的地址以后用 acornfox apps reapply 再对 |
+| APP-UPG-01 | P3 | 这个应用现在不能升级 | 看 message 是哪一种：没有新版本就是已经最新，不用处理；正在装、重新生效或升级的，acornfox install status 任务编号 --wait 等它结束再来；停着的先问用户，同意后 acornfox start 应用再升级；清单没存或是旧格式的，这个应用只能删了重装（保留数据 --reuse-data，要先问用户） |
+| APP-UPG-02 | P3 | 新版本要用户先补一样东西 | 按 message 里写的补：缺的设置问到用户给的值，升级时加 --set 设置名=值（密码类写 设置名=-，从标准输入给）；内存不够就问用户，同意后 acornfox app set --app 应用 --memory 数字，再升级。补好以后先 acornfox apps upgrade 应用 --plan 看一遍 |
+| APP-UPG-03 | P3 | 新版本这一版不能原地升级 | 把 message 里写的告诉用户：现在这个应用照常用，只是不能升到这个版本。要用新版本，用户同意后保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data；多了必须的服务的，先登记一条已有的：acornfox services add …）；不同意就先不升，不要想办法绕过 |
+| APP-UPG-04 | P3 | 升级会重启应用，要用户先同意 | 把 acornfox apps upgrade 应用 --plan 说的会做什么、要停多久告诉用户，问他同意后在同一条命令上加 --yes（接口里是 confirm_restart: true）再运行一次 |
+| APP-UPG-05 | P2 | 升级没成功，已经退回到升级前 | 把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；原因是磁盘不够、网络不通这类的，处理好了再升级一次；应用已经退回，不用再处理，也不要重复升级 |
+| APP-UPG-06 | P1 | 升级没成功，退回到升级前时也出了错 | 这是要人处理的：先把 message 告诉用户，不要再重复升级，不要删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；用户同意后用升级前的快照恢复：acornfox backup list 应用 找到类型是升级前的那份，再 acornfox backup restore 应用 备份编号 --yes（先 --plan 看会怎样） |
+| APP-UPG-07 | P3 | 没有可以退回的东西 | 看 message 是哪一种：没升级过或已经退回过，就没有可退的，不用处理；快照坏了或程序没了，告诉用户这条路走不通，别的备份用 acornfox backup list 应用 看有没有能用的 |
+| APP-UPG-08 | P3 | 退回会丢掉升级后的新数据，要用户先同意 | 把 acornfox apps rollback 应用 --plan 说的告诉用户，特别是“升级后的新数据会没有”，问他同意后加 --yes（接口里是 confirm: true）再运行一次 |
+| APP-UPG-09 | P2 | 退回没成功，应用保持退回前的样子 | 把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；处理好了可以再退回一次 |
+| APP-UPG-10 | P1 | 退回没成功，回到退回前的样子时也出了错 | 这是要人处理的：先把 message 告诉用户，不要再重复退回，不要删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；acornfox backup list 应用 里有退回前另存的那份（类型是恢复前），问用户同意后用它恢复 |
 | CAT-CONN-01 | P3 | 连接码格式不对 | 让用户照原样再抄一遍；0、1、8 会当成 O、I、B |
 | CAT-CONN-02 | P3 | 这台服务器关掉了下载网关 | 问用户是否打开下载网关（去掉 ACORNFOX_GATEWAY=off 或 network.json 里的 "gateway": "off"） |
 | CAT-CONN-03 | P3 | 连接码不存在、抄错了，或已被别的机器用过 | 让用户核对连接码；还不行就找给码的人要新码。不要反复试 |
@@ -240,6 +318,13 @@
 | CAT-SYNC-11 | P3 | 私有目录已断开（授权被撤销或目录停用） | 已装好的应用照常运行，但不能再装、不能升级；告诉用户联系给码的人 |
 | CAT-SYNC-12 | P2 | 签名的索引写明属于别的目录 | 没有用它。公共同步时自动换下一个来源；私有目录持续出现就停下反馈 |
 | CAT-LOAD-01 | P1 | 目录缓存和程序内置的目录都用不了 | 应用中心打不开。先 acornfox catalog sync；还不行就重装同一版本的 AcornFox（保留数据） |
+| CAT-SHOW-01 | P3 | 展示内容（show.json）没有签名，或签名验不过 | 不用处理：应用中心退回用清单里的名字和一句话，装应用不受影响；下一次发布会带新的。持续出现就告诉维护者 |
+| CAT-SHOW-02 | P3 | 展示内容的序号和目录的序号对不上 | 不用处理：这一份展示内容没有用，应用中心退回用清单里的名字和一句话；下一次发布会对上 |
+| CAT-SHOW-03 | P3 | 展示内容的格式不对 | 不用处理：这一份展示内容没有用，应用中心退回用清单里的名字和一句话；告诉维护者用 acornfox catalog verify 查发布目录 |
+| CAT-SHOW-04 | P3 | 取展示内容（show.json）失败 | 不用处理：目录已经同步成功，只是展示内容没取到；下次同步会再取一次 |
+| CAT-SKILL-01 | P3 | 应用或解决方案的操作手册没取到 | 不用处理：这份手册暂时没有，应用照常装，AI 工作台照通用 Skill 做；下次同步目录会再取一次 |
+| CAT-SKILL-02 | P3 | 操作手册的大小或 sha256 和展示内容里写的对不上 | 不用处理：这份手册已丢弃、没有用，应用照常装，AI 工作台照通用 Skill 做；下次同步会再取；持续出现告诉维护者 |
+| CAT-SKILL-03 | P3 | 操作手册超过 32 KB 上限 | 不用处理：这份手册没有用，应用照常装；告诉维护者把它缩短到 32 KB 以内 |
 | CAT-PKG-01 | P2 | 没有来源给出和目录相符的应用包 | 稍后 acornfox catalog sync 后重装；还不行就反馈 |
 | CAT-PKG-02 | P2 | 下载的应用包校验值或大小和目录不符 | 没有用它；重装一次，持续出现就停下反馈（可能被篡改） |
 | CAT-PKG-03 | P2 | 下载的应用包存不下来 | 检查数据目录所在磁盘和权限（acornfox doctor）后重装 |
@@ -295,6 +380,7 @@
 | CAT-LINT-49 | P3 | 同名的环境变量可能同时成立 | 按输出里的文件和字段改清单或配方，再运行 acornfox catalog lint 直到没有错误 |
 | CAT-LINT-50 | P3 | 启动命令里引用了保密的值 | 按输出里的文件和字段改清单或配方，再运行 acornfox catalog lint 直到没有错误 |
 | CAT-LINT-51 | P3 | 这个 {{…}} 不是平台的引用，会原样保留（提醒） | 确认这个 {{…}} 是应用自己的写法；是想引用平台的值就改成 {{种类.名字}} |
+| CAT-LINT-52 | P3 | on_change 步骤的 watch 里列了不会变的参数 | 按 lint 输出的路径（/init/…/watch）改 watch：去掉 hidden 的参数，改看会变的设置 |
 | CAT-BUILD-01 | P3 | 目录有检查错误，什么都没写 | 先 acornfox catalog lint 修完错误再 build |
 | CAT-BUILD-02 | P3 | 打包参数或文件不对 | 按输出改：序号要大于 0、版本号要规范、应用目录里不能有符号链接或读不了的文件 |
 | CAT-BUILD-03 | P3 | 输出目录写不进去 | 换一个可写的输出目录或腾出磁盘 |
@@ -329,6 +415,9 @@
 | GW-RESP-01 | P3 | 网关的应答看不懂（本机判断） | 多半是网关地址指错了，或中间有代理改了应答：看 doctor 的下载网关一项 |
 | ID-KEY-01 | P2 | 机器钥匙读不了或不是 P-256 钥匙 | sudo acornfox identity show 看原因；文件坏了就 sudo acornfox identity reset --yes 重新生成（安装编号会变） |
 | ID-KEY-02 | P2 | 新钥匙保存不了 | 检查数据目录的权限和磁盘空间（acornfox doctor）后重试 |
+| MACHINE-01 | P3 | 本机能力有一块没算全 | 运行 acornfox --json machine 看 warnings 里每一项的 part 和 message：manuals 是应用目录读不了（应用名字、一句话、手册没查到），先 acornfox catalog sync；services 是服务登记表的问题，看 acornfox services list；apps 是某个应用的情况读不出来，acornfox status 应用名 |
+| MACHINE-02 | P3 | “本机能力”分册写不进 Skill 目录 | 不加 --json 运行 acornfox skill refresh，看 ✗ 那一行写的路径和原因；Skill 目录以前被 sudo 建过的，请用户确认后改回自己的属主；要马上用，直接运行 acornfox --json machine |
+| MACHINE-03 | P3 | 这台服务器的“本机能力”分册没能写：连不上，或服务器上的 AcornFox 太旧 | 先运行 acornfox --target 服务器名 status 看能不能连上（连不上看里面的连接编号）；能连上但提示服务器版本旧，让用户先升级服务器上的 AcornFox；好了再 acornfox skill refresh |
 | ANY-00 | P2 | 目录里找不到对应的情况 | 先把出错那条输出里的 message 和 hint 原样告诉用户；hint 只是让这条命令换个参数或稍后重试的，可以照做；别的一律只读、不动任何东西，收集证据包交给用户（或反馈给维护者） |
 
 ## 安装脚本（install.sh）
@@ -1005,6 +1094,1238 @@
 - 必须先停下问用户：总是：卸载只在用户明确要求时做；--purge 会删掉全部数据，不可恢复
 - 确认恢复：systemctl status acornfox-server 显示没有这个服务
 
+## Windows 安装（install-windows.ps1）
+
+### WIN-OS-01 Windows 版本太旧
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：先升级 Windows（Windows 10 22H2 或 Windows 11）再重新运行安装命令
+- 现象：安装命令在检查这一步停下，带 WIN-OS-01，什么都没装
+
+可能原因（逐条判定）：
+
+1. 系统版本号低于 19045（Windows 10 22H2）［doctor 自动判定］ —— 判定：运行 winver 或 acornfox windows doctor 看“Windows 版本号”
+
+排查顺序：
+
+1. acornfox windows doctor（没装好时用 get.ps1 加 -Action doctor）看版本号
+2. 设置 → Windows 更新
+
+处置：
+
+- ［0 级 只读］告诉用户先升级 Windows
+
+- 必须先停下问用户：总是：升级系统要用户自己做
+- 确认恢复：重新运行安装命令，检查通过
+- 演练方法：只能在老系统上试，没有演练方法
+
+### WIN-ARCH-01 这台电脑的 CPU 架构暂时不支持
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：现在只有 64 位 Intel/AMD 的 WSL 安装包和 Linux 镜像放在下载网关里；ARM 版 Windows 还没有对应的文件，装不了。
+- 下一步：ARM 版 Windows 暂时用不了；可以改把 AcornFox 装在一台 Linux 服务器上，用这台电脑通过 SSH 管理
+- 现象：安装命令在检查这一步停下，带 WIN-ARCH-01
+
+可能原因（逐条判定）：
+
+1. 这是 ARM 版 Windows（例如 Surface Pro X、Snapdragon 笔记本）［doctor 自动判定］ —— 判定：echo %PROCESSOR_ARCHITECTURE% 显示 ARM64
+
+排查顺序：
+
+1. echo %PROCESSOR_ARCHITECTURE%
+
+处置：
+
+- ［0 级 只读］照实告诉用户暂时不支持，给出装在 Linux 服务器上的办法
+
+- 必须先停下问用户：总是
+- 确认恢复：换到 64 位 Intel/AMD 的电脑后检查通过
+
+### WIN-POLICY-01 公司或学校的策略禁止了 WSL
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：请联系管理这台电脑的 IT 人员放开 WSL；自己改注册表可能违反规定，安装脚本不会替你改
+- 现象：安装命令在检查这一步停下，带 WIN-POLICY-01；直接运行 wsl 报 ERROR_ACCESS_DISABLED_BY_POLICY
+
+可能原因（逐条判定）：
+
+1. 组策略把 AllowWSL 设成了 0［doctor 自动判定］ —— 判定：reg query HKLM\SOFTWARE\Policies\WSL /v AllowWSL 的值是 0x0
+
+排查顺序：
+
+1. acornfox windows doctor
+2. reg query HKLM\SOFTWARE\Policies\WSL
+
+处置：
+
+- ［0 级 只读］把原因和注册表位置告诉用户，请他联系 IT
+
+- 必须先停下问用户：总是：不要替用户改系统策略
+- 确认恢复：IT 放开后重新运行安装命令，检查通过
+- 演练方法：在测试机上 reg add HKLM\SOFTWARE\Policies\WSL /v AllowWSL /t REG_DWORD /d 0 /f，测完 reg delete 掉
+
+### WIN-VIRT-01 CPU 的虚拟化功能没打开
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：WSL 2 要用 CPU 的虚拟化功能。固件里关着时，Windows 看不到它，装了也跑不起来。虚拟机里运行的 Windows 要在虚拟机设置里打开嵌套虚拟化。
+- 下一步：重启电脑进 BIOS/UEFI，打开 Intel VT-x（Intel Virtualization Technology）或 AMD-V（SVM Mode），保存后再运行安装命令
+- 现象：安装命令在检查这一步停下，带 WIN-VIRT-01；任务管理器 → 性能 → CPU 里“虚拟化”显示“已禁用”
+
+可能原因（逐条判定）：
+
+1. BIOS/UEFI 里关了虚拟化［doctor 自动判定］ —— 判定：任务管理器 → 性能 → CPU 的“虚拟化”是“已禁用”；或 systeminfo 末尾写“固件中已启用虚拟化: 否”
+2. 这台 Windows 本身是虚拟机，宿主机没给它开嵌套虚拟化 —— 判定：systeminfo 里“系统制造商”是 QEMU、VMware、Microsoft Corporation（Hyper-V）等
+
+排查顺序：
+
+1. acornfox windows doctor
+2. 任务管理器看“虚拟化”
+3. systeminfo
+
+处置：
+
+- ［0 级 只读］告诉用户进 BIOS 打开虚拟化（各品牌选项名不同，常见写法见上）
+
+- 必须先停下问用户：总是：改 BIOS 要用户自己做
+- 确认恢复：重新运行安装命令，检查通过
+
+### WIN-DISK-01 系统盘剩余空间不够
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：清理系统盘，至少留 10 GB 再运行安装命令（Debian 加 Docker 加几个应用大约要 3～5 GB）
+- 现象：安装命令在检查这一步停下，带 WIN-DISK-01
+
+可能原因（逐条判定）：
+
+1. 系统盘剩余空间小于 10 GB［doctor 自动判定］ —— 判定：acornfox windows doctor 的“系统盘剩 N GB”
+
+排查顺序：
+
+1. acornfox windows doctor
+2. 设置 → 系统 → 存储
+
+处置：
+
+- ［0 级 只读］告诉用户清理哪里（下载文件夹、回收站、临时文件）
+
+- 必须先停下问用户：要删用户的文件时
+- 确认恢复：剩余空间 10 GB 以上后重新运行安装命令
+
+### WIN-PS-01 缺少必要的系统组件
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：升级 Windows 10 到 22H2 后再运行；需要 PowerShell 5.1 和 System32 里的 curl.exe
+- 现象：安装命令在检查这一步停下，带 WIN-PS-01
+
+可能原因（逐条判定）：
+
+1. 没有 curl.exe（Windows 10 1803 以前的系统没有） —— 判定：where curl.exe 没有结果
+2. PowerShell 低于 5.1 —— 判定：$PSVersionTable.PSVersion
+
+排查顺序：
+
+1. where curl.exe
+2. $PSVersionTable.PSVersion
+
+处置：
+
+- ［0 级 只读］告诉用户升级 Windows
+
+- 必须先停下问用户：总是
+- 确认恢复：重新运行安装命令，检查通过
+
+### WIN-SRC-01 这是源码里的脚本，没有绑定版本
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：用引导脚本 get.ps1 安装（它取要装的那个版本自带的 install-windows.ps1）；开发测试时加 -Version 或 -LocalPackage
+- 现象：直接运行仓库里的 install-windows.ps1 报 WIN-SRC-01；脚本只装自己这个版本，被要求装别的版本时也报它
+
+可能原因（逐条判定）：
+
+1. 运行的是仓库里的源码（版本戳是 dev） —— 判定：脚本里 $ScriptVersion 是 'dev'
+2. -Version 和发行版脚本自带的版本不一致 —— 判定：屏幕上写“这个脚本只装 vX.Y.Z”
+
+排查顺序：
+
+1. 改用 get.ps1 加 -Version 重新运行
+
+处置：
+
+- ［1 级 可以直接做］用 get.ps1 运行同样的命令
+
+- 必须先停下问用户：不用问
+- 确认恢复：安装命令不再报 WIN-SRC-01
+
+### WIN-ADMIN-01 管理员确认被取消，什么都没安装
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：想继续就重新运行安装命令；弹窗上写 Windows PowerShell、发布者 Microsoft Windows 时选“是”。已经下载的文件会留着，不用重下
+- 现象：安装命令打印“管理员确认被取消”，退出码 5
+
+可能原因（逐条判定）：
+
+1. 在管理员确认里选了“否”或关掉了 —— 判定：问用户刚才点了什么
+2. 安全软件拦了提权（360、火绒偶尔会弹窗） —— 判定：屏幕上有没有安全软件的提示
+3. 当前账号不是管理员，需要输管理员的密码，输错了或取消了 —— 判定：弹窗里是不是要密码
+
+排查顺序：
+
+1. 问用户
+2. 重新运行
+
+处置：
+
+- ［2 级 先问用户］请用户再运行一次并选“是”
+
+- 必须先停下问用户：总是：只有用户本人能点这个确认，输管理员密码也只能他自己输
+- 确认恢复：管理员那一步完成，安装继续往下走
+- 相关编号：WIN-ADMIN-02
+
+### WIN-ADMIN-02 管理员那一步出错了
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：一次管理员确认里要做的事：打开虚拟机平台、安装 WSL、登记计划任务、防火墙规则。其中一件没做成。
+- 下一步：看 %LOCALAPPDATA%\AcornFox\logs\admin-step.log 里最后几行，再重新运行安装命令（做过的步骤会跳过）
+- 现象：安装命令打印“管理员那一步出错了”，带 WIN-ADMIN-02；管理员窗口里有红字
+
+可能原因（逐条判定）：
+
+1. dism 或 msiexec 返回了错误码（系统更新没装完、别的安装程序在占用） —— 判定：admin-step.log 里“dism 退出码”“msiexec 退出码”那几行，另有 wsl-msi.log
+2. WSL 安装包复制到管理员目录后校验不对（文件被改动或磁盘问题） —— 判定：admin-step.log 里写“校验不对”
+3. 安全软件拦了注册计划任务或防火墙规则 —— 判定：admin-step.log 里写“拒绝访问”；安全软件的拦截记录
+4. 管理员那一步没有留下结果文件（被安全软件结束了） —— 判定：屏幕上写“没有留下结果文件”
+
+排查顺序：
+
+1. 看 %LOCALAPPDATA%\AcornFox\logs\admin-step.log 最后 20 行
+2. 看 wsl-msi.log（msiexec 的详细记录）
+3. Windows 更新有没有挂起
+4. 重新运行安装命令
+
+处置：
+
+- ［2 级 先问用户］等 Windows 更新装完、重启后重新运行
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：同一处连续失败两次：带 admin-step.log 和 wsl-msi.log 反馈
+- 确认恢复：重新运行后管理员那一步完成
+- 相关编号：WIN-ADMIN-01、WIN-REBOOT-01
+
+### WIN-REBOOT-01 需要重启电脑才能继续
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：刚打开 Windows 的“虚拟机平台”功能或装了 WSL，要重启一次才生效。重启后登录会自动弹出窗口接着装。
+- 下一步：保存手上的工作后重启电脑；重启后登录，会自动弹出窗口接着装（也可以自己再运行一次同样的安装命令）
+- 这一项要用户自己确认或操作
+- 现象：安装命令打印“Windows 要重启一次”，退出码 3
+
+可能原因（逐条判定）：
+
+1. 第一次装 WSL：打开虚拟机平台后 Windows 要求重启［doctor 自动判定］ —— 判定：admin-step.log 里 dism 或 msiexec 退出码是 3010（要重启）
+
+排查顺序：
+
+1. 请用户保存工作后重启
+2. 重启后看有没有自动弹出安装窗口；没有就重新运行安装命令
+
+处置：
+
+- ［2 级 先问用户］告诉用户重启；不要替用户重启电脑
+
+- 必须先停下问用户：总是：重启要用户自己决定
+- 确认恢复：重启后安装自动或手动继续，走完后 acornfox windows status 全部通过
+- 相关编号：WIN-ADMIN-02
+
+### WIN-DL-01 下载没成功（所有下载来源都试过）
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：WSL 安装包（约 351 MB）、Linux 镜像（Debian 约 85 MB）先从 AcornFox 下载网关取（分段多路、能续传），不通再用官方地址。每个来源都核对了写死的 SHA256。
+- 下一步：确认能上网、关掉代理后重新运行；已经下好的部分会保留，不会从头来
+- 现象：安装命令打印“没下成，换下一个来源”，最后带 WIN-DL-01 停下
+
+可能原因（逐条判定）：
+
+1. 这台电脑没有联网，或公司网络拦了下载地址 —— 判定：浏览器能不能打开 https://dl.acornfox.com/v1/health 和 https://github.com
+2. 代理或安全软件拦了 curl.exe —— 判定：关掉代理软件后重试能过；日志 %LOCALAPPDATA%\AcornFox\logs\install-windows.log 里“segment … 失败 curl=…”的退出码
+3. 下载网关今天的次数用完了或暂停发放（GW-LIM、GW-OFF） —— 判定：日志里 gw-client.log 的结果编号；这时会自动退到官方地址，只是更慢
+4. 下载到的文件校验不对（下载源的文件被替换或损坏） —— 判定：日志里写“校验不对”；换一个来源后通过
+
+排查顺序：
+
+1. 看 install-windows.log 里最后的“segment … 失败”和“校验不对”
+2. 关代理后重试
+3. 加 -NoGateway 直接用官方地址试一次
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令（从已下好的段接着下）
+- ［1 级 可以直接做］加 -NoGateway 或换网络
+
+- 必须先停下问用户：反复校验不对：停下，可能有人篡改了下载内容，带日志反馈，不要想办法跳过校验
+- 确认恢复：下载完成，安装往下走
+- 相关编号：WIN-DL-02、GW-LIM-01、GW-OFF-01
+
+### WIN-DL-02 取不到这个版本的安装脚本，或校验不过
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：多半是下载被截断或被替换：换一个源再试（加 -China 或 -Global）；两个源都不过时不要强行安装，先反馈
+- 现象：安装命令在“取 get.sh”这一步停下，带 WIN-DL-02
+
+可能原因（逐条判定）：
+
+1. 发行版地址连不上（Gitee、GitHub 都试过了） —— 判定：浏览器打开 https://gitee.com/VIP13390/AcornFox/releases 和 https://github.com/OrbitMaker/AcornFox/releases
+2. 这个版本的 get.sh 和 SHA256SUMS 里记的值不一致 —— 判定：install-windows.log 里写“get.sh 校验不过（来自 …）”
+
+排查顺序：
+
+1. 换源重试：加 -China 或 -Global
+2. 确认版本号存在
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令，换一个源
+
+- 必须先停下问用户：两个源都校验不过：带日志反馈，不要跳过校验
+- 确认恢复：get.sh 校验通过，安装继续
+- 相关编号：WIN-DL-01、INSTALL-GET-02、INSTALL-GET-03
+
+### WIN-WSL-01 WSL 用不了
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：运行 wsl --status 看原因；多半是还没重启，或虚拟机平台没打开，或 WSL 被升级到一半
+- 现象：装完 WSL 后 wsl --version 仍然不行；acornfox windows doctor 的“WSL”一项失败，带 WIN-WSL-01；acornfox 命令报“WSL 里的服务没有应答”
+
+可能原因（逐条判定）：
+
+1. 还没有重启（打开虚拟机平台后必须重启一次）［doctor 自动判定］ —— 判定：管理员那一步的记录里 dism 退出码 3010，之后没重启过
+2. “虚拟机平台”功能没打开［doctor 自动判定］ —— 判定：doctor 的“虚拟机平台”写“没打开”
+3. WSL 程序没装上或太旧（低于 2.0）［doctor 自动判定］ —— 判定：wsl --version 失败或版本低于 2.0
+4. 策略禁止或虚拟化被关 —— 判定：doctor 里 WIN-POLICY-01、WIN-VIRT-01 的两项
+
+排查顺序：
+
+1. acornfox windows doctor
+2. wsl --status
+3. wsl --update（先问用户）
+
+处置：
+
+- ［2 级 先问用户］没重启的话请用户重启
+- ［1 级 可以直接做］重新运行安装命令（会补装 WSL 或升级旧版）
+
+- 必须先停下问用户：要用户重启时；wsl --update 之前（它会升级用户其它发行版用的 WSL）
+- 确认恢复：wsl --version 成功，doctor 的“WSL”一项通过
+- 相关编号：WIN-REBOOT-01、WIN-VIRT-01、WIN-POLICY-01
+
+### WIN-WSL-02 导入 Linux 发行版失败
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：看 install-windows.log 里 wsl --import 的输出；磁盘空间、杀毒软件拦截、文件被占用是常见原因；解决后重新运行安装命令
+- 现象：安装命令在“导入 Linux 发行版”这一步停下，带 WIN-WSL-02；doctor 的“发行版”一项写“没有发行版 AcornFox”
+
+可能原因（逐条判定）：
+
+1. 磁盘空间不够（装在 %LOCALAPPDATA%\AcornFox\wsl，要 2 GB 以上）［doctor 自动判定］ —— 判定：doctor 的系统盘剩余
+2. 安全软件拦了 wsl.exe 写磁盘镜像 —— 判定：安全软件的拦截记录
+3. 同名发行版没删干净、目录被占用 —— 判定：wsl -l -v 里有 AcornFox 但打不开；%LOCALAPPDATA%\AcornFox\wsl 里有 ext4.vhdx
+4. 下载的镜像文件不完整 —— 判定：重新运行时会重新校验，校验不对会重下
+
+排查顺序：
+
+1. 看 install-windows.log 里 wsl --import rc=…
+2. wsl -l -v
+3. 重新运行
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+- ［2 级 先问用户］wsl --unregister AcornFox（删掉没装好的发行版，里面没有用户数据时才做）
+
+- 必须先停下问用户：要注销发行版之前：先确认里面没有用户的应用和数据
+- 确认恢复：wsl -l -v 里有 AcornFox，安装继续
+- 相关编号：WIN-DISK-01、WIN-WSL-03
+
+### WIN-WSL-03 Linux 发行版里的 systemd 没有起来
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 是什么：AcornFox 在 WSL 里用 systemd 管服务。安装脚本会写好 /etc/wsl.conf（启用 systemd）并重启发行版，等 systemd 起来；这一步等不到就停下。
+- 下一步：运行 wsl --shutdown 后重新运行安装命令；还不行看 wsl -d AcornFox -u root -- systemctl status
+- 现象：安装命令停在“等 systemd”，带 WIN-WSL-03；doctor 的“systemd”一项失败
+
+可能原因（逐条判定）：
+
+1. /etc/wsl.conf 没写成功或没生效（WSL 要整个关掉再起才读） —— 判定：wsl -d AcornFox -u root -- cat /etc/wsl.conf 里有 systemd=true；wsl --shutdown 后重试能过
+2. WSL 版本太旧不支持 systemd —— 判定：wsl --version 低于 0.67.6
+3. systemd 起来了但状态是 starting/stopping（有服务卡住） —— 判定：wsl -d AcornFox -u root -- systemctl list-jobs
+
+排查顺序：
+
+1. acornfox windows doctor
+2. wsl --shutdown
+3. wsl -d AcornFox -u root -- systemctl is-system-running
+4. wsl -d AcornFox -u root -- systemctl --failed
+
+处置：
+
+- ［2 级 先问用户］wsl --shutdown 后重新运行安装命令（会关掉用户别的 WSL 发行版，先问用户）
+- ［1 级 可以直接做］只关掉我们的：wsl --terminate AcornFox
+
+- 必须先停下问用户：wsl --shutdown 之前：它会关掉用户所有 WSL 发行版
+- 确认恢复：systemctl is-system-running 是 running 或 degraded
+- 相关编号：WIN-WSL-01
+
+### WIN-LINUX-01 在 WSL 里安装 AcornFox 没成功
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 是什么：Windows 这一侧的步骤做完了，在 WSL 里运行的 Linux 安装脚本（install.sh，经 get.sh 取这个版本自带的）没成功，或装好后服务没起来。脚本自己会打印它的故障编号。
+- 下一步：看 WSL 里的 /root/acornfox-install.log 和它最后打印的故障编号（INSTALL-…、EDGE-… 等，acornfox faults 编号 能查）；解决后重新运行安装命令
+- 现象：安装命令停在“在 AcornFox 里安装 AcornFox”之后，带 WIN-LINUX-01；doctor 的“AcornFox”一项失败
+
+可能原因（逐条判定）：
+
+1. WSL 里下载 Docker、AcornFox 或入口镜像失败（网络慢、代理） —— 判定：/root/acornfox-install.log 里的“下载没成功”和下载源测速那几行
+2. Docker 没装上或起不来（WSL 里 iptables、systemd 的问题） —— 判定：wsl -d AcornFox -u root -- systemctl status docker
+3. 端口被占（Windows 上的程序占了 18800、18802、18810 这些，WSL 的转发和它们冲突） —— 判定：install-windows.log；netstat -ano | findstr :188
+4. 磁盘满了 —— 判定：doctor 的系统盘；wsl -d AcornFox -u root -- df -h /
+
+排查顺序：
+
+1. wsl -d AcornFox -u root -- tail -n 40 /root/acornfox-install.log
+2. acornfox faults <日志里最后的编号>
+3. acornfox windows doctor
+4. 重新运行安装命令（做过的步骤会跳过）
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+- ［1 级 可以直接做］按日志里那个编号的条目处理
+
+- 必须先停下问用户：同一处连续失败两次：带上 /root/acornfox-install.log 最后 40 行和 doctor 的输出反馈
+- 确认恢复：acornfox windows doctor 的“AcornFox”一项通过，浏览器能打开控制台
+- 相关编号：WIN-WSL-03、WIN-NET-01、INSTALL-DOCKER-01、INSTALL-PORT-03
+
+### WIN-START-01 开机自启没登记成功，或 WSL 没设成一直开着
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：重新运行安装命令（要管理员确认一次），或运行 acornfox windows lan-on / lan-off 重新登记；没有 .wslconfig 里的设置时，没人用 WSL 一会儿它就会停
+- 现象：重启电脑后 AcornFox 里的应用打不开，要自己运行一次 acornfox 命令才好；doctor 的“开机自启”或“.wslconfig”一项没通过，带 WIN-START-01
+
+可能原因（逐条判定）：
+
+1. 计划任务 AcornFoxWSL（或 AcornFoxLAN）不在了（被清理软件删了、管理员确认被取消）［doctor 自动判定］ —— 判定：schtasks /query /tn AcornFoxWSL；doctor 的“开机自启”
+2. .wslconfig 里没有 instanceIdleTimeout、vmIdleTimeout 两项（被用户删了）［doctor 自动判定］ —— 判定：type %USERPROFILE%\.wslconfig；doctor 的“.wslconfig”
+3. 用户把 WSL 的开机任务关掉了 —— 判定：任务计划程序里这个任务被禁用
+
+排查顺序：
+
+1. acornfox windows doctor
+2. schtasks /query /tn AcornFoxWSL
+3. type %USERPROFILE%\.wslconfig
+
+处置：
+
+- ［2 级 先问用户］重新运行安装命令补登记（要管理员确认一次）
+
+- 必须先停下问用户：要弹管理员确认之前；改用户的 .wslconfig 之前（别的 WSL 发行版也受影响）
+- 确认恢复：doctor 这两项通过；重启电脑后应用自己起来
+- 相关编号：WIN-ADMIN-01
+
+### WIN-LAN-01 局域网转发没生效
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：WSL 2 默认是 NAT 网络，局域网里的设备连不到它。AcornFoxLAN 任务每 5 秒对一次 WSL 里监听在所有网卡上的端口（局域网能打开的应用、18802 局域网控制台），用 netsh portproxy 把 Windows 的同一个端口转进去，再加 Windows 防火墙规则 AcornFox-LAN-WSL（只在专用、域网络放行）。
+- 下一步：运行 acornfox windows doctor 看是哪一项；360 等安全软件常拦 netsh，弹窗里选“允许操作”；还不行运行 acornfox windows lan-off 再 lan-on 重来
+- 现象：应用在这台电脑上能打开，局域网里的手机、电脑打不开；doctor 的“局域网访问”一项没通过，带 WIN-LAN-01
+
+可能原因（逐条判定）：
+
+1. AcornFoxLAN 任务没在运行［doctor 自动判定］ —— 判定：schtasks /query /tn AcornFoxLAN；%LOCALAPPDATA%\AcornFox\logs\lan-sync.log 最后几行
+2. 安全软件拦了 netsh interface portproxy（360 弹窗默认“阻止”） —— 判定：netsh interface portproxy show v4tov4 里没有 18802；lan-sync.log 没有“转发”那几行
+3. 转发规则指向了 WSL 旧的内部地址（WSL 重启后会换）［doctor 自动判定］ —— 判定：doctor 写“有 N 条转到旧地址”；AcornFoxLAN 任务不在运行时才会这样
+4. 防火墙规则 AcornFox-LAN-WSL 不在［doctor 自动判定］ —— 判定：Get-NetFirewallRule -Name AcornFox-LAN-WSL
+5. 应用是“只本机”（在 WSL 里只监听 127.0.0.1），本来就不会转出去 —— 判定：acornfox apps 里这个应用的访问范围；改成局域网：acornfox app set --app 名字 --expose lan
+
+排查顺序：
+
+1. acornfox windows doctor
+2. schtasks /query /tn AcornFoxLAN
+3. netsh interface portproxy show v4tov4
+4. type %LOCALAPPDATA%\AcornFox\logs\lan-sync.log
+
+处置：
+
+- ［2 级 先问用户］acornfox windows lan-on（重新登记，要管理员确认一次）
+- ［2 级 先问用户］请用户在安全软件的弹窗里选“允许”
+
+- 必须先停下问用户：要弹管理员确认或请用户点安全软件的弹窗之前；改防火墙规则之前
+- 确认恢复：doctor 的“局域网访问”通过；局域网里另一台设备能打开 http://这台电脑的局域网地址:18802/
+- 相关编号：WIN-LAN-02、WIN-LAN-03
+
+### WIN-LAN-02 当前账号不是管理员，局域网访问没打开
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：应用只在这台电脑上能打开。想让局域网里的设备访问：用管理员账号运行 acornfox windows lan-on
+- 现象：安装时打印“当前账号不是管理员账号，局域网访问不打开”；局域网里的设备打不开这台电脑上的应用
+
+可能原因（逐条判定）：
+
+1. 安装时用的是普通账号：局域网转发要管理员权限常驻运行（每 5 秒刷新转发规则）［doctor 自动判定］ —— 判定：设置 → 账户里看账户类型；doctor 的“局域网访问”写“没打开”
+
+排查顺序：
+
+1. 问用户这台电脑有没有管理员账号
+
+处置：
+
+- ［0 级 只读］告诉用户这是这一版的限制，给出用管理员账号 lan-on 的办法
+
+- 必须先停下问用户：总是：要输管理员密码只能用户自己输
+- 确认恢复：管理员账号运行 acornfox windows lan-on 后 doctor 的“局域网访问”通过
+- 相关编号：WIN-LAN-01
+
+### WIN-LAN-03 这台电脑的网络类型是“公用”，防火墙会挡住局域网里的设备
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：在 Windows 设置里把这个网络改成“专用”（家里或办公室这类可信的网络），再试；公共场所的网络（咖啡店、机场）不要改
+- 现象：局域网转发都正常，局域网里的设备仍然打不开；doctor 写“网络类型 Public”，带 WIN-LAN-03
+
+可能原因（逐条判定）：
+
+1. 网络类型是“公用网络”，AcornFox 的防火墙规则只在专用和域网络放行（有意不在公用网络放行）［doctor 自动判定］ —— 判定：Get-NetConnectionProfile 的 NetworkCategory 是 Public；doctor 的“局域网访问”
+
+排查顺序：
+
+1. acornfox windows doctor
+2. 设置 → 网络和 Internet → 这个网络的属性 → 网络配置文件类型
+
+处置：
+
+- ［0 级 只读］告诉用户在设置里改成“专用网络”
+
+- 必须先停下问用户：总是：改网络类型是用户的安全设置，只能他自己改
+- 确认恢复：改完后局域网里的设备能打开应用
+- 相关编号：WIN-LAN-01
+
+### WIN-CLI-01 acornfox 命令没能写进去
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：也可以直接用 wsl -d AcornFox -u root -- acornfox …；重新运行安装命令会补写；新开一个 PowerShell 窗口让 PATH 生效
+- 现象：在 PowerShell 里运行 acornfox 提示找不到命令；doctor 的“acornfox 命令”一项没通过，带 WIN-CLI-01
+
+可能原因（逐条判定）：
+
+1. 窗口是装之前打开的，PATH 还没刷新 —— 判定：新开一个 PowerShell 窗口运行 acornfox version 能过
+2. %LOCALAPPDATA%\AcornFox\bin 里的 acornfox.cmd、acornfox.ps1 被清理软件删了［doctor 自动判定］ —— 判定：dir %LOCALAPPDATA%\AcornFox\bin
+3. 用户 PATH 里没有这个目录［doctor 自动判定］ —— 判定：doctor 的“acornfox 命令”
+
+排查顺序：
+
+1. 新开窗口试
+2. acornfox windows doctor
+3. 重新运行安装命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令补写（不弹管理员确认）
+
+- 必须先停下问用户：不用问
+- 确认恢复：新窗口里 acornfox version 能运行
+
+### WIN-NET-01 控制台打不开（localhost 上没有应答）
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：运行 acornfox windows doctor；多半是 WSL 里的服务没起来：wsl -d AcornFox -u root -- systemctl status acornfox-server
+- 现象：浏览器打开 http://localhost:18800/ 或 :18802 没有应答；安装最后一步打开控制台失败，带 WIN-NET-01
+
+可能原因（逐条判定）：
+
+1. WSL 被停了（没人用时 WSL 会停，.wslconfig 的“一直开着”没生效）［doctor 自动判定］ —— 判定：wsl -l -v 里 AcornFox 是 Stopped；doctor 的“发行版”
+2. acornfox-server 没起来［doctor 自动判定］ —— 判定：wsl -d AcornFox -u root -- systemctl status acornfox-server；doctor 的“AcornFox”
+3. WSL 的 localhost 转发被关了（.wslconfig 里 localhostForwarding=false） —— 判定：type %USERPROFILE%\.wslconfig
+4. Windows 上有别的程序占了 18800 或 18802 —— 判定：netstat -ano | findstr :18800
+
+排查顺序：
+
+1. acornfox windows doctor
+2. wsl -l -v
+3. wsl -d AcornFox -u root -- systemctl status acornfox-server --no-pager
+4. type %USERPROFILE%\.wslconfig
+
+处置：
+
+- ［1 级 可以直接做］wsl -d AcornFox --exec /bin/true（把发行版叫起来）后再试
+- ［2 级 先问用户］改 .wslconfig 里的 localhostForwarding
+
+- 必须先停下问用户：改用户的 .wslconfig 之前；wsl --shutdown 之前（会关掉用户别的发行版）
+- 确认恢复：浏览器能打开 http://localhost:18800/，doctor 全部通过
+- 相关编号：WIN-WSL-03、WIN-START-01、WIN-LINUX-01
+
+### WIN-UNINST-01 卸载要确认，但这里没有终端可以问
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：确定要卸载就加 -Yes（acornfox windows uninstall --yes）；加 --purge 会连应用数据和发行版一起删，不可恢复，只在用户明确说要全部删掉时加
+- 现象：uninstall -Purge 在没有终端时停下，带 WIN-UNINST-01，什么都没删
+
+可能原因（逐条判定）：
+
+1. -Purge 会删掉全部应用数据，需要确认；没有终端（AI 工作台、计划任务）没法问 —— 判定：命令里有 -Purge 但没有 -Yes
+
+排查顺序：
+
+1. 问用户要不要连数据一起删
+2. 要就加 --yes 重新运行
+
+处置：
+
+- ［2 级 先问用户］用户明确确认后加 --yes 重新运行
+
+- 必须先停下问用户：总是：删数据不可恢复，必须先问用户并说清楚会删什么
+- 确认恢复：卸载完成；acornfox windows status 显示没有发行版
+- 演练方法：在测试机上不带终端运行 acornfox windows uninstall --purge（不加 --yes）
+
+### WIN-UNINST-02 WSL 里的 AcornFox 没卸干净，卸载停下了
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：卸载先在 WSL 里运行本版本自带的 uninstall.sh（经 get.sh 取并校验，要联网），再回头检查 acornfox-server、acornfox-runner 已经停了、没有 AcornFox 的容器（含入口容器）在跑。这两样有一样不成，就停在这里：Windows 这一侧（acornfox 命令、计划任务、局域网转发）原样留着，不会说“已卸载”，应用数据没动。
+- 下一步：先看 %LOCALAPPDATA%\AcornFox\logs\uninstall-wsl.log 最后几行和它报的编号（INSTALL-GET-…、UNINSTALL-…，acornfox faults 编号 能查）；确认这台电脑能上网后，用屏幕上给的完整路径命令重新运行卸载
+- 现象：acornfox windows uninstall 带 WIN-UNINST-02、退出码 1，说“WSL 里的卸载脚本退出码 …”或“回头检查：服务 … 还在运行”；acornfox 命令还在，WSL 里 acornfox-server 还是 active
+
+可能原因（逐条判定）：
+
+1. 没联网，取不到卸载脚本（INSTALL-GET-01、INSTALL-GET-02、WIN-DL-02） —— 判定：uninstall-wsl.log 里有 INSTALL-GET-…；curl.exe -I https://gitee.com
+2. 卸载脚本自己出错（UNINSTALL-… 编号） —— 判定：uninstall-wsl.log 最后的“故障编号:”
+3. 脚本报成功但服务或容器还在（docker 停不下来、systemd 没响应） —— 判定：wsl -d AcornFox -u root -- systemctl is-active acornfox-server；wsl -d AcornFox -u root -- docker ps
+
+排查顺序：
+
+1. 读 %LOCALAPPDATA%\AcornFox\logs\uninstall-wsl.log 的最后 30 行
+2. acornfox faults <日志里最后的编号>
+3. 能上网后重新运行卸载（写完整路径：& "%LOCALAPPDATA%\AcornFox\bin\acornfox.cmd" windows uninstall）
+
+处置：
+
+- ［1 级 可以直接做］确认能上网后重新运行 acornfox windows uninstall（数据不动，重复运行不出错）
+- ［0 级 只读］同一处连续失败两次，带上 uninstall-wsl.log 最后 40 行反馈
+
+- 必须先停下问用户：同一处连续失败两次：不要改用别的办法硬删（例如 wsl --unregister 会连数据一起删），先问用户
+- 确认恢复：acornfox windows uninstall 说“已卸载（保留数据）”；wsl -d AcornFox -u root -- systemctl is-active acornfox-server 不是 active，docker ps 里没有 acornfox 的容器
+- 相关编号：WIN-UNINST-03、WIN-DL-02、INSTALL-GET-02
+- 演练方法：在测试机上先断开网络（或把 ACORNFOX_RELEASE_BASE 指到不存在的地址），运行 acornfox windows uninstall --yes
+
+### WIN-UNINST-03 -Purge 没能注销 WSL 发行版，数据还在
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：uninstall -Purge 要先注销 WSL 发行版 AcornFox（连里面的数据一起删），注销没成功就停下：Windows 这一侧原样留着，不会说“已卸载”。
+- 下一步：运行 wsl --shutdown 关掉所有 WSL（会关掉用户别的发行版，先问用户），再用屏幕上给的完整路径命令重新运行卸载
+- 现象：acornfox windows uninstall --purge --yes 带 WIN-UNINST-03、退出码 1，说“注销发行版没成功”
+
+可能原因（逐条判定）：
+
+1. 发行版还被别的窗口或程序占着（有人开着 wsl -d AcornFox 的终端） —— 判定：wsl --list --running
+2. WSL 本身出了问题（服务没响应） —— 判定：wsl --status；wsl --list --verbose
+
+排查顺序：
+
+1. wsl --list --verbose
+2. 关掉用户开着的 AcornFox 终端
+3. wsl --terminate AcornFox 后重新运行卸载
+
+处置：
+
+- ［2 级 先问用户］wsl --terminate AcornFox（只停这一个发行版）后重新运行卸载
+- ［2 级 先问用户］wsl --shutdown（会关掉用户别的发行版）
+
+- 必须先停下问用户：总是：这是删数据的一步，重试前再向用户确认一次；wsl --shutdown 之前先问
+- 确认恢复：wsl --list 里没有 AcornFox；acornfox windows uninstall 说“已卸载，连同发行版、数据…都删掉了”
+- 相关编号：WIN-UNINST-01、WIN-UNINST-02、WIN-WSL-01
+
+### WIN-SKILL-01 Windows 用户目录里已装的 AcornFox Skill 和 WSL 里的程序不是同一个版本
+
+- 分组：Windows 安装（install-windows.ps1）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：Windows 上的 Skill 装在用户目录（%USERPROFILE%\.claude\skills\acornfox、%USERPROFILE%\.codex\skills\acornfox），程序在 WSL 里；升级后 Skill 不会自己更新。acornfox windows doctor 对照 Skill 文件头里的版本号和 WSL 里程序的版本号，不一样就提醒。意思和 SETUP-SKILL-01 一样，只是 Windows 一侧自己查。只是提醒，不影响应用。
+- 下一步：运行 acornfox skill install 更新（它把 WSL 里程序带的 Skill 装进 Windows 用户目录）；升级 AcornFox 之后都要做一次
+- AcornFox 已经自动做的：没有；Skill 不会自己更新
+- 现象：acornfox windows doctor（或 acornfox doctor 的 Windows 一侧）有一行“注意”带 WIN-SKILL-01
+
+可能原因（逐条判定）：
+
+1. 升级过 AcornFox（acornfox windows upgrade），没有重新装 Skill［doctor 自动判定］ —— 判定：文件头 <!-- acornfox-skill-version: … --> 的版本比 acornfox version 的低
+2. Skill 是没有版本号的老版本写的［doctor 自动判定］ —— 判定：SKILL.md 里没有 acornfox-skill-version 那一行
+
+排查顺序：
+
+1. acornfox windows doctor
+2. acornfox version
+3. acornfox skill install
+
+处置：
+
+- ［1 级 可以直接做］acornfox skill install（只覆盖 Skill 文件）
+
+- 必须先停下问用户：不用问
+- 确认恢复：acornfox windows doctor 的“Skill”一项通过
+- 相关编号：SETUP-SKILL-01
+- 演练方法：在测试机上 acornfox skill install 后把 SKILL.md 里的版本号改成 0.0.1，再运行 acornfox windows doctor
+
+## Mac 安装（acornfox mac，install-mac.sh）
+
+### MAC-OS-01 这不是 Mac，或 macOS 版本太旧
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：Mac 要 macOS 26 或更新才能用苹果的 container；先在“系统设置 → 通用 → 软件更新”升级再重新运行安装命令
+- 现象：安装命令在检查这一步停下，带 MAC-OS-01，什么都没装
+
+可能原因（逐条判定）：
+
+1. macOS 版本低于 26［doctor 自动判定］ —— 判定：sw_vers -productVersion 的第一段小于 26；acornfox mac doctor 的“macOS”一项
+2. 在 Linux 或别的系统上运行了 Mac 的安装脚本，或用 sudo、root 运行（会装到 root 的家目录里） —— 判定：uname -s 不是 Darwin；id -u 是 0
+
+排查顺序：
+
+1. sw_vers -productVersion
+2. acornfox mac doctor（装了以后）
+
+处置：
+
+- ［0 级 只读］告诉用户先升级 macOS（升级要用户自己点）
+- ［1 级 可以直接做］用 sudo 运行的：去掉 sudo 重新运行
+
+- 必须先停下问用户：总是：升级系统要用户自己做
+- 确认恢复：重新运行安装命令，检查通过
+
+### MAC-ARCH-01 这台 Mac 不是苹果芯片
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：Intel 的 Mac 装不了（苹果的 container 只在苹果芯片上运行）；可以把 AcornFox 装在一台 Linux 服务器上，用这台 Mac 的命令行管理（get.sh cli，再 acornfox target add）
+- 现象：安装命令在检查这一步停下，带 MAC-ARCH-01
+
+可能原因（逐条判定）：
+
+1. 这是 Intel 芯片的 Mac［doctor 自动判定］ —— 判定：uname -m 显示 x86_64
+2. 终端是用 Rosetta 打开的（uname -m 显示 x86_64，但 sysctl -n machdep.cpu.brand_string 是 Apple） —— 判定：sysctl -n machdep.cpu.brand_string 里有 Apple：关掉“使用 Rosetta 打开”再运行
+
+排查顺序：
+
+1. uname -m
+2. sysctl -n machdep.cpu.brand_string
+
+处置：
+
+- ［0 级 只读］照实告诉用户这台 Mac 暂时不支持，给出装在 Linux 服务器上的办法
+
+- 必须先停下问用户：总是
+- 确认恢复：换到苹果芯片的 Mac 后检查通过
+
+### MAC-DISK-01 磁盘剩余空间不够
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：清理磁盘，至少留 12 GB 再运行安装命令（苹果的 container 约 0.5 GB、虚拟机镜像约 1 GB，Docker 和应用另算）
+- 现象：安装命令在检查这一步停下，带 MAC-DISK-01
+
+可能原因（逐条判定）：
+
+1. 用户家目录所在的磁盘剩余空间小于 12 GB［doctor 自动判定］ —— 判定：df -h ~ 的可用空间；acornfox mac doctor 的“磁盘剩”
+2. 虚拟机的磁盘随用随涨，装了很多应用后磁盘快满 —— 判定：container system df 看镜像、卷占了多少
+
+排查顺序：
+
+1. df -h ~
+2. container system df
+
+处置：
+
+- ［0 级 只读］告诉用户清理的办法，不要替他删文件
+
+- 必须先停下问用户：总是：删用户的文件要他自己决定
+- 确认恢复：重新运行安装命令，检查通过
+
+### MAC-DL-01 下载安装需要的大文件失败
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：网络不好：过一会儿重新运行安装命令（已下的部分会接着下）；国内加 --china，海外加 --global 换一个先试的源
+- 现象：安装命令在下载苹果的 container 安装包（约 170 MB）或虚拟机内核（约 676 MB）时停下，带 MAC-DL-01，后面列出每个来源失败的原因
+
+可能原因（逐条判定）：
+
+1. 没联网，或公司网络拦了下载网关和 GitHub［doctor 自动判定］ —— 判定：浏览器能不能打开 https://dl.acornfox.com/v1/health 和 https://github.com
+2. 家用宽带每条连接很慢（网关的文件每条连接约 30 KB/s，所以分段多路下载） —— 判定：安装输出里的“N 路”和已下字节数在涨就是慢，不是坏
+3. 文件校验不过（下载被截断或被替换）：程序已丢掉重下 —— 判定：失败原因里写“sha256 不一致”
+
+排查顺序：
+
+1. acornfox mac install --plan
+2. curl -I https://dl.acornfox.com/v1/health
+3. 过一会儿再运行安装命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令（接着下）
+- ［1 级 可以直接做］换源：加 --china 或 --global
+
+- 必须先停下问用户：同一个文件连续三次失败：带安装输出最后 30 行反馈
+- 确认恢复：安装命令跑过这一步
+
+### MAC-DL-02 取不到这个版本的安装文件
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：核对版本号存在（https://gitee.com/VIP13390/AcornFox/releases）；网络不通时过一会儿再试，或加 --china、--global 换一个先试的源
+- 现象：install-mac.sh 或 acornfox mac install 在下载 acornfox_darwin_arm64、SHA256SUMS、install.sh 等文件时停下，带 MAC-DL-02
+
+可能原因（逐条判定）：
+
+1. 两个源（Gitee、GitHub）都连不上［doctor 自动判定］ —— 判定：curl -I https://gitee.com 和 curl -I https://github.com
+2. 版本号写错，或这个版本的发行版不完整（SHA256SUMS 里没有这一项） —— 判定：发行版页面里有没有 acornfox_darwin_arm64、acornfox_linux_arm64、install.sh 和入口包
+3. 校验不过：下载被截断或被替换，没有运行它 —— 判定：屏幕上写“校验不过”和两个值
+
+排查顺序：
+
+1. curl -I https://gitee.com
+2. curl -I https://github.com
+3. 核对版本号
+
+处置：
+
+- ［1 级 可以直接做］重新运行
+- ［1 级 可以直接做］换源：加 --china 或 --global
+
+- 必须先停下问用户：两个源都校验不过时不要强行安装：带屏幕输出反馈
+- 确认恢复：install-mac.sh 通过校验，进入 acornfox mac install
+
+### MAC-SRC-01 这是源码里的脚本或程序，没有版本号
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：用 get.sh 安装（它取带版本号的发行版脚本），或加 --version vX.Y.Z、--local-package 目录
+- 现象：install-mac.sh 或 acornfox mac install 停下，带 MAC-SRC-01
+
+可能原因（逐条判定）：
+
+1. 直接运行了仓库里的 install-mac.sh（版本戳是 dev），或自己编的程序没有写版本号 —— 判定：install-mac.sh 里 SCRIPT_VERSION 是 dev；acornfox version 显示 dev
+
+排查顺序：
+
+1. acornfox version
+2. grep SCRIPT_VERSION install-mac.sh
+
+处置：
+
+- ［0 级 只读］改用 get.sh 的一行命令
+
+- 必须先停下问用户：总是
+- 确认恢复：用 get.sh 重新运行
+
+### MAC-ADMIN-01 要管理员密码，但没输成
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：装苹果签名的 container 安装包要管理员权限：请你自己在“终端”里运行屏幕上给的那一行 sudo installer …（输入密码时屏幕不显示字符，是正常的），装好后重新运行安装命令
+- 这一项要用户自己确认或操作
+- 现象：安装命令停在“安装苹果的 container”这一步，退出码 5（没有终端可以输密码）或 1（密码输错、取消、这个账号不是管理员）
+
+可能原因（逐条判定）：
+
+1. 安装命令是 AI 工作台或脚本运行的，没有终端能让人输密码［doctor 自动判定］ —— 判定：屏幕上写“这里没有终端”；退出码是 5
+2. 密码输错或取消 —— 判定：sudo 报 Sorry, try again 或 installer 没有运行
+3. 这个账号不是管理员 —— 判定：“系统设置 → 用户与群组”里这个账号有没有“允许用户管理这台电脑”
+
+排查顺序：
+
+1. 让用户自己在终端运行屏幕上那一行 sudo installer -pkg … -target /
+2. container --version 看装上了没有
+3. 重新运行安装命令
+
+处置：
+
+- ［0 级 只读］把那一行命令和原因告诉用户，请他自己在终端里运行
+
+- 必须先停下问用户：总是：AI 工作台不代输管理员密码
+- 确认恢复：container --version 有输出后重新运行安装命令，这一步显示已做过
+
+### MAC-CTR-01 苹果的 container 装了但用不了
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：运行 container system start 看报错；还不行就重新运行安装命令，或到 https://github.com/apple/container 看有没有已知问题
+- 现象：安装命令在“苹果的 container”或“container 服务”这一步停下，带 MAC-CTR-01；acornfox mac doctor 的 container 一项失败
+
+可能原因（逐条判定）：
+
+1. container 服务没启动（重启电脑后、或被手动停了）［doctor 自动判定］ —— 判定：container system status 不是 running
+2. 安装包没装全，container 程序不在 /usr/local/bin —— 判定：which container 没有输出；ls /usr/local/bin/container
+3. macOS 太旧或和这个 container 版本不兼容 —— 判定：container system start 的报错里写版本要求
+
+排查顺序：
+
+1. container --version
+2. container system status
+3. container system start
+4. acornfox mac doctor
+
+处置：
+
+- ［1 级 可以直接做］运行 container system start
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：container system start 报同一个错两次：带报错原文反馈
+- 确认恢复：container system status 显示 running
+
+### MAC-KERNEL-01 虚拟机内核没装上
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：重新运行安装命令（会重新下载并装内核）；内核约 676 MB，经下载网关分段下载，慢的话请耐心等
+- 现象：安装命令在“虚拟机内核”这一步停下，带 MAC-KERNEL-01；doctor 报没有默认内核
+
+可能原因（逐条判定）：
+
+1. container system kernel set 失败（文件没下全、磁盘满、container 服务没启动）［doctor 自动判定］ —— 判定：屏幕上 container system kernel set 的退出码和第一行报错
+2. 默认内核文件被删了 —— 判定：ls ~/Library/Application\ Support/com.apple.container/kernels/ 里没有 default.kernel-arm64
+
+排查顺序：
+
+1. acornfox mac doctor
+2. container system status
+3. 重新运行安装命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：同一处连续失败两次：带屏幕输出反馈
+- 确认恢复：安装命令跑过“虚拟机内核”这一步
+
+### MAC-IMG-01 虚拟机用的镜像准备不好
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：重新运行安装命令（已下的根文件系统会直接用）；还不行带屏幕输出反馈
+- 现象：安装命令在“虚拟机初始化镜像”或“Debian 虚拟机镜像”这一步停下，带 MAC-IMG-01
+
+可能原因（逐条判定）：
+
+1. 拉不下初始化镜像 vminit（ghcr.io 在国内很慢，程序会先试南京大学的镜像站）［doctor 自动判定］ —— 判定：屏幕上“拉取 …”那几行和失败原因
+2. Debian 根文件系统下不来（清华、中科大、linuxcontainers 都不通） —— 判定：屏幕上写“Debian 根文件系统下不来”和每个来源的原因
+3. 打包或载入镜像失败（磁盘满、系统自带的 tar 不能用） —— 判定：屏幕上 container image load 的退出码和报错
+
+排查顺序：
+
+1. acornfox mac install --plan
+2. container image ls
+3. df -h ~
+4. 重新运行安装命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：同一处连续失败两次：带屏幕输出反馈
+- 确认恢复：container image inspect acornfox-base:debian13 有输出
+
+### MAC-VM-01 建不了虚拟机
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：看屏幕上的原因：同名虚拟机已存在就换名字（环境变量 ACORNFOX_MAC_VM）或先自己处理；其余重新运行安装命令
+- 现象：安装命令在“虚拟机”这一步停下，带 MAC-VM-01；acornfox mac doctor 说虚拟机不存在
+
+可能原因（逐条判定）：
+
+1. 已经有一台同名的虚拟机，不是这个安装留下的（为免弄坏你的东西，不动它）［doctor 自动判定］ —— 判定：container machine ls 里有一台叫 acornfox 的，而 ~/Library/Application Support/AcornFox/mac/mac.json 不存在
+2. container machine create 失败（内存或磁盘不够、镜像坏了） —— 判定：屏幕上 container machine create 的退出码和报错
+3. 虚拟机被卸载或手动删过 —— 判定：container machine ls 里没有它；mac.json 在
+
+排查顺序：
+
+1. container machine ls
+2. acornfox mac doctor
+3. acornfox mac install --plan
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令（虚拟机不存在会重建）
+
+- 必须先停下问用户：要删或改一台不是这个安装建的虚拟机：先问用户
+- 确认恢复：container machine ls 里有 acornfox 且 running
+
+### MAC-VM-02 虚拟机起不来或没有应答
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：acornfox mac stop 再 acornfox mac start；还不行 container system stop 再 container system start（会停掉你别的容器，先问用户）
+- 现象：acornfox mac start 或有人访问时一直等不到虚拟机；日志里写“虚拟机没有应答”
+
+可能原因（逐条判定）：
+
+1. container 服务没在运行［doctor 自动判定］ —— 判定：container system status
+2. 内存不够，Mac 把它挤掉了 —— 判定：活动监视器里内存压力是红的；acornfox mac set --memory 4 调小
+3. 虚拟机的系统起不来（磁盘坏了、镜像不对） —— 判定：container machine logs acornfox 看最后几十行
+
+排查顺序：
+
+1. acornfox mac status
+2. container machine ls
+3. container machine logs acornfox
+4. acornfox mac doctor --wake
+
+处置：
+
+- ［1 级 可以直接做］acornfox mac stop 再 acornfox mac start
+- ［2 级 先问用户］container system stop 再 start（会停别的容器）
+
+- 必须先停下问用户：重启两次都没起来：带 container machine logs 的最后 50 行反馈
+- 确认恢复：acornfox mac status 显示虚拟机在运行并有地址
+
+### MAC-PROV-01 虚拟机里的准备没做成
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：重新运行安装命令；软件源连不上时程序会自己换源再试
+- 现象：安装命令在“虚拟机里的准备（软件源、ssh）”这一步停下，带 MAC-PROV-01
+
+可能原因（逐条判定）：
+
+1. 虚拟机里的软件源连不上（国内用阿里云、海外用 Debian 官方）［doctor 自动判定］ —— 判定：屏幕上 apt-get 的报错
+2. 读不到 sshd 的主机钥匙（sshd 没装上） —— 判定：屏幕上写“读不到虚拟机 sshd 的主机钥匙”
+
+排查顺序：
+
+1. acornfox mac doctor --wake
+2. 重新运行安装命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：同一处连续失败两次：带屏幕输出反馈
+- 确认恢复：安装命令跑过这一步
+
+### MAC-LINUX-01 虚拟机里装 AcornFox 没成功
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：屏幕上写了虚拟机里脚本最后报的故障编号（INSTALL-…、EDGE-… 等）：acornfox faults 那个编号看办法；整个输出也记在虚拟机里的 /root/acornfox-install.log
+- 现象：安装命令在“虚拟机里的 AcornFox”这一步停下，带 MAC-LINUX-01，后面常有“脚本报 INSTALL-…”
+
+可能原因（逐条判定）：
+
+1. 虚拟机里装 Docker 或拉入口镜像没成功（和 Linux 服务器上同一个脚本，同样的原因）［doctor 自动判定］ —— 判定：屏幕上最后的故障编号；container machine run -n acornfox --root -- tail -60 /root/acornfox-install.log
+2. 文件传进虚拟机后校验不对 —— 判定：屏幕上写“传进虚拟机后校验不对”
+
+排查顺序：
+
+1. 看屏幕上最后的故障编号
+2. acornfox faults 那个编号
+3. 重新运行安装命令（脚本能重复运行）
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：同一个编号连续两次：带那个编号和 /root/acornfox-install.log 最后 60 行反馈
+- 确认恢复：acornfox mac doctor --wake 里虚拟机里的服务都正常
+
+### MAC-LAUNCH-01 常驻转发程序没在运行
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 下一步：重新运行安装命令会装回去；手动：launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.acornfox.mac.plist；看日志 ~/Library/Application Support/AcornFox/mac/logs/daemon.log
+- 现象：控制台、应用、acornfox 命令都连不上，但虚拟机在；acornfox mac status 说常驻程序没加载或 Mac 上的端口没人听
+
+可能原因（逐条判定）：
+
+1. 没有登录（常驻程序是登录后才运行的）或被用户手动卸了［doctor 自动判定］ —— 判定：launchctl print gui/$(id -u)/com.acornfox.mac 失败
+2. 程序文件被删或换了位置 —— 判定：ls ~/Library/Application\ Support/AcornFox/mac/bin/acornfox
+3. Mac 上的端口被别的程序占了（日志里有 MAC-PORT-01） —— 判定：daemon.log 里 MAC-PORT-01 那几行
+
+排查顺序：
+
+1. acornfox mac status
+2. acornfox mac doctor
+3. tail -30 ~/Library/Application\ Support/AcornFox/mac/logs/daemon.log
+4. 重新运行安装命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令（只会补装缺的部分）
+
+- 必须先停下问用户：重装后仍然没有：带 daemon.log 最后 30 行反馈
+- 确认恢复：acornfox mac status 显示常驻程序已加载、端口在听
+
+### MAC-PORT-01 Mac 上的端口被别的程序占了
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：找出占用的程序（lsof -nP -iTCP:端口 -sTCP:LISTEN）退出它，或换一个 AcornFox 要用的端口；占着的端口转发程序不会转发
+- 现象：daemon.log 里写 MAC-PORT-01，对应的应用或控制台在 Mac 上打不开（虚拟机里是好的）
+
+可能原因（逐条判定）：
+
+1. Mac 上别的程序（另一份 AcornFox、开发服务器等）占了 18802、18808 或 18810～18899 里的端口［doctor 自动判定］ —— 判定：lsof -nP -iTCP:18802 -sTCP:LISTEN（换成日志里写的端口）
+2. macOS 的防火墙或安全软件不让监听局域网（只影响局域网访问，本机的 127.0.0.1 不受影响） —— 判定：本机用 127.0.0.1 能开、局域网别的设备打不开
+
+排查顺序：
+
+1. tail -30 daemon.log
+2. lsof -nP -iTCP:端口 -sTCP:LISTEN
+
+处置：
+
+- ［0 级 只读］告诉用户哪个程序占了端口，请他决定
+
+- 必须先停下问用户：要结束别的程序：先问用户
+- 确认恢复：占用的程序退出后，转发程序在 15 秒内自己补上监听
+
+### MAC-NET-01 这台 Mac 的局域网地址变了
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：acornfox mac set --public-host auto（把应用地址里写的地址改成现在的；虚拟机里的 AcornFox 服务会重启一下，应用不停）
+- 现象：控制台和应用页上显示的地址（http://192.168.x.x:…）打不开，但把地址换成 127.0.0.1 就能开；acornfox mac doctor 报 MAC-NET-01
+
+可能原因（逐条判定）：
+
+1. 路由器重新分配了这台 Mac 的地址，或换了网络（Wi-Fi 换成网线）［doctor 自动判定］ —— 判定：ifconfig en0 | grep inet 和 acornfox mac status 里的局域网地址不一样
+
+排查顺序：
+
+1. acornfox mac doctor
+2. acornfox mac set --public-host auto
+
+处置：
+
+- ［1 级 可以直接做］运行 acornfox mac set --public-host auto
+
+- 必须先停下问用户：总是可以直接做：只改显示用的地址，不动数据和应用
+- 确认恢复：acornfox mac doctor 不再报 MAC-NET-01
+
+### MAC-SSH-01 acornfox 命令连不上虚拟机
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：acornfox mac doctor 看原因；多半是转发程序没运行（MAC-LAUNCH-01）或虚拟机刚起来还没好，等十几秒再试
+- 现象：acornfox target add local 或 acornfox status 报连接失败（stage connect），或安装最后一步停下
+
+可能原因（逐条判定）：
+
+1. 转发程序没运行，Mac 上 18808 没人听［doctor 自动判定］ —— 判定：acornfox mac status 的“本机转发 ssh 端口”
+2. 虚拟机里的 sshd 没起来，或钥匙对不上（虚拟机被重建过） —— 判定：acornfox mac doctor --wake；ssh -F /dev/null -i ~/Library/Application\ Support/AcornFox/mac/ssh/id_ed25519 -o UserKnownHostsFile=~/Library/Application\ Support/AcornFox/mac/ssh/known_hosts -p 18808 root@127.0.0.1 true
+3. known_hosts 里的主机钥匙和虚拟机的不一致（重建过虚拟机） —— 判定：ssh 报 Host key verification failed
+
+排查顺序：
+
+1. acornfox mac status
+2. acornfox mac doctor --wake
+3. 重新运行安装命令（会重新放钥匙、重新登记 local）
+
+处置：
+
+- ［1 级 可以直接做］重新运行安装命令
+
+- 必须先停下问用户：重装后仍连不上：带 acornfox mac doctor --json 的输出反馈
+- 确认恢复：acornfox status 有回答
+
+### MAC-CLI-01 放不下 acornfox 命令
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：换一个目录：ACORNFOX_INSTALL_DIR=某个可写目录 重新运行安装命令；或自己把 ~/Library/Application Support/AcornFox/mac/bin/acornfox 拷到 PATH 里
+- 现象：安装命令在“acornfox 命令”这一步停下，带 MAC-CLI-01（别的步骤都已经做完，控制台能用）
+
+可能原因（逐条判定）：
+
+1. /usr/local/bin 和 ~/.local/bin 都不能写［doctor 自动判定］ —— 判定：ls -ld /usr/local/bin ~/.local/bin
+
+排查顺序：
+
+1. echo $PATH
+2. ls -ld /usr/local/bin ~/.local/bin
+
+处置：
+
+- ［1 级 可以直接做］用 ACORNFOX_INSTALL_DIR 指定别的目录重新运行
+
+- 必须先停下问用户：总是：改用户的 PATH 配置（~/.zshrc）先问
+- 确认恢复：which acornfox 有输出
+
+### MAC-UNINST-01 --purge 没有确认
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：--purge 会连虚拟机里的应用和数据一起删掉，删了就找不回来；确认要删请加 --yes
+- 现象：acornfox mac uninstall --purge 停下，带 MAC-UNINST-01，什么都没删
+
+可能原因（逐条判定）：
+
+1. 没有加 --yes［doctor 自动判定］ —— 判定：命令里没有 --yes
+
+排查顺序：
+
+1. acornfox mac uninstall --purge --plan（先看会删什么）
+
+处置：
+
+- ［2 级 先问用户］先问用户是否真的要删数据；他同意再加 --yes
+
+- 必须先停下问用户：总是：删数据要用户确认
+- 确认恢复：加 --yes 后 acornfox mac status 说没有装
+
+### MAC-UNINST-02 卸载没卸干净
+
+- 分组：Mac 安装（acornfox mac，install-mac.sh）
+- 默认等级：P2（功能用不了，尽快处理）
+- 下一步：看屏幕上哪一步失败：停不掉常驻程序用 launchctl bootout gui/$(id -u)/com.acornfox.mac；停不下虚拟机用 container machine stop acornfox；然后重新运行卸载命令
+- 现象：acornfox mac uninstall 停下，带 MAC-UNINST-02
+
+可能原因（逐条判定）：
+
+1. launchctl 或 container 命令失败（服务没响应）［doctor 自动判定］ —— 判定：屏幕上那一步的报错
+2. 删目录失败（有程序占着） —— 判定：屏幕上写“删不掉 …”
+
+排查顺序：
+
+1. acornfox mac status
+2. launchctl print gui/$(id -u)/com.acornfox.mac
+3. container machine ls
+4. 重新运行卸载命令
+
+处置：
+
+- ［1 级 可以直接做］重新运行卸载命令（可重复运行）
+
+- 必须先停下问用户：重试两次仍不行：带屏幕输出反馈
+- 确认恢复：acornfox mac status 说没有装，或虚拟机已停
+
 ## 准备运行环境和本机自检（doctor）
 
 ### SETUP-NET-01 下载源都连不上
@@ -1186,126 +2507,6 @@
 
 - 必须先停下问用户：要用户在 Docker Desktop 里点同意或登录时
 - 确认恢复：doctor 的 Docker 一项通过
-
-### SETUP-WIN-01 需要管理员确认才能打开 WSL 2
-
-- 分组：准备运行环境和本机自检（doctor）
-- 默认等级：P2（功能用不了，尽快处理）
-- 下一步：点“继续”，在 Windows 弹出的管理员确认里选“是”
-- 这一项要用户自己确认或操作
-- 现象：准备运行环境等你确认，带 SETUP-WIN-01
-
-可能原因（逐条判定）：
-
-1. 这台电脑没有开 WSL 2 功能 —— 判定：wsl --status 说没有安装
-
-排查顺序：
-
-1. 请用户点继续
-
-处置：
-
-- ［2 级 先问用户］用户在管理员弹窗里选“是”
-
-- 必须先停下问用户：总是：只有用户本人能确认
-- 确认恢复：准备运行环境进入下一步
-
-### SETUP-WIN-02 需要重启电脑
-
-- 分组：准备运行环境和本机自检（doctor）
-- 默认等级：P2（功能用不了，尽快处理）
-- 下一步：保存好手上的工作后重启电脑；重启后 AcornFox 会自动接着装
-- 这一项要用户自己确认或操作
-- 现象：准备运行环境等你重启，带 SETUP-WIN-02
-
-可能原因（逐条判定）：
-
-1. 刚打开 WSL 2 / 虚拟机平台功能，Windows 要重启才生效 —— 判定：刚做完 SETUP-WIN-01
-
-排查顺序：
-
-1. 请用户保存工作后重启
-
-处置：
-
-- ［2 级 先问用户］用户自己重启
-
-- 必须先停下问用户：总是
-- 确认恢复：重启后准备运行环境接着走
-
-### SETUP-WIN-03 这台电脑不能运行 WSL 2 虚拟机
-
-- 分组：准备运行环境和本机自检（doctor）
-- 默认等级：P2（功能用不了，尽快处理）
-- 下一步：在 BIOS 里打开虚拟化后重试；虚拟机里运行的话，要在宿主机上为它打开嵌套虚拟化
-- 这一项要用户自己确认或操作
-- 现象：准备运行环境报 SETUP-WIN-03
-
-可能原因（逐条判定）：
-
-1. BIOS/UEFI 里关了虚拟化（Intel VT-x / AMD-V） —— 判定：任务管理器 → 性能 → CPU 里“虚拟化”是“已禁用”
-2. 这台 Windows 本身是虚拟机且没开嵌套虚拟化 —— 判定：systeminfo 显示是虚拟机
-3. Windows 版本太旧（需要 Windows 10 2004 以上或 Windows 11） —— 判定：winver 看版本
-
-排查顺序：
-
-1. 看任务管理器里的虚拟化
-2. winver
-
-处置：
-
-- ［2 级 先问用户］用户进 BIOS 打开虚拟化
-
-- 必须先停下问用户：总是
-- 确认恢复：重试后运行环境能启动
-
-### SETUP-WIN-04 管理员确认被取消或失败
-
-- 分组：准备运行环境和本机自检（doctor）
-- 默认等级：P3（提示或用法问题，不急）
-- 下一步：点“继续”再试一次，在弹窗里选“是”；不是管理员账号的话，请管理员登录后操作
-- 这一项要用户自己确认或操作
-- 现象：准备运行环境报 SETUP-WIN-04
-
-可能原因（逐条判定）：
-
-1. 在管理员确认里选了“否” —— 判定：问用户刚才点了什么
-2. 当前账号不是管理员 —— 判定：设置 → 账户里看账户类型
-
-排查顺序：
-
-1. 问用户
-
-处置：
-
-- ［2 级 先问用户］用户再点一次“继续”
-
-- 必须先停下问用户：总是
-- 确认恢复：准备运行环境进入下一步
-
-### SETUP-WIN-05 WSL 没有把端口转发到本机
-
-- 分组：准备运行环境和本机自检（doctor）
-- 默认等级：P2（功能用不了，尽快处理）
-- 下一步：把 .wslconfig 里的 localhostForwarding 改回 true 或删掉这一行，运行 wsl --shutdown，再运行 acornfox setup --resume
-- 现象：准备运行环境报 SETUP-WIN-05；应用在本机打不开
-
-可能原因（逐条判定）：
-
-1. WSL 的 localhost 转发被关掉了（%USERPROFILE%\.wslconfig 里写了 localhostForwarding=false） —— 判定：type %USERPROFILE%\.wslconfig
-2. WSL 网络服务出错 —— 判定：wsl --shutdown 后重试能过
-
-排查顺序：
-
-1. 看 .wslconfig
-
-处置：
-
-- ［2 级 先问用户］改 .wslconfig（用户的配置文件）
-- ［2 级 先问用户］wsl --shutdown 后 acornfox setup --resume
-
-- 必须先停下问用户：改用户的配置文件、关掉 WSL 之前
-- 确认恢复：自检通过
 
 ### SETUP-EDGE-01 网关组件没有准备好
 
@@ -1671,27 +2872,30 @@
 - 相关编号：GW-AUTH-01
 - 演练方法：在测试机上 sudo timedatectl set-ntp false; sudo date -s '+10 min' 后运行 sudo acornfox doctor
 
-### SETUP-MAC-01 Mac 版只有命令行客户端
+### SETUP-MAC-01 Mac 版的 install、serve 不能直接装本机服务
 
 - 分组：准备运行环境和本机自检（doctor）
 - 默认等级：P3（提示或用法问题，不急）
-- 下一步：Mac 版只有命令行客户端，不能在 Mac 本机运行 AcornFox 服务；请把 AcornFox 装在一台 Linux 服务器上，用这台 Mac 上的命令行管理（acornfox target add …）。1. 在一台 Linux 服务器（amd64 或 arm64）上按使用文档用 install.sh 安装 AcornFox；2. 在这台 Mac 上运行 acornfox target add 名称 --ssh 用户@服务器地址；3. 之后 acornfox deploy、status、logs 等命令都作用在这台服务器上。检查服务器用 ssh 用户@服务器地址 sudo acornfox doctor
+- 下一步：Mac 版只有命令行客户端，acornfox install、serve 不能在 Mac 上直接装本机服务；要把 AcornFox 装在这台 Mac 上（苹果芯片、macOS 26 起），运行：curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash。1. 要装在这台 Mac 上：运行上面那行命令（装进苹果 container 开的一台 Debian 虚拟机），或先运行 acornfox mac install --plan 看会做什么；2. 要管理 Linux 服务器：在服务器上按使用文档用 install.sh 安装 AcornFox，再在这台 Mac 上运行 acornfox target add 名称 --ssh 用户@服务器地址；3. 之后 acornfox deploy、status、logs 等命令都作用在登记的服务器上。检查服务器用 ssh 用户@服务器地址 sudo acornfox doctor
 - 这一项要用户自己确认或操作
-- 现象：在 Mac 上运行 acornfox install、serve、doctor 时报 SETUP-MAC-01
+- 现象：在 Mac 上运行 acornfox install、serve 时报 SETUP-MAC-01；还没装 Mac 本机版时运行 acornfox doctor 也报它
 
 可能原因（逐条判定）：
 
-1. 这个版本的 Mac 版只当命令行客户端，用来管理 Linux 服务器上的 AcornFox；在 Mac 本机安装和运行（install、serve，以及对本机的 setup、doctor）还没有开放 —— 判定：uname 是 Darwin
+1. acornfox install、serve 是旧的“本机直接装”模式，在 Mac 上已关闭；Mac 本机版是用 get.sh 装进苹果 container 的虚拟机（acornfox mac install） —— 判定：uname 是 Darwin；acornfox mac status 说没有装
 
 排查顺序：
 
-1. 问用户有没有 Linux 服务器
+1. 问用户想装在这台 Mac 上还是管理一台 Linux 服务器
+2. 装在这台 Mac 上：acornfox mac install --plan（苹果芯片、macOS 26 起）
+3. 管理服务器：acornfox target add
 
 处置：
 
+- ［2 级 先问用户］装在这台 Mac 上：运行 get.sh 的一行命令
 - ［2 级 先问用户］在 Linux 服务器上安装后，用 acornfox target add 登记
 
-- 必须先停下问用户：要用户准备服务器（可能花钱）时
+- 必须先停下问用户：要用户准备服务器（可能花钱）时；装在这台 Mac 上要输管理员密码时
 - 确认恢复：acornfox --target 服务器 status 能返回
 
 ### SETUP-GEN-01 准备运行环境时出错
@@ -1721,7 +2925,7 @@
 
 - 分组：准备运行环境和本机自检（doctor）
 - 默认等级：P3（提示或用法问题，不急）
-- 是什么：后台服务启动时同步一次应用目录，之后每天同步一次。doctor 和控制台“运行环境”页读的是后台服务记下的上次结果：什么时候、成没成、从哪个来源、在用第几号目录。
+- 是什么：后台服务启动时同步一次应用目录，之后每 6 小时（上下抖一点）同步一次；有人打开控制台的应用中心或“我的应用”、或运行 acornfox apps outdated 时，距上次成功同步超过 30 分钟也会同步一次。doctor 和控制台“运行环境”页读的是后台服务记下的上次结果：什么时候、成没成、从哪个来源、在用第几号目录。
 - 下一步：运行 acornfox catalog sync 看这次的结果；同步不上不影响已装的应用，安装时用手上的目录（缓存或程序内置的）
 - AcornFox 已经自动做的：所有来源都失败时继续用手上的目录；下次定时同步会再试
 - 现象：doctor 或运行环境页的“应用目录”一项警告（SETUP-SYNC-01）；应用中心看不到新上架的应用或新版本
@@ -1730,7 +2934,7 @@
 
 1. 这台服务器连不上目录的来源（官网和 Gitee 备用都不通，或被代理、防火墙拦了）［doctor 自动判定］ —— 判定：acornfox catalog sync --json 的 attempts 里每个来源都是 CAT-SYNC-02
 2. 来源返回的内容验不过签名或版本不对（来源正在发布、镜像太旧） —— 判定：attempts 里是 CAT-SYNC-04、CAT-SYNC-05、CAT-SYNC-06
-3. 后台服务很久没运行（停过两天以上），定时同步没跑［doctor 自动判定］ —— 判定：doctor 写“上次同步是 … 前”，systemctl status acornfox-server 看启动时间
+3. 后台服务很久没运行（停过一天以上），定时同步没跑［doctor 自动判定］ —— 判定：doctor 写“上次同步是 … 前”，systemctl status acornfox-server 看启动时间
 4. 私有目录那部分同步失败（网关不通或授权被撤销） —— 判定：acornfox catalog sources 里私有目录的 code
 5. 后台服务刚启动，还没同步过 —— 判定：doctor 写“还没同步过”，过几分钟再看
 
@@ -1815,6 +3019,40 @@
 - 确认恢复：acornfox sources --probe 里排在前面的源写“能用”；doctor 不再有这条提醒
 - 相关编号：SETUP-NET-01、CAT-INST-12、pull_timeout
 - 演练方法：在测试机里 echo '127.0.0.1 docker.m.daocloud.io' | sudo tee -a /etc/hosts 后运行 sudo acornfox doctor 和 acornfox sources --probe
+
+### SETUP-SKILL-01 电脑上已装的 AcornFox Skill 和命令行不是同一个版本
+
+- 分组：准备运行环境和本机自检（doctor）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：AI 工作台读的 Skill 是这台电脑上的一份文件（~/.claude/skills/acornfox、~/.codex/skills/acornfox），Skill 分入口 SKILL.md 和一批分册（install-linux.md 等），都在同一个目录里；命令行写它们的时候在每个文件头带上自己的版本号。命令行升级后文件不会自己更新，AI 工作台就按旧的做事；doctor 对照每个文件头的版本号和命令行的版本号，不一样、或者缺了哪一册，就提醒。只是提醒，不影响应用和服务器。
+- 下一步：运行 acornfox skill install 更新 Skill；如果提示 Skill 比命令行新，先更新电脑上的命令行（get.sh 的 cli 那条命令，见 Skill 里 maintain.md 的“更新 Skill 和命令行”），再运行 acornfox skill install
+- AcornFox 已经自动做的：没有；Skill 和命令行都不会自己更新
+- 现象：acornfox doctor 有一行“!”开头、带 SETUP-SKILL-01：“… 里的 AcornFox Skill 是 … 版，这台电脑上的命令行是 … 版”；doctor --json 的 items 里 check 为 SETUP-SKILL-01、level 为 warn
+
+可能原因（逐条判定）：
+
+1. 命令行升级过（或服务器升级后重装了命令行），Skill 还是旧的［doctor 自动判定］ —— 判定：head -3 ~/.claude/skills/acornfox/SKILL.md 里的版本号比 acornfox --json version 的低
+2. Skill 是没有版本号的老版本写的［doctor 自动判定］ —— 判定：SKILL.md 文件头没有 acornfox-skill-version 那一行
+3. 分册没装全：入口是新的，但目录里缺某一册，或某一册不是同一个版本（例如手工拷过文件、安装时被打断）［doctor 自动判定］ —— 判定：doctor 的提醒点名了哪几个分册；ls ~/.claude/skills/acornfox/ 对照 acornfox skill print --all 里的文件名
+4. Claude Code 和 Codex 两处只更新了一处［doctor 自动判定］ —— 判定：doctor 的提醒点名是哪个工作台
+5. Skill 比命令行新：命令行是旧的（在这台电脑上装命令行之后，Skill 是从别处拷来的或另一个更新的命令行装的）［doctor 自动判定］ —— 判定：doctor 的提醒写“比这台电脑上的命令行新”
+
+排查顺序：
+
+1. acornfox doctor --json 找 check 为 SETUP-SKILL-01 的项
+2. acornfox --json version
+3. head -3 ~/.claude/skills/acornfox/SKILL.md ~/.codex/skills/acornfox/SKILL.md
+4. ls ~/.claude/skills/acornfox/ ~/.codex/skills/acornfox/
+
+处置：
+
+- ［1 级 可以直接做］acornfox skill install（只覆盖 Skill 目录里的文件，旧版本留下的分册会一并删掉）
+- ［2 级 先问用户］更新电脑上的命令行（get.sh 的 cli 那条命令，换掉电脑上的程序）
+
+- 必须先停下问用户：要更新命令行之前（它换掉电脑上的程序）
+- 确认恢复：acornfox doctor 里 SETUP-SKILL-01 那一行是“都是 … 版”
+- 相关编号：CLI-UPDATE-01
+- 演练方法：在测试机上 acornfox skill install 后，把 ~/.claude/skills/acornfox/SKILL.md 里的版本号改成 0.0.1，再运行 acornfox doctor
 
 ## 入口代理（应用网址和域名前面的入口容器）
 
@@ -2103,6 +3341,36 @@
 - 确认恢复：acornfox lan-console status --json 的 enabled 和用户要的一致
 - 相关编号：LAN-CONSOLE-01、LAN-CONSOLE-03
 
+### LAN-CONSOLE-04 忘了局域网控制台的密码
+
+- 分组：局域网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：控制台密码只存一份不可逆的摘要，没人（包括 AcornFox）能把它找回来，只能清掉重设。登录页的“忘了密码”不能直接重设：不登录就能重设等于谁都能抢走控制台，所以重设只能在服务器上做。
+- 下一步：在装着 AcornFox 的服务器上（经 SSH）运行 acornfox lan-console reset-password：清掉密码，所有登录状态和记住的设备一起作废；然后在局域网里用浏览器打开控制台地址，重新设一个密码（谁先打开谁设，别拖）
+- 现象：用户说“忘了控制台密码”“登录不进去”；登录页的“忘了密码”点开后的说明
+
+可能原因（逐条判定）：
+
+1. 忘了自己设的密码 —— 判定：问用户；记住过的设备上可能还没退出（控制台 设置 › 访问 里能看到记住的设备）
+2. 密码不是自己设的（谁先打开谁设：开启后没及时设，被局域网里别人设了） —— 判定：acornfox lan-console status --json 的 password_set_at、password_set_from 对不上
+3. 输错了（大小写、输入法） —— 判定：让用户在别处输入框里看着打一遍再试
+
+排查顺序：
+
+1. acornfox lan-console status --json 看开没开、密码什么时候从哪设的
+2. acornfox lan-console devices --json 看记住了哪几台设备
+3. 问用户要不要让所有设备都退出
+
+处置：
+
+- ［2 级 先问用户］acornfox lan-console reset-password（会让所有登录和记住的设备失效；用户说“忘了密码”就是同意）
+- ［2 级 先问用户］只想让某一台设备（例如丢了的手机）退出：acornfox lan-console forget 设备编号，不要重设密码
+
+- 必须先停下问用户：用户的原因不是“忘了密码”（例如只是想让丢了的手机退出）时，先问要不要让所有设备都退出；不要替用户设新密码，也不要让用户把密码发到对话里
+- 确认恢复：acornfox lan-console status --json 的 password_set 是 false，用户在浏览器里设好后变成 true，用新密码能登录
+- 相关编号：LAN-CONSOLE-03、PUBCON-05
+- 演练方法：在测试机上设好密码后运行 acornfox lan-console reset-password，再打开登录页看“忘了密码”，用新密码登录
+
 ## 连接服务器（diagnosis.stage 为 connect）
 
 ### ssh_missing 本机找不到 ssh 命令
@@ -2301,7 +3569,7 @@
 - 分组：连接服务器（diagnosis.stage 为 connect）
 - 出现在：diagnosis.stage 为 connect
 - 默认等级：P1（应用或服务停了，马上处理）
-- 下一步：Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机运行 AcornFox 服务还没发布，请把 AcornFox 装到 Linux 服务器上，再用 `acornfox target add 名字 --ssh 用户@地址` 连接
+- 下一步：Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机的 AcornFox 在虚拟机里：Mac 用 `acornfox mac status`、`acornfox mac doctor` 看，Windows 用 `acornfox windows status`；管理别的服务器则先 `acornfox target add 名字 --ssh 用户@地址` 登记
 - 现象：code local_server_down
 
 可能原因（逐条判定）：
@@ -3934,6 +5202,33 @@
 - 必须先停下问用户：换公网控制台地址之前
 - 确认恢复：换了地址后新地址能打开
 
+### PUBCON-05 忘了公网控制台的密码
+
+- 分组：域名和公网控制台
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：公网控制台的密码是开启时生成的一串字，只存一份不可逆的摘要，找不回来，只能重新生成。登录页的“忘了密码”不能直接重新生成：不登录就能重设等于谁都能抢走控制台，所以只能在服务器上做。
+- 下一步：在服务器上（经 SSH）运行 acornfox public-console enable 公网控制台的域名 --reset-password：生成新密码，只显示这一次，旧密码和旧的登录都立刻失效
+- 现象：用户说“忘了公网控制台的密码”；登录页的“忘了密码”点开后的说明
+
+可能原因（逐条判定）：
+
+1. 生成的密码没保存 —— 判定：问用户；命令输出只显示一次，不会再显示
+2. 密码被输错或被浏览器自动填错 —— 判定：让用户在别处输入框里看着打一遍再试
+
+排查顺序：
+
+1. acornfox public-console status --json 看域名和开没开
+2. 问用户要不要让现在的登录都退出
+
+处置：
+
+- ［2 级 先问用户］acornfox public-console enable 域名 --reset-password（旧密码和旧登录立刻失效；用户说“忘了密码”就是同意）
+
+- 必须先停下问用户：用户的原因不是“忘了密码”时先问；新密码只给用户看一次，不要写进对话记录
+- 确认恢复：用新密码能登录公网控制台，旧密码不行
+- 相关编号：PUBCON-01、LAN-CONSOLE-04
+- 演练方法：在测试机上开启公网控制台后运行 acornfox public-console enable 域名 --reset-password，再用旧密码登录应当失败
+
 ### PDOMAIN-01 平台域名没有指到这台机器
 
 - 分组：域名和公网控制台
@@ -3987,7 +5282,7 @@
 处置：
 
 - ［0 级 只读］照实告诉用户这一版用不了，给出 acornfox open 应用名 的办法
-- ［2 级 先问用户］第三种原因：照 Skill 里“改服务器地址”那一节改 --public-host（要重启服务，先问用户）
+- ［2 级 先问用户］第三种原因：照 Skill 里 install-linux.md 的“改应用访问地址”那一节改 --public-host（要重启服务，先问用户）
 
 - 必须先停下问用户：要改服务器地址、重启服务时
 - 确认恢复：acornfox --json domain base 的 supported 是 true
@@ -4129,6 +5424,466 @@
 - 必须先停下问用户：总是：换掉、清掉平台域名都要用户同意
 - 确认恢复：acornfox domain base 显示新的平台域名（或“还没有设平台域名”）
 
+## 应用数据备份和恢复（BKP）
+
+### BKP-01 磁盘空间不够，不能做备份或恢复
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：做备份要在备份目录所在的磁盘上放下一份应用数据的压缩包；恢复还要先给现在的数据另存一份，并在放 Docker 数据的磁盘上放下备份里的数据。备份目录放不下时，如果有自动另存的旧备份（升级前、恢复前），会先清掉最旧的再做（不清最新的一份、不清正在用来恢复的那份；计划里的 will_prune_for_space 和 say 写明清哪几份，任务结果的 pruned 列出清掉的）；清光能清的还不够才拒绝。空间不够时在动应用之前就拒绝，应用没有被暂停。doctor 在备份目录所在磁盘只剩 1 GB 以内时也会提醒。
+- 下一步：先清理磁盘（删掉不用的旧备份：acornfox backup rm 应用名 备份编号 --yes），或把备份目录所在的磁盘扩一扩，再重试；没有动过应用
+- AcornFox 已经自动做的：没有动应用，也没有留下半截文件
+- 现象：acornfox backup create 或 restore 返回 BKP-01（HTTP 507）；acornfox backup create --plan 的“磁盘空间不够：需要约…，只剩…”；acornfox doctor 的“备份目录所在磁盘只剩…”
+
+可能原因（逐条判定）：
+
+1. 备份目录所在的磁盘快满了［doctor 自动判定］ —— 判定：acornfox backup list 看“所在磁盘剩…”；df -h 数据目录（默认 /var/lib/acornfox）
+2. 旧备份占了太多空间 —— 判定：acornfox backup list 看总大小和每个应用的份数；手动备份默认每个应用留 5 份；自动另存的（升级前、恢复前）至少留 7 天、每种最新 3 份也留着，清掉最旧的自动另存的也不够才会报这个编号
+3. 恢复时放 Docker 数据的磁盘不够 —— 判定：message 写了需要多少、剩多少；df -h /var/lib/docker
+4. 应用的数据本身很大 —— 判定：acornfox backup create 应用 --plan 看“数据约…”
+
+排查顺序：
+
+1. acornfox backup create 应用名 --plan
+2. acornfox backup list
+3. df -h 备份目录和 Docker 数据目录
+
+处置：
+
+- ［0 级 只读］把 --plan 的数字和要删的旧备份告诉用户
+- ［2 级 先问用户］用户同意后删旧备份：acornfox backup rm 应用名 编号 --yes
+- ［2 级 先问用户］磁盘不够大就请用户换大一点的磁盘（要花钱的事由用户决定）
+
+- 必须先停下问用户：删任何备份之前；要换磁盘之前
+- 确认恢复：acornfox backup create 应用名 --plan 的“够不够”是够
+- 演练方法：测试机上用大文件把数据目录所在的磁盘填到只剩很少，再运行 acornfox backup create 应用名 --plan
+
+### BKP-02 读数据卷或写备份文件时出错
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：备份在打包数据卷的时候出了错：读数据卷失败、执行器断了、或者写出来的文件读不完整。应用已经照原样重新启动，没有留下半截的备份。
+- 下一步：看 acornfox logs 和备份目录的 operations.log；应用已经照原样重新启动，重试一次，还不行就把日志给负责的人
+- AcornFox 已经自动做的：应用已经重新启动，半截的备份文件已删掉
+- 现象：acornfox backup create 的任务失败，故障编号 BKP-02；恢复时“把备份写回数据卷…出错”（随后会自动退回，见 BKP-07）
+
+可能原因（逐条判定）：
+
+1. 执行器（acornfox-runner）中途停了或重启了［doctor 自动判定］ —— 判定：systemctl status acornfox-runner；acornfox status
+2. Docker 出了问题（磁盘满、守护进程重启） —— 判定：acornfox doctor 的 Docker 一项；docker info
+3. 容器停不下来或数据卷被别的东西占着 —— 判定：message 写“停不了容器”或“清不掉数据卷”；docker ps -a
+4. 备份目录所在的磁盘写满了 —— 判定：df -h 备份目录；这时通常报 BKP-01
+
+排查顺序：
+
+1. acornfox backup task 任务编号 看是哪一步
+2. acornfox status 应用名 确认应用在运行
+3. tail 备份目录的 operations.log
+4. acornfox doctor
+
+处置：
+
+- ［1 级 可以直接做］应用没在运行就 acornfox start 应用名
+- ［1 级 可以直接做］重试一次 acornfox backup create 应用名
+
+- 必须先停下问用户：重试两次还是同一个错：带上任务的 JSON 和 operations.log 的最后 30 行问负责的人
+- 确认恢复：acornfox backup create 应用名 的任务成功，acornfox backup list 里有新的一份
+- 相关编号：BKP-01、BKP-07
+- 演练方法：备份进行中在测试机上 sudo systemctl restart acornfox-runner
+
+### BKP-03 这个应用正忙：在备份、恢复或部署
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：同一个应用同一时间只做一件备份或恢复的事，而且正在部署的应用不能备份、恢复，删除应用也要等备份或恢复做完。
+- 下一步：等这件事做完再试（acornfox backup task 任务编号 看进度）
+- 现象：acornfox backup create、restore、rm 或 delete 返回 BKP-03（HTTP 409）
+
+可能原因（逐条判定）：
+
+1. 上一份备份或一次恢复还没做完［doctor 自动判定］ —— 判定：acornfox backup list 应用名 最后一行“正在做：任务 …”
+2. 应用正在部署（装、升级、重新部署） —— 判定：acornfox status 应用名 的部署状态
+
+排查顺序：
+
+1. acornfox backup list 应用名
+2. acornfox backup task 任务编号
+
+处置：
+
+- ［0 级 只读］等任务做完（轮询 acornfox backup task，不写固定等待）再重试
+
+- 必须先停下问用户：任务一小时还没结束：带任务 JSON 问负责的人
+- 确认恢复：acornfox backup list 应用名 不再有“正在做”
+- 演练方法：对同一个应用连着运行两次 acornfox backup create 应用名 --no-wait
+
+### BKP-04 找不到这份备份
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：应用没有这个编号的备份：编号写错了，或者它已经被删掉（超出保留份数时旧的会自动清掉）。
+- 下一步：acornfox backup list 应用名 看现有的备份和编号
+- 现象：acornfox backup show、restore、rm 返回 BKP-04（HTTP 404）；编号写 latest 但应用还没有备份
+
+可能原因（逐条判定）：
+
+1. 编号写错了（编号形如 20261124-153012-ab12） —— 判定：对照 acornfox backup list 应用名 的第一列
+2. 这份备份被按保留份数自动清掉了 —— 判定：operations.log 里有“按保留份数清掉旧备份”这一行
+3. 应用名写错了 —— 判定：acornfox backup list 不带应用名看有哪些应用有备份
+
+排查顺序：
+
+1. acornfox backup list
+2. acornfox backup list 应用名
+
+处置：
+
+- ［0 级 只读］用 list 里有的编号重试
+
+- 必须先停下问用户：用户要的那一份确实没有了：告诉用户，问要不要用别的一份
+- 确认恢复：acornfox backup show 应用名 编号 能看到清单
+- 演练方法：acornfox backup show 应用名 20000101-000000-0000
+
+### BKP-05 备份文件不完整或被改过，不能用来恢复
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：备份的清单（meta.json）里记着每个数据文件的大小和校验和，恢复前会逐个核对：缺文件、大小不对、压缩包读不完整、校验和不一致都算。这份备份不会被用来恢复，现在的数据没有动。
+- 下一步：这份备份不能用来恢复，现在的数据没动；换一份备份，或重新做一份
+- AcornFox 已经自动做的：恢复在动任何东西之前就停下了
+- 现象：acornfox backup restore 返回 BKP-05（HTTP 422）；acornfox backup show 应用 编号 --verify 写文件校验不对
+
+可能原因（逐条判定）：
+
+1. 备份文件被人改过、删过，或磁盘出了坏块［doctor 自动判定］ —— 判定：acornfox backup show 应用 编号 --verify 指出是哪个文件
+2. 做备份时服务被强行关掉，留下不完整的文件 —— 判定：备份目录里有以 .partial 结尾的目录（doctor 会提醒，BKP-10）
+3. 备份目录被手动拷贝或移动过，文件没拷全 —— 判定：对比 meta.json 里每个文件的大小和 ls -l
+
+排查顺序：
+
+1. acornfox backup show 应用 编号 --verify
+2. acornfox backup list 应用 看有没有别的备份
+
+处置：
+
+- ［0 级 只读］换一份校验通过的备份重新 --plan 再恢复
+- ［1 级 可以直接做］给应用重新做一份备份
+- ［2 级 先问用户］删掉坏的这份：acornfox backup rm 应用 编号 --yes
+
+- 必须先停下问用户：删这份坏备份之前；所有备份都坏了、又必须恢复时
+- 确认恢复：acornfox backup show 应用 编号 --verify 写“校验和全部核对过”
+- 演练方法：sudo 把备份目录里 vol-0.tar.gz 截短一截，再 acornfox backup restore 应用 编号 --yes
+
+### BKP-06 恢复和删除备份都要用户先同意
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：恢复会用备份里的数据覆盖应用现在的数据（备份之后新写的数据会没有），删除备份后文件找不回来，所以接口不带确认一律拒绝，命令行要加 --yes。
+- 下一步：恢复会用备份里的数据覆盖现在的数据：先告诉用户，用户同意后加 --yes 再运行（先 --plan 看会怎样）
+- 这一项要用户自己确认或操作
+- 现象：acornfox backup restore 或 rm 返回 BKP-06（HTTP 409）
+
+可能原因（逐条判定）：
+
+1. 没有带 --yes（接口请求体没带 confirm: true，删除没带 ?confirm=true） —— 判定：看命令有没有 --yes
+
+排查顺序：
+
+1. acornfox backup restore 应用 编号 --plan
+
+处置：
+
+- ［0 级 只读］把 --plan 的输出原样告诉用户
+- ［2 级 先问用户］用户明确同意后加 --yes 再运行
+
+- 必须先停下问用户：总是：恢复、删备份都要用户先同意，并说清楚会覆盖现在的数据、备份之后的新数据会没有
+- 确认恢复：acornfox backup restore 应用 编号 --yes 的任务开始，最后写“恢复完成”
+- 演练方法：acornfox backup restore 应用 编号（不加 --yes）
+
+### BKP-07 恢复没成功，数据已经自动退回到恢复之前
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：恢复在换上备份的数据之后，应用没能起来（健康检查没过，或某一步出错）。恢复前另存的那份备份已经被用来把数据和版本退回到恢复之前的样子，应用在运行。恢复前的那份备份还留着。
+- 下一步：数据已经退回到恢复之前的样子；看任务里写的失败原因，处理后再试
+- AcornFox 已经自动做的：已用恢复前的备份把数据、变量和版本退回，应用重新启动并通过健康检查
+- 现象：acornfox backup restore 的任务失败，故障编号 BKP-07，任务结果 rolled_back 是 true
+
+可能原因（逐条判定）：
+
+1. 备份里的数据和现在要启动的版本对不上，应用起不来 —— 判定：任务的失败原因里写了应用没能起来；acornfox logs 应用名 看启动日志
+2. 备份是应用有问题时做的，数据本身就坏了 —— 判定：acornfox backup show 应用 编号 看做备份的时间，对照应用出问题的时间
+3. 备份时的程序版本和数据库结构对不上现在的配置 —— 判定：acornfox backup show 应用 编号 的版本和 acornfox versions 应用 对比
+4. 磁盘、内存不够，应用启动超时 —— 判定：acornfox doctor；acornfox stats 应用
+
+排查顺序：
+
+1. acornfox backup task 任务编号 看失败的是哪一步和原因
+2. acornfox status 应用名 确认应用在运行、数据是恢复前的
+3. acornfox logs 应用名
+
+处置：
+
+- ［0 级 只读］把失败原因告诉用户，确认应用现在正常
+- ［2 级 先问用户］换一份更早的备份再 --plan、再恢复（要用户同意）
+
+- 必须先停下问用户：要换别的备份重试、或决定不恢复了
+- 确认恢复：acornfox status 应用名 是运行中；acornfox backup list 应用名 里能看到“恢复前”那份
+- 相关编号：BKP-08、BKP-09
+- 演练方法：sudo 编辑备份目录里的 records.json，把 app.health_path 改成 /不存在的路径，再 acornfox backup restore 应用 编号 --yes
+
+### BKP-08 恢复没成功，自动退回也没成功
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 是什么：恢复失败后，用恢复前另存的备份退回时又出了错。应用现在的数据处在不确定的状态。恢复前的那份备份（任务结果里的 pre_restore_id）还在，里面是恢复之前的数据。
+- 下一步：不要再动这个应用；恢复之前的备份还在（编号见任务结果的 pre_restore_id），马上告诉负责的人
+- 这一项要用户自己确认或操作
+- 现象：acornfox backup restore 的任务失败，故障编号 BKP-08；acornfox doctor 的“恢复没成功，自动退回也没成功”
+
+可能原因（逐条判定）：
+
+1. 退回时执行器或 Docker 出了问题 —— 判定：acornfox doctor；operations.log 里“自动退回也没成功”后面写的原因
+2. 恢复前没能做备份（现在没有数据可备份、或磁盘不够），所以没法退回 —— 判定：任务结果里 pre_restore_id 是空的
+3. 退回后的应用还是起不来 —— 判定：任务 JSON 里 rollback 一步的 detail
+
+排查顺序：
+
+1. acornfox backup task 任务编号 --json
+2. acornfox backup list 应用名 找“恢复前”那份
+3. acornfox doctor
+
+处置：
+
+- ［0 级 只读］把任务 JSON、备份编号和 operations.log 的最后 30 行交给负责的人
+- ［2 级 先问用户］负责的人确认后，用 pre_restore_id 那份备份再恢复一次：acornfox backup restore 应用 编号 --yes
+
+- 必须先停下问用户：总是：这是需要人来处理的故障，不要自己反复重试
+- 确认恢复：应用恢复运行，数据是用户认可的那一份
+- 相关编号：BKP-07
+- 演练方法：纸上演练：恢复进行中让 Docker 重启（会同时打断退回）；不在测试机上真做
+
+### BKP-09 备份时那个版本的程序已经不在这台机器上
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：恢复要把应用换回备份时的版本，但那一版的程序镜像已经被清掉了（升级后旧版本只保留最近几版）。直接拿现在的版本去用旧数据可能起不来，所以默认拒绝。
+- 下一步：备份时的程序版本已不在本机；要在现在的版本上用这份数据，加 --allow-current-version（先问用户）
+- 现象：acornfox backup restore 返回 BKP-09（HTTP 409）；acornfox backup show 应用 编号 写“程序版本已不在本机”
+
+可能原因（逐条判定）：
+
+1. 应用升级过几次，备份时的版本被自动清理了［doctor 自动判定］ —— 判定：acornfox versions 应用名 里没有备份时的那一版
+2. 手动删过镜像 —— 判定：docker images 里没有 acornfox/应用名 的那个镜像
+
+排查顺序：
+
+1. acornfox backup show 应用 编号
+2. acornfox versions 应用名
+
+处置：
+
+- ［0 级 只读］告诉用户这份备份的版本和现在的版本，问要不要在现在的版本上用这份数据
+- ［2 级 先问用户］用户同意后加 --allow-current-version 再恢复
+
+- 必须先停下问用户：要加 --allow-current-version 之前：数据库结构可能和现在的版本对不上，恢复失败会自动退回
+- 确认恢复：acornfox backup restore 应用 编号 --plan 的“版本”一项显示可用，或带 --allow-current-version 恢复成功
+- 相关编号：BKP-07
+
+### BKP-10 备份或恢复被中断，留下半截东西
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：服务在备份或恢复的中途重启了（或被关掉）。备份会留下以 .partial 结尾的半截目录，它不会出现在备份列表里；任务会被标成失败。恢复被打断时应用可能停在换数据的中途，要看恢复前那份备份。
+- 下一步：运行 acornfox doctor 看有没有半截的备份；重新做一份备份，残留的会自己清掉
+- AcornFox 已经自动做的：再给这个应用做一次备份时，残留的半截目录会自动删掉；应用的容器由后台程序重新启动
+- 现象：acornfox doctor 写“有 N 份没做完的备份”或“被服务重启打断了”；acornfox backup task 写任务失败，故障编号 BKP-10
+
+可能原因（逐条判定）：
+
+1. 备份进行中服务重启、升级或机器重启［doctor 自动判定］ —— 判定：任务的失败原因写“服务重启了，这件备份或恢复中途被打断”
+2. 进程被强行杀掉、断电 —— 判定：备份目录下有 .partial 目录；journalctl -u acornfox-server 看有没有异常退出
+
+排查顺序：
+
+1. acornfox doctor
+2. acornfox status 应用名 看应用在不在运行
+3. acornfox backup list 应用名 看恢复前的那份在不在
+
+处置：
+
+- ［1 级 可以直接做］应用没在运行就 acornfox start 应用名
+- ［1 级 可以直接做］给应用重新做一份备份（会清掉半截的）
+- ［2 级 先问用户］被打断的是恢复：看应用数据是不是用户要的；不是就用“恢复前”那份备份恢复（要用户同意）
+
+- 必须先停下问用户：被打断的是恢复，而且应用状态不对时
+- 确认恢复：acornfox doctor 不再提醒；应用在运行
+- 相关编号：BKP-08
+- 演练方法：备份进行中 sudo systemctl restart acornfox-server
+
+### BKP-11 这台机器上的执行器还不支持备份
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：备份要用执行器（acornfox-runner）读写数据卷。执行器比主程序旧（升级到一半、或只升级了一部分）时它不认识这些请求。
+- 下一步：升级 AcornFox 到最新版（acornfox 的执行器要和主程序同版本）
+- 现象：acornfox backup 返回 BKP-11（HTTP 501）；命令行说“服务器上的 AcornFox 版本较旧，不支持应用数据备份”（那是 server_too_old，不是这个编号）
+
+可能原因（逐条判定）：
+
+1. 升级后执行器还没重启，跑着旧版本［doctor 自动判定］ —— 判定：systemctl status acornfox-runner 的启动时间早于升级时间
+2. 主程序和执行器版本不一致 —— 判定：acornfox version（服务器上）和 acornfox status 里的版本
+
+排查顺序：
+
+1. acornfox version
+2. systemctl status acornfox-runner acornfox-server
+
+处置：
+
+- ［2 级 先问用户］重新运行升级命令（get.sh | sudo bash -s -- upgrade）
+
+- 必须先停下问用户：重启服务之前（会让应用的管理界面短暂不可用）
+- 确认恢复：acornfox backup create 应用名 --plan 能返回计划
+
+### BKP-12 这个应用没有装在这台机器上
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：做备份、恢复要有这个应用：应用名写错了，或者应用已经删除。删除应用不会删它的备份，但恢复需要应用存在。
+- 下一步：恢复要先有这个应用：先重新安装一个同名应用（acornfox install），再恢复
+- 现象：acornfox backup create 或 restore 返回 BKP-12（HTTP 404）；acornfox backup list 写“应用已经不在这台机器上，下面是它留下的备份”
+
+可能原因（逐条判定）：
+
+1. 应用名写错了 —— 判定：acornfox apps 看现有的应用
+2. 应用已经被删除（备份还留着） —— 判定：acornfox backup list 应用名 写应用已不在，但有备份
+
+排查顺序：
+
+1. acornfox apps
+2. acornfox backup list
+
+处置：
+
+- ［0 级 只读］应用名写错就改正再试
+- ［0 级 只读］应用被删了：告诉用户先重新安装同名应用（acornfox install），装好后再恢复
+
+- 必须先停下问用户：重新安装之前（安装会新建一份空数据，恢复会覆盖它）
+- 确认恢复：acornfox apps 里有这个应用，acornfox backup restore 应用 编号 --plan 能返回计划
+- 演练方法：acornfox backup create 不存在的应用名
+
+### BKP-13 这个应用没有数据可备份
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：应用没有登记数据卷（也没有附加数据库），数据都在容器里，容器一重建就没有，所以没有东西可备份；或者应用还没有跑起来过，没有程序镜像可以打开数据卷。
+- 下一步：这个应用没有存数据的目录（数据卷），没有东西可备份；先让应用跑起来、产生数据，或确认它的数据目录登记过（acornfox volume add）
+- 现象：acornfox backup create 返回 BKP-13（HTTP 409）
+
+可能原因（逐条判定）：
+
+1. 应用只是个无状态的网页或接口，没有要保存的数据 —— 判定：acornfox apps 看应用详情的数据目录是空的
+2. 应用把数据写在了没登记的目录里（重建容器就丢） —— 判定：acornfox diagnose 里有 unpersisted_database 的提醒
+3. 应用还没有成功上线过，没有镜像 —— 判定：acornfox versions 应用名 没有可用的版本
+
+排查顺序：
+
+1. acornfox status 应用名
+2. acornfox diagnose
+
+处置：
+
+- ［0 级 只读］把原因告诉用户
+- ［2 级 先问用户］数据目录没登记：acornfox volume add 路径 后重新部署（要用户同意，会重新部署）
+
+- 必须先停下问用户：要登记数据目录、重新部署之前
+- 确认恢复：acornfox backup create 应用名 --plan 列出了数据卷
+
+### BKP-14 备份目录写不了
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：备份存在服务器数据目录下的 app-backups/ 里。这个目录建不了、写不进去（权限、磁盘只读、磁盘错误）时不能做备份。acornfox doctor 每次都会试着写一下；备份目录能写时它也用这个编号打一行“可写”。
+- 下一步：检查备份目录的权限和所在磁盘（acornfox doctor 会指出是哪个目录）
+- 现象：acornfox backup create 返回 BKP-14；acornfox doctor 的“备份目录 … 写不进去”
+
+可能原因（逐条判定）：
+
+1. 目录的所有者或权限被改过（后台服务的账号写不进去）［doctor 自动判定］ —— 判定：ls -ld 数据目录/backups；后台服务的账号见 systemctl cat acornfox-server
+2. 磁盘被挂成只读，或有文件系统错误 —— 判定：mount | grep 数据目录所在磁盘；dmesg | tail
+3. 磁盘满了（同时会报 BKP-01） —— 判定：df -h 数据目录
+
+排查顺序：
+
+1. sudo acornfox doctor
+2. ls -ld 数据目录/backups
+3. df -h 数据目录
+
+处置：
+
+- ［0 级 只读］把目录和磁盘的情况告诉用户
+- ［2 级 先问用户］改目录权限、重新挂载磁盘
+
+- 必须先停下问用户：改权限、挂载、动磁盘之前
+- 确认恢复：sudo acornfox doctor 的备份目录一行打勾
+- 相关编号：BKP-01
+
+### BKP-15 恢复之后，有些服务连接和账号要重新接
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：恢复把应用的数据换回了备份时的样子，服务登记表没有动（里面的账号和连接是和别的应用共用的）。如果这个应用是数据库这类服务的提供方，备份之后才发给别的应用的账号，在恢复回来的数据里已经没有了；备份之后换过的连接也可能和恢复回来的设置对不上。这不算恢复失败，是提醒。
+- 下一步：照提示的应用逐个重新接上服务（acornfox services 看，装应用时会重新发账号）
+- 现象：acornfox backup restore 完成后的“要留意：”里带 BKP-15；任务结果的 warnings 里带 BKP-15；某个用这个应用做服务的应用恢复后连不上数据库
+
+可能原因（逐条判定）：
+
+1. 备份之后才有应用接上了这个应用提供的服务，它的账号不在备份里［doctor 自动判定］ —— 判定：warnings 里列出了应用和服务名；acornfox services show 服务名 看谁在用
+2. 备份之后这个应用提供的服务被删过或重装过 —— 判定：warnings 写“现在不在登记表里”；acornfox services list
+3. 备份之后这个应用自己换过连接的服务或账号 —— 判定：warnings 写“连接在备份之后换过”；acornfox services 看它现在用哪条
+
+排查顺序：
+
+1. acornfox backup task 任务编号 看 warnings
+2. acornfox services list
+3. acornfox status 受影响的应用
+
+处置：
+
+- ［0 级 只读］把受影响的应用列给用户
+- ［2 级 先问用户］受影响的应用重新接服务：删掉后重新安装（数据保留则选接旧数据），装的时候平台会重新发账号（要用户同意）
+
+- 必须先停下问用户：要删除或重装任何受影响的应用之前
+- 确认恢复：受影响的应用重新连上服务，acornfox status 正常
+- 相关编号：CAT-SVC-08
+
+### BKP-16 备份的请求写得不对
+
+- 分组：应用数据备份和恢复（BKP）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：备份编号的写法不对（形如 20261124-153012-ab12），备份种类不是 manual、pre-upgrade、pre-restore 之一，或者备注超过 200 个字。
+- 下一步：按提示改请求后重试
+- 现象：acornfox backup 返回 BKP-16（HTTP 400）
+
+可能原因（逐条判定）：
+
+1. 编号写错或带了多余的字符 —— 判定：对照 acornfox backup list 应用名 的第一列
+2. 备注太长 —— 判定：message 写“备注太长”
+
+排查顺序：
+
+1. 读 message
+2. acornfox backup list 应用名
+
+处置：
+
+- ［0 级 只读］照 message 改命令再运行
+
+- 必须先停下问用户：拿不准用户要哪一份备份时
+- 确认恢复：命令成功
+- 演练方法：acornfox backup show 应用 abc
+
 ## 打开应用
 
 ### OPEN-APP-01 应用还没有访问端口
@@ -4230,6 +5985,36 @@
 
 - 必须先停下问用户：要用 sudo 改文件时
 - 确认恢复：acornfox skill install --json 的 installed 里有工作台
+
+### CLI-UPDATE-01 服务器上的 AcornFox 比这台电脑上的命令行新
+
+- 分组：命令行在这台电脑上的操作（安装 Skill）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：命令行连上服务器时问一下服务器的版本；服务器的版本号比自己高，就提醒更新。每台电脑每天最多提醒一次，问版本本身一小时最多一次，记在配置目录的 update-notice.json 里。只是提醒：命令照常运行。电脑上的命令行和 Skill 不会跟着服务器升级，所以要自己更新。
+- 下一步：在这台电脑上更新命令行：国内 curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli，海外把地址换成 https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh；再运行 acornfox skill install 更新 AI 工作台里的 Skill
+- AcornFox 已经自动做的：没有；提醒之后命令照常运行
+- 现象：命令的标准错误里有“提醒：服务器 … 上的 AcornFox 是 … 版，这台电脑上的命令行是 … 版，比服务器旧（CLI-UPDATE-01…）”；--json 的结果里有 notices 字段，里面一项的 code 是 CLI-UPDATE-01
+
+可能原因（逐条判定）：
+
+1. 服务器升级了，电脑上的命令行还是装服务器时的版本 —— 判定：acornfox --json version 的 version 比服务器上 ssh 用户@服务器 acornfox --json version 的低
+2. 同一台服务器被几台电脑管，这一台没更新 —— 判定：对比各台电脑的 acornfox --json version
+
+排查顺序：
+
+1. acornfox --json version
+2. ssh 用户@服务器 acornfox --json version（服务器的版本）
+
+处置：
+
+- ［2 级 先问用户］在这台电脑上运行上面的更新命令（换掉电脑上的命令行程序）
+- ［1 级 可以直接做］acornfox skill install（更新 Skill 文件）
+- ［0 级 只读］不想看到提醒：设环境变量 ACORNFOX_NO_UPDATE_NOTICE=1
+
+- 必须先停下问用户：要更新电脑上的命令行之前（它换掉电脑上的程序）
+- 确认恢复：再运行命令不再出现提醒；acornfox --json version 的版本和服务器的一致
+- 相关编号：version_mismatch、SETUP-SKILL-01
+- 演练方法：用版本号编低的命令行连测试机（构建时 -ldflags 把 internal/cli.Version 设成 0.0.1），删掉配置目录里的 update-notice.json 后运行 acornfox status
 
 ## 应用中心安装（CAT-INST）
 
@@ -4514,16 +6299,17 @@
 - 默认等级：P2（功能用不了，尽快处理）
 - 是什么：镜像从所有来源都没拿到
 - 下一步：看 attempts；国内网络确认已配镜像加速；稍后重试
-- AcornFox 已经自动做的：已依次试过下载网关和各个公共镜像源（先实测，跳过不能用的、慢的排后，拉的过程中太慢会换下一个）
+- AcornFox 已经自动做的：有镜像包的应用先短时间测速，下载网关和镜像站谁快先用谁，失败再换另一条（镜像站里先实测，跳过不能用的、慢的排后，拉的过程中太慢会换下一个）；国内网络不去 Docker Hub、ghcr.io 本身（它们在国内被屏蔽，去了只会白等），message 里写明没去
 - 现象：安装进度停在“下载镜像”，返回 CAT-INST-12，带 attempts（每个镜像源一条：source 是源的地址，code 是它怎么了）
 
 可能原因（逐条判定）：
 
-1. 国内服务器拉公共镜像，能用的镜像源都不通或拒绝访问（例如回 403） —— 判定：attempts 里每个源是 skipped、unreachable 或 not_found；acornfox sources --probe
+1. 国内服务器拉公共镜像，能用的镜像源都不通或拒绝访问（例如回 403）。国内网络不会再去试 Docker Hub、ghcr.io 本身，所以这时直接报这个编号，不再多等一轮 —— 判定：attempts 里每个源是 skipped、unreachable 或 not_found，message 末尾写“国内网络没有去试 registry-1.docker.io”；acornfox sources --probe。这台机器真能直连 Docker Hub（例如有代理）：把 registry-1.docker.io 写进环境变量 ACORNFOX_REGISTRY_MIRRORS（ghcr.io 写进 ACORNFOX_GHCR_MIRRORS），放在镜像源后面
 2. 镜像源都很慢（例如把大的镜像层转到境外下载），一个镜像在总时限 50 分钟里拉不完（拉镜像的时间不算进整次安装的 60 分钟，所以不会因为套装里镜像多、整次安装先到时限而停下） —— 判定：attempts 里是 slow、stalled 或 timeout，message 开头是“拉取镜像超时：50 分钟还没拉完”或写了平均速度和已下多少
 3. 运行器在一个镜像的时限过后还没回话（运行器卡住或重启了） —— 判定：message 里写“运行器也没有回话”，没有 attempts；systemctl status acornfox-runner、journalctl -u acornfox-runner
 4. 网络暂时不通 —— 判定：稍后重试能过
-5. 下载网关没用上（网关不通或时钟不准）［doctor 自动判定］ —— 判定：doctor 的下载网关（SETUP-GW-01）和时钟（SETUP-CLOCK-01）两项
+5. 下载网关没用上（网关不通或时钟不准），message 里带网关那一路的原因［doctor 自动判定］ —— 判定：doctor 的下载网关（SETUP-GW-01）和时钟（SETUP-CLOCK-01）两项
+6. 镜像包经网关分段下载没成（缓存写不了、某一段多次失败），镜像站又都不行［doctor 自动判定］ —— 判定：message 里带 CAT-INST-40；按 CAT-INST-40 的条目处理
 
 排查顺序：
 
@@ -4538,7 +6324,7 @@
 
 - 必须先停下问用户：要改 Docker 配置时
 - 确认恢复：重装成功
-- 相关编号：SETUP-GW-01、SETUP-CLOCK-01、SETUP-NET-03、pull_failed
+- 相关编号：CAT-INST-40、SETUP-GW-01、SETUP-CLOCK-01、SETUP-NET-03、pull_failed
 
 ### CAT-INST-13 网关给的镜像包和目录里签名的校验值对不上
 
@@ -5315,12 +7101,43 @@
 - 相关编号：CAT-LINT-46、CAT-LINT-47、CAT-LINT-49
 - 演练方法：测试机上用一份测试清单，环境变量写 {{platform.region | map "x=1"}}（没有 * 兜底），从本地目录装它
 
+### CAT-INST-40 镜像包经下载网关分段下载没成
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：镜像包经下载网关分段下载没成：下载缓存写不了（磁盘满了或没权限）、某一段连着多次下不下来，或者下载地址反复失效。已经下好的部分留在下载缓存里，下次接着下；公共目录的应用接着换镜像站拉，私有目录的应用停下
+- 下一步：看 message 是哪一种：写缓存失败先看磁盘空间和权限（acornfox doctor 的 SETUP-DISK-01）；某一段多次下不下来，多半是网络或网盘暂时不通，稍后重装会从缓存接着下，已下的不用重下；缓存在数据目录 uploads/dl-cache，3 天没动会自己清，磁盘紧张时可以由用户确认后删；要退回单连接下载，环境变量 ACORNFOX_DL_SEGMENTED=0
+- AcornFox 已经自动做的：已下好的段留在缓存里，重装接着下；地址过期自动向网关要新的（一次下载最多 20 次）；某一段失败自己重试 6 次；公共目录的应用接着换镜像站拉
+- 现象：安装进度的“下载镜像”一步写“下载网关没成功”，message 里带 CAT-INST-40；私有目录的应用安装失败，返回 CAT-INST-26，message 里带这一条的原因
+
+可能原因（逐条判定）：
+
+1. 磁盘满了，或数据目录的 uploads/dl-cache 没有写权限［doctor 自动判定］ —— 判定：message 写“写下载缓存失败”；doctor 的磁盘一项（SETUP-DISK-01）；ls -ld 数据目录/uploads/dl-cache
+2. 网络或网盘暂时不通，某一段连着失败 —— 判定：message 写“第 N 段（共 M 段）连着失败”；稍后重装能接着下
+3. 下载地址反复失效（本机时钟和网关差得多，或网关反复拒绝）［doctor 自动判定］ —— 判定：message 写“换了 N 次下载地址”；doctor 的时钟一项（SETUP-CLOCK-01）和下载网关一项（SETUP-GW-01）
+
+排查顺序：
+
+1. acornfox install status 任务 --json 看 message
+2. sudo acornfox doctor
+3. ls -la 数据目录/uploads/dl-cache 看缓存里已经有多少
+
+处置：
+
+- ［1 级 可以直接做］稍后重装（接着下）
+- ［2 级 先问用户］磁盘紧张时，用户确认后删 uploads/dl-cache 里的文件
+
+- 必须先停下问用户：删缓存之前先问用户
+- 确认恢复：重装成功；安装进度里“下载镜像”一步写“从下载网关下载”并带连接数
+- 相关编号：CAT-INST-12、CAT-INST-13、CAT-INST-26、SETUP-DISK-01、SETUP-GW-01、SETUP-CLOCK-01
+- 演练方法：测试机上装一个有镜像包的应用，下载到一半用 iptables 丢掉到下载地址的包，过 1 分钟再放开；或把数据目录的 uploads/dl-cache 设成只读
+
 ### APP-VARS-01 应用装时算的平台变量和现在的不一样
 
 - 分组：应用中心安装（CAT-INST）
 - 默认等级：P3（提示或用法问题，不急）
-- 是什么：应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。这一版平台不会去改已经装好的应用：应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行。这只是提醒，不是出错
-- 下一步：apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装
+- 是什么：应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行：要让它用上现在的值，用 acornfox apps reapply 重新生效。这只是提醒，不是出错
+- 下一步：apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：先 acornfox apps reapply 应用 --plan 看会改什么、会不会重启它，经用户同意后 acornfox apps reapply 应用 --yes（会按现在的值重写它的环境变量和配置文件并重启，数据不动，失败自动退回）；一次看有哪些应用落后了：acornfox apps affected
 - 现象：acornfox apps vars 应用 里某个平台变量下面写着 APP-VARS-01 和现在的值；acornfox --json apps vars 应用 的 vars[] 里有 differs 为 true、code 为 APP-VARS-01 的行，notes 里也有一句
 
 可能原因（逐条判定）：
@@ -5337,12 +7154,443 @@
 处置：
 
 - ［0 级 只读］告诉用户哪几项不一样、应用里用的还是装时的值（应用照常运行）
-- ［2 级 先问用户］保留数据删掉应用，再用 --reuse-data 重装（对外方式和这台机器给新应用的默认不一样时加 --expose）
+- ［2 级 先问用户］acornfox apps reapply 应用 --plan 看会改什么，用户同意后 acornfox apps reapply 应用 --yes（会重启这个应用，数据不动，失败自动退回）
 
-- 必须先停下问用户：删应用（哪怕保留数据）、重装之前先问用户；不要自己去改应用的环境变量
+- 必须先停下问用户：重新生效会重启应用，先问用户；不要自己去改应用的环境变量
 - 确认恢复：acornfox apps vars 应用 里这几行不再带 APP-VARS-01
-- 相关编号：CAT-INST-24
-- 演练方法：测试机上装一个只本机的应用，运行 acornfox app set --app 应用 --expose lan，再运行 acornfox apps vars 应用
+- 相关编号：APP-APPLY-01、APP-APPLY-03
+- 演练方法：测试机上装一个只本机的应用，运行 acornfox app set --app 应用 --expose lan --no-reapply，再运行 acornfox apps vars 应用
+
+### APP-APPLY-01 这个应用现在不能重新生效
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：这个应用现在不能重新生效：它不是从应用中心装的、装的时候没保存清单或用的是旧格式的清单（那样算不出每一项该是什么），还没有上线，正在装或正在重新生效，或者它停着而这次改动要在应用里做步骤（停着的应用不能在里面做事）。什么都没改
+- 下一步：看 message 是哪一种：正在装或正在重新生效的，用 acornfox install status 任务编号 --wait 等它结束再来；停着的先问用户，同意后 acornfox start 应用，再重新生效；清单没存或是旧格式的，这个应用只能删了重装（保留数据 --reuse-data，要先问用户）
+- 现象：acornfox apps set 或 acornfox apps reapply 返回 APP-APPLY-01（HTTP 409）；acornfox --json apps reapply 应用 的 error.code 是 APP-APPLY-01
+
+可能原因（逐条判定）：
+
+1. 应用不是从应用中心装的，或装的时候没保存清单、用的是旧格式的清单 —— 判定：acornfox apps vars 应用 的 manifest.saved 为 false，或 notes 里写“旧格式”
+2. 应用正在安装或正在重新生效 —— 判定：acornfox install status 任务编号 看任务；error.task_id 是正在跑的那个
+3. 应用停着，而这次改动要在应用里做步骤，或者应用还没上线过 —— 判定：acornfox status 应用 --json 的 desired 是 stopped，或没有当前版本
+
+排查顺序：
+
+1. acornfox apps vars 应用 --json
+2. acornfox status 应用 --json
+
+处置：
+
+- ［1 级 可以直接做］等任务结束或先启动应用后再试
+- ［2 级 先问用户］清单没存或旧格式：只能删了重装（保留数据 --reuse-data）
+
+- 必须先停下问用户：要启动停着的应用、或删了重装时先问用户
+- 确认恢复：再运行 acornfox apps reapply 应用 --plan 不再报 APP-APPLY-01
+- 相关编号：APP-APPLY-03、CAT-INST-04、CAT-INST-36
+- 演练方法：测试机上装一个应用，acornfox stop 应用，运行 acornfox apps set 应用 某项=值（改的是要在应用里做步骤的设置），或对一个自己部署的项目运行 acornfox apps reapply 项目名
+
+### APP-APPLY-02 这一项设置装好以后不能改
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：这一项设置装好以后不能改：清单写了 editable: never（改了应用会坏，例如加密密钥）或 reinstall（要重装才能改），或者这是平台生成的值，或者把必填项清空了、值的格式不对。什么都没改
+- 下一步：按 message 说的做：不能改的，不要想办法绕过（不要手工 env set）；写了“重装才能改”的，问用户同意后保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data）；值不对的，改对再试。acornfox apps vars 应用 看每一项能不能改
+- 现象：acornfox apps set 应用 名=值 返回 APP-APPLY-02（HTTP 409）；message 里写了是哪一项、清单怎么规定的
+
+可能原因（逐条判定）：
+
+1. 清单给这一项写了 editable: never（改了应用就坏）或 reinstall（要重装） —— 判定：acornfox apps vars 应用 里这一行的“能不能改”
+2. 把必填项清空了，或值的格式不对 —— 判定：message 里的要求；acornfox catalog info 应用 看这一项的格式
+
+排查顺序：
+
+1. acornfox apps vars 应用
+
+处置：
+
+- ［1 级 可以直接做］改成合法的值再试
+- ［2 级 先问用户］要重装才能改的，用户同意后保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data）
+
+- 必须先停下问用户：要重装时先问用户（会短暂停掉应用）
+- 确认恢复：acornfox apps set 应用 名=值 --plan 不再报错
+- 相关编号：CAT-INST-02、APP-APPLY-01
+- 演练方法：测试机上装一个应用，对它清单里写了 editable: never 的参数运行 acornfox apps set 应用 名=新值
+
+### APP-APPLY-03 重新生效没成功，已经退回原来的设置
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：重新生效没成功，平台已经把环境变量、启动命令和配置文件、应用的容器都退回了原来的样子，应用照原来的设置在运行，改动没有留下。message 里写了没成功的原因和它的编号（新的容器没起来、健康检查没通过，或清单里“重新生效后做的步骤”没通过）
+- 下一步：把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；多半是用户改的值让应用起不来（例如端口、地址写错），改对了再试一次；先用 acornfox apps set … --plan 看会改什么。应用已经退回，不用再处理
+- 现象：acornfox apps set 或 apps reapply 等到任务失败，error 或 install status 里是 APP-APPLY-03；应用照原来的设置在运行，apps vars 里的值没变
+
+可能原因（逐条判定）：
+
+1. 新设置让应用起不来或健康检查没通过（例如端口、地址写错） —— 判定：message 里带着 CAT-INST-15、CAT-INST-16 之类的编号，acornfox logs 应用 --tail 200 看日志
+2. 清单里“重新生效后做的步骤”没通过 —— 判定：message 里带着 CAT-INST-17 和哪一步
+3. 写配置文件失败（磁盘满、Docker 出错） —— 判定：message 里带着 CAT-INST-14；acornfox doctor 看磁盘
+
+排查顺序：
+
+1. acornfox install status 任务编号 --json 看哪一步没过
+2. acornfox logs 应用 --tail 200
+3. acornfox apps vars 应用 确认值还是原来的
+
+处置：
+
+- ［0 级 只读］告诉用户原因和已经退回，改对设置再试
+- ［0 级 只读］不改任何东西，再运行一次 acornfox apps set … --plan 看会改什么
+
+- 必须先停下问用户：原因看不懂或同一个原因反复出现时，带上 install status 的输出问用户
+- 确认恢复：acornfox status 应用 正常，acornfox apps vars 应用 的值和改之前一样
+- 相关编号：APP-APPLY-04、CAT-INST-15、CAT-INST-16、CAT-INST-17
+- 演练方法：测试机上装一个应用，acornfox apps set 应用 某个会让它起不来的设置=错误的值（例如把监听端口改成别的）
+
+### APP-APPLY-04 重新生效没成功，退回原来的设置时也出了错
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 是什么：重新生效没成功，而且退回原来的样子时也出了错：应用可能停在新旧设置混在一起的状态（环境变量、配置文件或容器有的是新的、有的是旧的）。message 里写了两边的原因
+- 下一步：这是要人处理的：先把 message 告诉用户，不要再重复运行重新生效，不要改密钥或删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；acornfox apps vars 应用 看环境变量是新的还是旧的；用户同意后可以 acornfox restart 应用，或 acornfox apps reapply 应用 --force 再按保存的设置生效一次
+- 这一项要用户自己确认或操作
+- 现象：install status 里这个任务失败，编号是 APP-APPLY-04，message 里有两个原因；应用打不开，或环境变量和配置文件对不上
+
+可能原因（逐条判定）：
+
+1. 退回时重启应用也没成功（Docker、磁盘出了问题） —— 判定：acornfox doctor；acornfox logs 应用 --tail 200
+2. 退回时写配置文件失败 —— 判定：message 里的第二个原因
+
+排查顺序：
+
+1. acornfox status 应用 --json
+2. acornfox apps vars 应用 --json 看环境变量是新的还是旧的
+3. acornfox doctor
+
+处置：
+
+- ［0 级 只读］把两边的原因告诉用户
+- ［2 级 先问用户］acornfox restart 应用，或 acornfox apps reapply 应用 --force 按保存的设置再生效一次
+
+- 必须先停下问用户：总是：先问用户再重启或再生效，不要改密钥、不要删数据
+- 确认恢复：acornfox status 应用 是 running，acornfox apps vars 应用 的值和环境变量对得上
+- 相关编号：APP-APPLY-03
+
+### APP-APPLY-05 这次改动会重启应用，要用户先同意
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：这次改动会重启这个应用（它的地址或设置变了，应用里用到这些值），请求里没有写明用户同意重启，所以什么都没改。这是确认规则，不是出错
+- 下一步：把 message 里写的会改什么、会重启哪个应用告诉用户，问他同意后在同一条命令上加 --yes（接口里是 confirm_restart: true）再运行一次；用户不想重启，可以加 --no-reapply（接口里 reapply: skip）只改访问方式，应用里的地址以后用 acornfox apps reapply 再对
+- 现象：acornfox app set --expose 或 domain add 返回 APP-APPLY-05（HTTP 409），应用的访问方式、域名都没变；message 里写了会改什么、会重启哪个应用
+
+可能原因（逐条判定）：
+
+1. 这个应用的清单里用到了应用地址（app.url 这一族）或别的值，改对外方式、域名会让它们变，要重启才用上新的 —— 判定：message 里列的变化
+
+排查顺序：
+
+1. acornfox apps reapply 应用 --plan 看会改什么
+
+处置：
+
+- ［0 级 只读］把会改什么、会重启哪个应用告诉用户
+- ［2 级 先问用户］用户同意后加 --yes 再运行一次
+- ［2 级 先问用户］用户不想重启：加 --no-reapply 只改访问方式，应用里的地址之后再 acornfox apps reapply
+
+- 必须先停下问用户：总是：会重启应用，先问用户
+- 确认恢复：加 --yes 后命令成功，acornfox apps vars 应用 里 APP-VARS-01 的行没有了
+- 相关编号：APP-VARS-01、APP-APPLY-03
+- 演练方法：测试机上装一个清单里用了 platform.app.url 的应用，运行 acornfox app set --app 应用 --expose lan（不加 --yes）
+
+### APP-UPG-01 这个应用现在不能升级
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：这个应用现在不能升级：目录里没有比现在装的更新的版本，它不是从应用中心装的、装的时候没保存清单或用的是旧格式的清单，还没有上线，停着，正在安装、重新生效或升级，或者它来自已断开的私有目录。什么都没改
+- 下一步：看 message 是哪一种：没有新版本就是已经最新，不用处理；正在装、重新生效或升级的，acornfox install status 任务编号 --wait 等它结束再来；停着的先问用户，同意后 acornfox start 应用再升级；清单没存或是旧格式的，这个应用只能删了重装（保留数据 --reuse-data，要先问用户）
+- 现象：acornfox apps upgrade 应用 返回 APP-UPG-01（HTTP 409），什么都没改；apps outdated 的 blocked_code 是 APP-UPG-01
+
+可能原因（逐条判定）：
+
+1. 目录里没有比现在装的更新的版本 —— 判定：acornfox apps outdated 看这个应用有没有新版本；先 acornfox catalog sync 再看
+2. 应用停着、还没上线，或正在安装、重新生效、升级 —— 判定：acornfox status 应用；acornfox install status 看正在跑的任务
+3. 不是从应用中心装的，装的时候没保存清单，或用的是旧格式的清单 —— 判定：acornfox apps vars 应用 的说明里写了清单有没有存
+4. 应用来自已断开的私有目录 —— 判定：acornfox catalog sources 看目录有没有断开
+
+排查顺序：
+
+1. acornfox apps outdated 看有没有新版本
+2. acornfox status 应用 看它在不在运行
+3. acornfox apps upgrade 应用 --plan 看 message
+
+处置：
+
+- ［0 级 只读］告诉用户这个应用现在升不了和原因
+- ［2 级 先问用户］应用停着：用户同意后 acornfox start 应用，再升级
+
+- 必须先停下问用户：停着的应用要启动、旧格式的应用要删了重装时，先问用户
+- 确认恢复：acornfox apps upgrade 应用 --plan 不再报这个编号
+- 相关编号：APP-UPG-04、APP-APPLY-01
+- 演练方法：测试机上对一个已经是最新版本的应用运行 acornfox apps upgrade 应用 --plan
+
+### APP-UPG-02 新版本要用户先补一样东西
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：新版本要用户先补一样东西才能升级：多了一项必填、又没有默认值的设置，或者要的内存比现在给这个应用的多。升级前就停下了，什么都没改，也没留快照
+- 下一步：按 message 里写的补：缺的设置问到用户给的值，升级时加 --set 设置名=值（密码类写 设置名=-，从标准输入给）；内存不够就问用户，同意后 acornfox app set --app 应用 --memory 数字，再升级。补好以后先 acornfox apps upgrade 应用 --plan 看一遍
+- 现象：acornfox apps upgrade 应用 --plan 里 can_upgrade 是 false，blocked_code 是 APP-UPG-02；message 里写了缺哪一项设置，或要多少内存
+
+可能原因（逐条判定）：
+
+1. 新版本多了一项必填、又没有默认值的设置 —— 判定：plan 的 vars_added 里列了新增的设置；message 里写了设置名
+2. 新版本要的内存比现在给这个应用的多 —— 判定：message 里写了新版本要多少、现在给了多少；acornfox status 应用 看内存
+
+排查顺序：
+
+1. acornfox apps upgrade 应用 --plan --json 看 blocked 和 vars_added
+2. 向用户要缺的设置的值，或问他同不同意调大内存
+
+处置：
+
+- ［0 级 只读］告诉用户缺什么
+- ［2 级 先问用户］用户给了值：升级时加 --set 设置名=值
+- ［2 级 先问用户］用户同意调大内存：acornfox app set --app 应用 --memory 数字
+
+- 必须先停下问用户：设置的值和内存都要先问用户，不要自己编一个值
+- 确认恢复：acornfox apps upgrade 应用 --plan 里 can_upgrade 是 true
+- 相关编号：APP-UPG-03、CAT-INST-02
+- 演练方法：测试机上装一个应用，再换上一个多了必填设置的新版本目录，运行 acornfox apps upgrade 应用 --plan
+
+### APP-UPG-03 新版本这一版不能原地升级
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：新版本和现在装的在这几处不一样，这一版 AcornFox 不能原地升级：多了数据目录、提供的服务变了，或者多需要一个必须的服务（平台不替用户去接别的应用的服务）。升级前就停下了，什么都没改，也没留快照
+- 下一步：把 message 里写的告诉用户：现在这个应用照常用，只是不能升到这个版本。要用新版本，用户同意后保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data；多了必须的服务的，先登记一条已有的：acornfox services add …）；不同意就先不升，不要想办法绕过
+- 现象：acornfox apps upgrade 应用 --plan 里 can_upgrade 是 false，blocked_code 是 APP-UPG-03；message 写了新版本和现在的哪里不一样
+
+可能原因（逐条判定）：
+
+1. 新版本多了数据目录 —— 判定：message 里写了目录；plan 的 notes 里也有
+2. 新版本提供的服务和现在的不一样 —— 判定：message 里写了两边提供的服务类型
+3. 新版本多需要一个必须的服务，或某个服务的类型变了 —— 判定：plan 的 uses_changed 里列了
+
+排查顺序：
+
+1. acornfox apps upgrade 应用 --plan --json 看 blocked 和 uses_changed
+2. acornfox services list 看有没有能提供那个服务的
+
+处置：
+
+- ［0 级 只读］告诉用户这个版本现在升不了和原因，应用照常用
+- ［2 级 先问用户］用户同意：保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data）
+
+- 必须先停下问用户：重装会删掉应用再装，总是先问用户；不要为了升级去装别的应用
+- 确认恢复：acornfox apps upgrade 应用 --plan 里 can_upgrade 是 true，或重装后 acornfox status 应用 是新版本
+- 相关编号：APP-UPG-02、CAT-INST-31
+- 演练方法：测试机上装一个应用，再换上一个多了数据目录的新版本目录，运行 acornfox apps upgrade 应用 --plan
+
+### APP-UPG-04 升级会重启应用，要用户先同意
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：升级会重启这个应用（先留一份快照，再换新版本，中间有一段时间用不了），请求里没有写明用户同意，所以什么都没做。这是确认规则，不是出错
+- 下一步：把 acornfox apps upgrade 应用 --plan 说的会做什么、要停多久告诉用户，问他同意后在同一条命令上加 --yes（接口里是 confirm_restart: true）再运行一次
+- 现象：acornfox apps upgrade 应用 返回 APP-UPG-04（HTTP 409），什么都没做；message 里写了会做什么、会停多久
+
+可能原因（逐条判定）：
+
+1. 升级一定会重启应用（先留快照，再换新版本），请求里没有写明用户同意 —— 判定：message 里是 plan 的 summary
+
+排查顺序：
+
+1. acornfox apps upgrade 应用 --plan 看会做什么
+
+处置：
+
+- ［0 级 只读］把 plan 的 summary 告诉用户
+- ［2 级 先问用户］用户同意后加 --yes 再运行一次
+
+- 必须先停下问用户：总是：会重启应用，先问用户
+- 确认恢复：加 --yes 后命令开始升级，acornfox install status 任务编号 --wait 看结果
+- 相关编号：APP-UPG-05、APP-APPLY-05
+- 演练方法：测试机上装一个应用，运行 acornfox apps upgrade 应用（不加 --yes）
+
+### APP-UPG-05 升级没成功，已经退回到升级前
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：升级没成功，平台已经自动退回到升级前：数据、设置、程序版本都恢复成升级前留的快照，应用照原来的版本在运行。message 里写了没成功的原因和它的编号（新版本没拉下来、没留成快照、容器没起来、健康检查没通过，或清单里“重新生效后做的步骤”没通过）
+- 下一步：把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；原因是磁盘不够、网络不通这类的，处理好了再升级一次；应用已经退回，不用再处理，也不要重复升级
+- 现象：acornfox apps upgrade 等到任务失败，error 或 install status 里是 APP-UPG-05；应用照旧在运行，版本还是升级前的，数据和设置也是升级前的
+
+可能原因（逐条判定）：
+
+1. 新版本的镜像没拉下来（网络、磁盘） —— 判定：message 里带着 CAT-INST-12 之类的编号；acornfox doctor
+2. 没能留成升级前的快照（磁盘不够） —— 判定：message 里带着 BKP-01；acornfox backup list 应用 看有没有旧备份可以删
+3. 新版本的容器没起来或健康检查没通过 —— 判定：message 里带着 CAT-INST-15、CAT-INST-16；acornfox logs 应用 --tail 200
+4. 清单里“重新生效后做的步骤”没通过 —— 判定：message 里带着 CAT-INST-17 和哪一步
+
+排查顺序：
+
+1. acornfox install status 任务编号 --json 看哪一步没过
+2. acornfox status 应用 确认版本是升级前的
+3. acornfox logs 应用 --tail 200
+
+处置：
+
+- ［0 级 只读］告诉用户原因和已经退回
+- ［0 级 只读］原因是磁盘、网络：处理好后再 acornfox apps upgrade 应用 --plan
+- ［2 级 先问用户］用户同意后再升级一次
+
+- 必须先停下问用户：同一个原因反复出现时，带上 install status 的输出问用户，不要一直重试
+- 确认恢复：acornfox status 应用 正常，acornfox apps outdated 里它还是原来的版本、新版本还在
+- 相关编号：APP-UPG-06、BKP-01、CAT-INST-15、CAT-INST-16
+- 演练方法：测试机上装一个应用，把目录换成一个健康检查一定不过的新版本，运行 acornfox apps upgrade 应用 --yes
+
+### APP-UPG-06 升级没成功，退回到升级前时也出了错
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 是什么：升级没成功，而且退回到升级前时也出了错：应用可能停在新旧混在一起的状态（程序是旧的、数据可能已经被新版本改过，或设置有的新有的旧）。message 里写了两边的原因，升级前的快照还在
+- 下一步：这是要人处理的：先把 message 告诉用户，不要再重复升级，不要删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；用户同意后用升级前的快照恢复：acornfox backup list 应用 找到类型是升级前的那份，再 acornfox backup restore 应用 备份编号 --yes（先 --plan 看会怎样）
+- 这一项要用户自己确认或操作
+- 现象：install status 里这个任务失败，编号是 APP-UPG-06，message 里有两个原因；应用打不开，或版本、数据和设置对不上
+
+可能原因（逐条判定）：
+
+1. 用快照退回时失败（磁盘不够存恢复前备份、快照文件有问题、Docker 出错） —— 判定：message 里的第二个原因（带 BKP 编号）；acornfox doctor
+2. 快照退回不成，改退程序和设置时也失败 —— 判定：message 里写了
+
+排查顺序：
+
+1. acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子
+2. acornfox backup list 应用 看升级前的快照还在不在
+3. acornfox apps vars 应用 看设置是新的还是旧的
+
+处置：
+
+- ［0 级 只读］先把 message 告诉用户，什么都不要再动
+- ［2 级 先问用户］用户同意后用升级前的快照恢复：acornfox backup restore 应用 备份编号 --yes
+
+- 必须先停下问用户：总是：数据可能已经被新版本改过，恢复会覆盖现在的数据，先问用户
+- 确认恢复：acornfox status 应用 正常，acornfox apps vars 应用 的值和升级前一样
+- 回滚：恢复前会先另存现在的数据（备份类型“恢复前”），恢复错了可以再恢复它
+- 相关编号：APP-UPG-05、BKP-08、APP-APPLY-04
+- 演练方法：较难造；纸面演练：升级失败的同时让备份目录写不进去
+
+### APP-UPG-07 没有可以退回的东西
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：没有可以退回的东西：这个应用还没升级过（没有升级前的快照），或者快照已经被后来的升级覆盖、被删掉，或者快照就是现在这个版本的，或者快照的文件不齐、那个版本的程序已经不在这台机器上了。什么都没改
+- 下一步：看 message 是哪一种：没升级过或已经退回过，就没有可退的，不用处理；快照坏了或程序没了，告诉用户这条路走不通，别的备份用 acornfox backup list 应用 看有没有能用的
+- 现象：acornfox apps rollback 应用 返回 APP-UPG-07（HTTP 409），什么都没改
+
+可能原因（逐条判定）：
+
+1. 这个应用还没升级过，或快照已经被后来的升级覆盖、被删掉 —— 判定：acornfox backup list 应用 里没有类型是升级前的备份
+2. 快照就是现在这个版本的（已经退回过） —— 判定：acornfox apps outdated 里这个应用的 can_rollback 是 false
+3. 快照的文件不齐，或那个版本的程序已经不在这台机器上 —— 判定：acornfox apps rollback 应用 --plan 的 blocked 里写了
+
+排查顺序：
+
+1. acornfox apps rollback 应用 --plan 看 blocked
+2. acornfox backup list 应用
+
+处置：
+
+- ［0 级 只读］告诉用户没有可退的和原因
+
+- 必须先停下问用户：没有能用的快照时，别的备份能不能用要问用户
+- 确认恢复：acornfox apps rollback 应用 --plan 里 can_rollback 是 true
+- 相关编号：APP-UPG-08、BKP-05、BKP-09
+- 演练方法：测试机上对一个没升级过的应用运行 acornfox apps rollback 应用 --plan
+
+### APP-UPG-08 退回会丢掉升级后的新数据，要用户先同意
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：退回到升级前会用升级前留的快照覆盖现在的数据：升级之后写进应用的新数据会没有（退回前会先把现在的数据另存一份，需要时能找回），应用会重启一次。请求里没有写明用户同意，所以什么都没做。这是确认规则，不是出错
+- 下一步：把 acornfox apps rollback 应用 --plan 说的告诉用户，特别是“升级后的新数据会没有”，问他同意后加 --yes（接口里是 confirm: true）再运行一次
+- 现象：acornfox apps rollback 应用 返回 APP-UPG-08（HTTP 409），什么都没做
+
+可能原因（逐条判定）：
+
+1. 退回要用升级前的快照覆盖现在的数据，请求里没有写明用户同意 —— 判定：message 里是 plan 的 summary
+
+排查顺序：
+
+1. acornfox apps rollback 应用 --plan 看会做什么
+
+处置：
+
+- ［0 级 只读］把 plan 的 summary 告诉用户，特别是升级后的新数据会没有
+- ［2 级 先问用户］用户同意后加 --yes 再运行一次
+
+- 必须先停下问用户：总是：会丢数据，先问用户
+- 确认恢复：加 --yes 后命令开始退回，acornfox install status 任务编号 --wait 看结果
+- 相关编号：APP-UPG-07、BKP-06
+- 演练方法：测试机上升级一个应用后运行 acornfox apps rollback 应用（不加 --yes）
+
+### APP-UPG-09 退回没成功，应用保持退回前的样子
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P2（功能用不了，尽快处理）
+- 是什么：退回没成功，应用已经保持退回前的样子（还是升级后的版本，数据没变）。message 里写了原因和它的编号（磁盘不够、快照有问题、容器没起来……）
+- 下一步：把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；处理好了可以再退回一次
+- 现象：acornfox apps rollback 等到任务失败，error 或 install status 里是 APP-UPG-09；应用还是升级后的版本，数据没变
+
+可能原因（逐条判定）：
+
+1. 磁盘不够存退回前的那份数据 —— 判定：message 里带着 BKP-01
+2. 快照有问题，或那个版本的程序不在了 —— 判定：message 里带着 BKP-05、BKP-09
+3. 换回旧版本后容器没起来 —— 判定：message 里带着 BKP-07 和原因；acornfox logs 应用 --tail 200
+
+排查顺序：
+
+1. acornfox install status 任务编号 --json 看哪一步没过
+2. acornfox status 应用 确认版本还是升级后的
+
+处置：
+
+- ［0 级 只读］告诉用户原因，应用没变
+- ［0 级 只读］处理好原因后再 acornfox apps rollback 应用 --plan
+
+- 必须先停下问用户：同一个原因反复出现时带上输出问用户
+- 确认恢复：acornfox status 应用 正常；处理好后再退回能成功
+- 相关编号：APP-UPG-10、BKP-07、BKP-01
+- 演练方法：测试机上升级一个应用，把备份目录所在磁盘填满后运行 acornfox apps rollback 应用 --yes
+
+### APP-UPG-10 退回没成功，回到退回前的样子时也出了错
+
+- 分组：应用中心安装（CAT-INST）
+- 默认等级：P1（应用或服务停了，马上处理）
+- 是什么：退回没成功，而且回到退回前的样子时也出了错：应用可能停在新旧混在一起的状态。message 里写了两边的原因，退回前另存的那份数据还在
+- 下一步：这是要人处理的：先把 message 告诉用户，不要再重复退回，不要删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；acornfox backup list 应用 里有退回前另存的那份（类型是恢复前），问用户同意后用它恢复
+- 这一项要用户自己确认或操作
+- 现象：install status 里这个任务失败，编号是 APP-UPG-10；应用打不开，或数据、版本对不上
+
+可能原因（逐条判定）：
+
+1. 退回途中失败，用退回前另存的那份数据回来时也失败 —— 判定：message 里带着 BKP-08 和另存那份的备份编号
+
+排查顺序：
+
+1. acornfox status 应用 和 acornfox logs 应用 --tail 200
+2. acornfox backup list 应用 找类型是恢复前的那份
+
+处置：
+
+- ［0 级 只读］先把 message 告诉用户，什么都不要再动
+- ［2 级 先问用户］用户同意后用恢复前那份恢复：acornfox backup restore 应用 备份编号 --yes
+
+- 必须先停下问用户：总是：恢复会覆盖现在的数据，先问用户
+- 确认恢复：acornfox status 应用 正常，数据是用户认的那一份
+- 相关编号：APP-UPG-09、BKP-08
+- 演练方法：较难造；纸面演练
 
 ## 连接私有目录（CAT-CONN）
 
@@ -5802,11 +8050,11 @@
 - 相关编号：CAT-SVC-08
 - 演练方法：在测试机上装一个写了 ready 的提供方，让它的就绪检查不过（例如数据库提供方的检查数账号、还没有使用方时是 0 个），运行 acornfox services list 和 acornfox doctor：状态“还不能用”，doctor 警告 CAT-SVC-09；装一个使用方后这一项通过
 
-## 应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+## 应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 
 ### CAT-SYNC-01 程序里没有受信公钥，不同步目录
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：不用处理：只用程序内置的目录；升级到带公钥的版本后会自动联网同步
 - 现象：acornfox catalog sync 返回 CAT-SYNC-01（skipped）；doctor 的应用目录一项写“没有受信公钥，只用内置目录”
@@ -5828,7 +8076,7 @@
 
 ### CAT-SYNC-02 目录来源连不上、超时或返回了非 200
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：检查服务器能不能访问 acornfox.com 和 gitee.com；稍后再 acornfox catalog sync
 - AcornFox 已经自动做的：这个来源失败后自动换下一个来源
@@ -5855,7 +8103,7 @@
 
 ### CAT-SYNC-03 目录来源返回的内容读不懂
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：多半是地址指错或中间有代理改了内容；稍后再同步，还不行就反馈
 - AcornFox 已经自动做的：自动换下一个来源，没写进缓存
@@ -5880,7 +8128,7 @@
 
 ### CAT-SYNC-04 目录的签名验不过
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：没有用它，继续用手上的目录。持续出现就停下反馈：来源上的目录可能被篡改
 - AcornFox 已经自动做的：没写进缓存，自动换下一个来源
@@ -5905,7 +8153,7 @@
 
 ### CAT-SYNC-05 version.txt 和签名里的序号不一致（来源正在发布）
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：等几分钟再 acornfox catalog sync
 - AcornFox 已经自动做的：自动换下一个来源
@@ -5928,7 +8176,7 @@
 
 ### CAT-SYNC-06 来源上的目录不比手上的新（旧镜像或重放）
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：不用处理：手上的已经更新；镜像来源过一阵会跟上
 - AcornFox 已经自动做的：拒绝用更旧的目录，继续用手上的
@@ -5951,7 +8199,7 @@
 
 ### CAT-SYNC-07 本机的目录缓存写不进去
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：检查数据目录所在磁盘和权限（acornfox doctor），处理后再 acornfox catalog sync
 - AcornFox 已经自动做的：旧的缓存原样保留
@@ -5976,7 +8224,7 @@
 
 ### CAT-SYNC-08 所有目录来源都失败，继续用手上的目录
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：看 attempts 里每个来源的编号逐个处理；不影响已装的应用，安装时用手上的目录
 - AcornFox 已经自动做的：继续用手上的目录（缓存或内置）
@@ -6000,7 +8248,7 @@
 
 ### CAT-SYNC-09 另一次同步占着目录缓存
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：等一会儿再同步；不要并行跑多个 catalog sync
 - 现象：catalog sync 返回 CAT-SYNC-09
@@ -6022,7 +8270,7 @@
 
 ### CAT-SYNC-10 向下载网关取私有目录失败
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：手上的私有目录照旧能用；看 doctor 的下载网关和时钟两项，稍后再同步
 - AcornFox 已经自动做的：手上的私有目录缓存保留
@@ -6047,7 +8295,7 @@
 
 ### CAT-SYNC-11 私有目录已断开（授权被撤销或目录停用）
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P3（提示或用法问题，不急）
 - 下一步：已装好的应用照常运行，但不能再装、不能升级；告诉用户联系给码的人
 - AcornFox 已经自动做的：这个私有目录的缓存已删掉
@@ -6071,7 +8319,7 @@
 
 ### CAT-SYNC-12 签名的索引写明属于别的目录
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：没有用它。公共同步时自动换下一个来源；私有目录持续出现就停下反馈
 - AcornFox 已经自动做的：拒绝用它
@@ -6094,7 +8342,7 @@
 
 ### CAT-LOAD-01 目录缓存和程序内置的目录都用不了
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P1（应用或服务停了，马上处理）
 - 下一步：应用中心打不开。先 acornfox catalog sync；还不行就重装同一版本的 AcornFox（保留数据）
 - 现象：应用中心列表、安装都报目录读不了
@@ -6117,9 +8365,195 @@
 - 必须先停下问用户：重装之前；带上证据包
 - 确认恢复：acornfox catalog list 正常
 
+### CAT-SHOW-01 展示内容（show.json）没有签名，或签名验不过
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：应用中心退回用清单里的名字和一句话，装应用不受影响；下一次发布会带新的。持续出现就告诉维护者
+- AcornFox 已经自动做的：没有用这一份展示内容，没写进缓存；目录本身照常同步
+- 现象：doctor 的“展示内容”一项警告 CAT-SHOW-01；acornfox catalog show 应用 提示展示内容没法用；应用中心里应用的一句话和介绍是清单里的原话
+
+可能原因（逐条判定）：
+
+1. 发布时没带 show.json.sig，或它被换掉、损坏 —— 判定：catalog sync --json 的 show.code 是 CAT-SHOW-01；换 ACORNFOX_CATALOG_SOURCES 指到另一个来源后正常
+2. 发布时签展示内容用的钥匙，这个版本的程序不认识 —— 判定：升级 AcornFox 后正常；catalog verify 发布目录 --pubkey 公钥 报 CAT-SHOW-01
+
+排查顺序：
+
+1. acornfox --json catalog sync
+2. sudo acornfox doctor 看“展示内容”那一行
+3. acornfox catalog show 应用
+
+处置：
+
+- ［1 级 可以直接做］acornfox catalog sync（只读取目录，可重复）
+- ［2 级 先问用户］绕过签名——绝不
+
+- 必须先停下问用户：持续出现时：告诉维护者，带上 catalog sync --json 的输出
+- 确认恢复：acornfox catalog sync 之后 doctor 的展示内容一项通过
+- 相关编号：CAT-SYNC-04、CAT-SHOW-02、CAT-SHOW-03
+
+### CAT-SHOW-02 展示内容的序号和目录的序号对不上
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：这一份展示内容没有用，应用中心退回用清单里的名字和一句话；下一次发布会对上
+- AcornFox 已经自动做的：没有用这一份展示内容，没写进缓存
+- 现象：doctor 的“展示内容”一项警告 CAT-SHOW-02
+
+可能原因（逐条判定）：
+
+1. 来源正在发布，show.json 和 index.json 是两次发布的文件 —— 判定：几分钟后 acornfox catalog sync 再看
+2. 镜像来源只更新了其中一个文件 —— 判定：catalog sources 对照各来源的 version.txt 和 show.json 里的 serial
+
+排查顺序：
+
+1. 等几分钟后 acornfox catalog sync
+2. acornfox --json catalog sync 看 show
+
+处置：
+
+- ［1 级 可以直接做］稍后再同步
+
+- 必须先停下问用户：持续出现时：告诉维护者发布流程把两个文件分开发了
+- 确认恢复：acornfox catalog sync 之后 doctor 的展示内容一项通过
+- 相关编号：CAT-SYNC-05、CAT-SHOW-01
+
+### CAT-SHOW-03 展示内容的格式不对
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：这一份展示内容没有用，应用中心退回用清单里的名字和一句话；告诉维护者用 acornfox catalog verify 查发布目录
+- AcornFox 已经自动做的：没有用这一份展示内容，没写进缓存
+- 现象：doctor 的“展示内容”一项警告 CAT-SHOW-03
+
+可能原因（逐条判定）：
+
+1. 不是 schema 1 的 catalog-show 文档，或缺字段 —— 判定：catalog verify 发布目录 报 CAT-SHOW-03，message 写了是哪一处
+2. 某个应用或解决方案的介绍超过 64 KB，或编号写了两次 —— 判定：catalog verify 发布目录的 message
+3. 这个版本的程序比发布的格式旧，认不了新格式 —— 判定：message 里 schema 大于 1；升级 AcornFox 后正常
+
+排查顺序：
+
+1. acornfox --json catalog sync
+2. 维护者：acornfox catalog verify 发布目录
+
+处置：
+
+- ［0 级 只读］不用处理
+
+- 必须先停下问用户：持续出现时：告诉维护者，带上 message
+- 确认恢复：acornfox catalog sync 之后 doctor 的展示内容一项通过
+- 相关编号：CAT-SHOW-01
+
+### CAT-SHOW-04 取展示内容（show.json）失败
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：目录已经同步成功，只是展示内容没取到；下次同步会再取一次
+- AcornFox 已经自动做的：目录照常同步；这一份展示内容没有用，下次同步再试
+- 现象：doctor 的“展示内容”一项警告 CAT-SHOW-04
+
+可能原因（逐条判定）：
+
+1. 取 show.json 时网络断了、超时，或来源返回了 200 和 404 以外的状态 —— 判定：curl -sS -m 10 -o /dev/null -w '%{http_code}' https://acornfox.com/catalog/show.json
+2. 文件比 8 MB 的上限还大 —— 判定：curl 下来看大小
+
+排查顺序：
+
+1. acornfox catalog sync
+2. curl 目录来源的 show.json
+
+处置：
+
+- ［1 级 可以直接做］稍后再同步
+
+- 必须先停下问用户：一直这样时：带上 catalog sync --json 的输出
+- 确认恢复：acornfox catalog sync 之后 doctor 的展示内容一项通过
+- 相关编号：CAT-SYNC-02
+
+### CAT-SKILL-01 应用或解决方案的操作手册没取到
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：这份手册暂时没有，应用照常装，AI 工作台照通用 Skill 做；下次同步目录会再取一次
+- AcornFox 已经自动做的：目录和展示内容照常同步；没取到的手册没有用，之后每次同步都会补取
+- 现象：doctor 的“操作手册”一项警告 CAT-SKILL-01；acornfox catalog skill 应用 说有手册但这台机器上用不了；catalog sync --json 的 skills.failed 里有它
+
+可能原因（逐条判定）：
+
+1. 取手册时网络断了、超时，或来源返回了 200 以外的状态 —— 判定：catalog sync --json 的 skills.failed[].message 写了哪一份、什么原因；curl -sS -m 10 -o /dev/null -w '%{http_code}' https://acornfox.com/catalog/skills/app-应用编号.md
+2. 来源上没有这个文件（HTTP 404）：发布时只发了展示内容、没发 skills/ 目录 —— 判定：同上，返回 404；告诉维护者用 acornfox catalog verify 发布目录 查
+3. 本地缓存里的文件被删了 —— 判定：acornfox catalog sync 之后恢复
+
+排查顺序：
+
+1. acornfox --json catalog sync 看 skills
+2. acornfox --json catalog skill 应用编号 看 code 和 note
+
+处置：
+
+- ［1 级 可以直接做］acornfox catalog sync（只读取目录，可重复）
+
+- 必须先停下问用户：一直这样时：告诉维护者，带上 catalog sync --json 的输出
+- 确认恢复：acornfox catalog sync 之后 doctor 的操作手册一项通过，acornfox catalog skill 应用编号 能取到全文
+- 相关编号：CAT-SKILL-02、CAT-SHOW-04、CAT-SYNC-02
+
+### CAT-SKILL-02 操作手册的大小或 sha256 和展示内容里写的对不上
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：这份手册已丢弃、没有用，应用照常装，AI 工作台照通用 Skill 做；下次同步会再取；持续出现告诉维护者
+- AcornFox 已经自动做的：没写进缓存，不会被使用；之后每次同步都会再试
+- 现象：doctor 的“操作手册”一项警告 CAT-SKILL-02；catalog sync --json 的 skills.failed 里有它
+
+可能原因（逐条判定）：
+
+1. 来源正在发布，展示内容和手册文件是两次发布的 —— 判定：几分钟后 acornfox catalog sync 再看
+2. 手册文件在传输中被改过或截断（代理、镜像） —— 判定：换 ACORNFOX_CATALOG_SOURCES 指到另一个来源后正常
+3. 发布目录里的手册和 show.json 登记的不一致，或手册不是文本 —— 判定：维护者：acornfox catalog verify 发布目录 报 CAT-SKILL-02
+
+排查顺序：
+
+1. 等几分钟后 acornfox catalog sync
+2. acornfox --json catalog sync 看 skills.failed
+
+处置：
+
+- ［1 级 可以直接做］稍后再同步
+- ［2 级 先问用户］绕过校验使用这份手册——绝不
+
+- 必须先停下问用户：持续出现时：告诉维护者，带上 catalog sync --json 的输出
+- 确认恢复：acornfox catalog sync 之后 doctor 的操作手册一项通过
+- 相关编号：CAT-SKILL-01、CAT-SHOW-02
+
+### CAT-SKILL-03 操作手册超过 32 KB 上限
+
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
+- 默认等级：P3（提示或用法问题，不急）
+- 下一步：不用处理：这份手册没有用，应用照常装；告诉维护者把它缩短到 32 KB 以内
+- AcornFox 已经自动做的：没下载、不使用
+- 现象：doctor 的“操作手册”一项警告 CAT-SKILL-03
+
+可能原因（逐条判定）：
+
+1. 展示内容里登记的手册大小超过 32 KB，或取到的文件比它大 —— 判定：catalog sync --json 的 skills.failed[].message；维护者：acornfox catalog verify 发布目录
+
+排查顺序：
+
+1. acornfox --json catalog sync 看 skills.failed
+
+处置：
+
+- ［0 级 只读］不用处理
+
+- 必须先停下问用户：持续出现时：告诉维护者哪一份超长
+- 确认恢复：维护者重新发布后，acornfox catalog sync 再看 doctor 的操作手册一项
+- 相关编号：CAT-SKILL-02
+
 ### CAT-PKG-01 没有来源给出和目录相符的应用包
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：稍后 acornfox catalog sync 后重装；还不行就反馈
 - AcornFox 已经自动做的：依次试过每个来源
@@ -6145,7 +8579,7 @@
 
 ### CAT-PKG-02 下载的应用包校验值或大小和目录不符
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：没有用它；重装一次，持续出现就停下反馈（可能被篡改）
 - AcornFox 已经自动做的：删掉了下载的包，换下一个来源
@@ -6169,7 +8603,7 @@
 
 ### CAT-PKG-03 下载的应用包存不下来
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：检查数据目录所在磁盘和权限（acornfox doctor）后重装
 - 现象：安装时报应用包写不进本地
@@ -6192,7 +8626,7 @@
 
 ### CAT-PKG-04 索引里的应用包路径不合规
 
-- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）
+- 分组：应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）
 - 默认等级：P2（功能用不了，尽快处理）
 - 下一步：目录本身有问题，不是操作不对；过一阵 acornfox catalog sync 后重试，还不行就反馈
 - 现象：安装时报应用包路径不对
@@ -7482,6 +9916,31 @@
 - 相关编号：CAT-LINT-46
 - 演练方法：在一份测试清单的 files 模板里写一行 {{token}}，运行 acornfox catalog lint 目录（给提醒、不报错）
 
+### CAT-LINT-52 on_change 步骤的 watch 里列了不会变的参数
+
+- 分组：打包、签名、检查目录（维护目录的人用：CAT-LINT、CAT-BUILD、CAT-KEY、CAT-VER）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：init 步骤写 when: on_change 时，watch 列出“哪几项变了才跑这一步”（只能写 params.<名>、platform.<名>、uses.<需要名>.<项>）。平台生成的参数（hidden）装好以后不会变，列了它这一步永远不会跑。
+- 下一步：按 lint 输出的路径（/init/…/watch）改 watch：去掉 hidden 的参数，改看会变的设置
+- 现象：lint 给出 CAT-LINT-52 错误，路径是 /init/某一步/watch
+
+可能原因（逐条判定）：
+
+1. watch 里写了 hidden 的参数（平台生成的密码、密钥） —— 判定：lint 输出里的引用，对照清单 params 里它有没有 hidden: true
+
+排查顺序：
+
+1. acornfox catalog lint 目录
+
+处置：
+
+- ［1 级 可以直接做］改清单里这一步的 watch
+
+- 必须先停下问用户：—（不用问）
+- 确认恢复：lint 没有错误
+- 相关编号：CAT-LINT-06
+- 演练方法：在一份测试清单的 init 里加一步 when: on_change、watch: [params.某个 hidden 参数]，运行 acornfox catalog lint 目录
+
 ### CAT-BUILD-01 目录有检查错误，什么都没写
 
 - 分组：打包、签名、检查目录（维护目录的人用：CAT-LINT、CAT-BUILD、CAT-KEY、CAT-VER）
@@ -8331,6 +10790,104 @@
 
 - 必须先停下问用户：要清理磁盘时
 - 确认恢复：identity show 有安装编号
+
+## 本机能力和分册（MACHINE）
+
+### MACHINE-01 本机能力有一块没算全
+
+- 分组：本机能力和分册（MACHINE）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：acornfox machine 现场算这台服务器上有什么：应用、解决方案、服务、手册。应用目录读不了、某个应用用到哪些服务读不出来、服务登记表里有几条解不开时，这一块先空着，其余照常给，并在 warnings 里写明是哪一块（part）。答案不完整，但不会是错的。
+- 下一步：运行 acornfox --json machine 看 warnings 里每一项的 part 和 message：manuals 是应用目录读不了（应用名字、一句话、手册没查到），先 acornfox catalog sync；services 是服务登记表的问题，看 acornfox services list；apps 是某个应用的情况读不出来，acornfox status 应用名
+- AcornFox 已经自动做的：没有；缺的那一块留空，别的照常
+- 现象：acornfox --json machine 的 warnings 不是空的，里面的 code 是 MACHINE-01；分册 machine-服务器名.md 末尾有一行“注意（MACHINE-01）”
+
+可能原因（逐条判定）：
+
+1. 应用目录读不了：从没同步过又读不了内置的，或缓存坏了［doctor 自动判定］ —— 判定：warnings 里 part 是 manuals；acornfox catalog sources 和 acornfox doctor 的“应用目录同步”一项
+2. 某个应用的清单读不出来（目录里已经没有它，或它用的是旧格式）［doctor 自动判定］ —— 判定：warnings 里 part 是 apps，message 写着是哪个应用；acornfox apps vars 应用 也读不了
+3. 服务登记表里有几条存的值解不开（数据目录里的加密钥匙换过或丢了）［doctor 自动判定］ —— 判定：warnings 里 part 是 services，message 列着是哪几条；acornfox services list 末尾有同样一行
+4. 服务器上的程序正在升级、重启，应用列表暂时读不了 —— 判定：稍等一两分钟再运行 acornfox --json machine，warnings 没了就是这个
+
+排查顺序：
+
+1. acornfox --json machine（看 warnings）
+2. acornfox doctor（看应用目录同步、应用用的服务两项）
+3. 按 part 查：manuals → acornfox catalog sources；services → acornfox services list；apps → acornfox status 应用名
+
+处置：
+
+- ［1 级 可以直接做］acornfox catalog sync 让服务器同步一次应用目录，再运行 acornfox --json machine
+- ［0 级 只读］把 warnings 里的 message 原样告诉用户；缺的那一块当成不知道，不要猜
+- ［0 级 只读］值解不开的服务：不要删，把 doctor 的输出交给维护的人
+
+- 必须先停下问用户：服务的值解不开时：停下问用户，不动那几条服务
+- 确认恢复：acornfox --json machine 的 warnings 是空的
+- 相关编号：CAT-SVC-08
+- 演练方法：测试机上登记一条服务，再把数据目录里存服务值用的钥匙文件换成别的内容，运行 acornfox --json machine：warnings 里有 part 是 services 的一项（恢复：把钥匙文件换回来）
+
+### MACHINE-02 “本机能力”分册写不进 Skill 目录
+
+- 分组：本机能力和分册（MACHINE）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：acornfox skill install、acornfox skill refresh 和装、删、升级应用之后的自动刷新，会在 Skill 目录里写 machine-服务器名.md。目录没有写权限、磁盘满了或路径建不了时写不进去；分册只是缓存，写不进不影响任何命令，AI 工作台改用 acornfox --json machine 直接取。
+- 下一步：不加 --json 运行 acornfox skill refresh，看 ✗ 那一行写的路径和原因；Skill 目录以前被 sudo 建过的，请用户确认后改回自己的属主；要马上用，直接运行 acornfox --json machine
+- AcornFox 已经自动做的：没有；已装好的 Skill 和别的分册不受影响
+- 现象：acornfox skill refresh 报“写入 … 失败”并带 MACHINE-02；acornfox --json skill refresh 的 failed 里一项的 code 是 MACHINE-02
+
+可能原因（逐条判定）：
+
+1. skills 目录没有写权限（例如以前用 sudo 建过） —— 判定：ls -ld ~/.claude/skills/acornfox ~/.codex/skills/acornfox，属主是 root
+2. 磁盘满了 —— 判定：df -h ~
+3. --dir 指的位置建不了目录或不可写 —— 判定：不加 --json 再运行，看 ✗ 那一行里的路径
+
+排查顺序：
+
+1. acornfox skill refresh（不加 --json）
+2. ls -ld ~/.claude/skills/acornfox
+3. df -h ~
+
+处置：
+
+- ［0 级 只读］acornfox --json machine 直接取，不靠分册
+- ［1 级 可以直接做］acornfox skill refresh --dir 一个能写的 skills 目录
+- ［2 级 先问用户］用 sudo 改 skills 目录的属主
+
+- 必须先停下问用户：要用 sudo 改文件时
+- 确认恢复：acornfox skill refresh 每台服务器后面都是 ✓，Skill 目录里有 machine-服务器名.md
+- 相关编号：install_failed、MACHINE-03
+- 演练方法：在测试机上把 ~/.claude/skills/acornfox 的权限改成只读，运行 acornfox skill refresh（恢复：chmod u+w 回来）
+
+### MACHINE-03 这台服务器的“本机能力”分册没能写：连不上，或服务器上的 AcornFox 太旧
+
+- 分组：本机能力和分册（MACHINE）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：写分册要先连上服务器读 acornfox machine 的结果。服务器连不上，或者它上面的 AcornFox 还没有这个接口（server_too_old）时，那台服务器的分册就没写成，其他服务器照常。skill install 只提醒，skill refresh 在所有服务器都没成时退出码是 1。
+- 下一步：先运行 acornfox --target 服务器名 status 看能不能连上（连不上看里面的连接编号）；能连上但提示服务器版本旧，让用户先升级服务器上的 AcornFox；好了再 acornfox skill refresh
+- AcornFox 已经自动做的：没有；这台服务器上一份分册（如果有）不动
+- 现象：acornfox skill install 或 skill refresh 打印“服务器 … 的‘本机能力’分册没写成”并带 MACHINE-03；acornfox --json skill refresh 的 failed 里一项的 code 是 MACHINE-03
+
+可能原因（逐条判定）：
+
+1. 服务器关机、网络不通或 SSH 登不上 —— 判定：acornfox --target 服务器名 status 报连接编号（acornfox faults 那个编号）
+2. 服务器上的 AcornFox 比这个命令行旧，没有 machine 接口 —— 判定：acornfox --target 服务器名 machine 报 server_too_old
+3. 登记的服务器名已经不存在（target remove 过） —— 判定：acornfox target list 里没有这个名字
+
+排查顺序：
+
+1. acornfox target list
+2. acornfox --target 服务器名 status
+3. acornfox --target 服务器名 machine
+
+处置：
+
+- ［0 级 只读］照 status 报的连接编号处理（acornfox faults 编号）
+- ［1 级 可以直接做］连上之后再运行 acornfox skill refresh
+
+- 必须先停下问用户：要升级服务器上的 AcornFox 时（先问用户）
+- 确认恢复：acornfox skill refresh 这台服务器后面是 ✓
+- 相关编号：MACHINE-02、CLI-UPDATE-01
+- 演练方法：在测试机上 acornfox target add 一台连不上的服务器（--url http://127.0.0.1:1），运行 acornfox skill refresh
 
 ## 兜底
 

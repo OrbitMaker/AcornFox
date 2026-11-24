@@ -32,17 +32,31 @@ func (a *app) cmdDomain(ctx context.Context, args []string) int {
 	}
 	defer api.Close()
 
+	// --yes and --no-reapply: what the new address does to an app from the
+	// app center whose settings read it (appinstall/reapply.go).
+	var opt client.ApplyOptions
+	var names []string
+	for _, r := range rest {
+		switch r {
+		case "--yes":
+			opt.ConfirmRestart = true
+		case "--no-reapply":
+			opt.NoReapply = true
+		default:
+			names = append(names, r)
+		}
+	}
 	switch sub {
 	case "add":
-		if len(rest) != 1 {
-			return a.out.usageError("用法：domain add NAME")
+		if len(names) != 1 {
+			return a.out.usageError("用法：domain add NAME [--yes] [--no-reapply]")
 		}
-		return a.domainAdd(ctx, api, res.app, rest[0])
+		return a.domainAdd(ctx, api, res.app, names[0], opt)
 	case "remove":
-		if len(rest) != 1 {
-			return a.out.usageError("用法：domain remove NAME")
+		if len(names) != 1 {
+			return a.out.usageError("用法：domain remove NAME [--yes] [--no-reapply]")
 		}
-		return a.domainRemove(ctx, api, res.app, rest[0])
+		return a.domainRemove(ctx, api, res.app, names[0], opt)
 	case "list":
 		if len(rest) != 0 {
 			return a.out.usageError("domain list 不接受参数")
@@ -53,13 +67,27 @@ func (a *app) cmdDomain(ctx context.Context, args []string) int {
 	}
 }
 
-func (a *app) domainAdd(ctx context.Context, api client.API, appName, name string) int {
-	d, err := api.AddDomain(ctx, appName, name)
+func (a *app) domainAdd(ctx context.Context, api client.API, appName, name string, opt client.ApplyOptions) int {
+	var d client.Domain
+	var follow *client.ApplyFollow
+	var err error
+	if da, ok := api.(client.DomainApplyAPI); ok {
+		d, follow, err = da.AddDomainApply(ctx, appName, name, opt)
+	} else {
+		d, err = api.AddDomain(ctx, appName, name)
+	}
 	if err != nil {
-		return a.out.fail(err)
+		return a.applyFail(err)
 	}
 	if a.out.json {
-		a.out.emitJSON(map[string]any{"domain": domainJSON(d)})
+		out := map[string]any{"domain": domainJSON(d)}
+		if follow != nil && follow.Task != nil {
+			return a.followApply(ctx, api, follow, out)
+		}
+		if follow != nil {
+			out["reapply"] = follow
+		}
+		a.out.emitJSON(out)
 		return exitOK
 	}
 	a.out.human("已添加域名 %s（状态：%s）。", d.Name, d.Status)
@@ -71,19 +99,33 @@ func (a *app) domainAdd(ctx context.Context, api client.API, appName, name strin
 			a.out.human("  建议：%s", w.Hint)
 		}
 	}
-	return exitOK
+	return a.followApply(ctx, api, follow, nil)
 }
 
-func (a *app) domainRemove(ctx context.Context, api client.API, appName, name string) int {
-	if err := api.RemoveDomain(ctx, appName, name); err != nil {
-		return a.out.fail(err)
+func (a *app) domainRemove(ctx context.Context, api client.API, appName, name string, opt client.ApplyOptions) int {
+	var follow *client.ApplyFollow
+	var err error
+	if da, ok := api.(client.DomainApplyAPI); ok {
+		follow, err = da.RemoveDomainApply(ctx, appName, name, opt)
+	} else {
+		err = api.RemoveDomain(ctx, appName, name)
+	}
+	if err != nil {
+		return a.applyFail(err)
 	}
 	if a.out.json {
-		a.out.emitJSON(map[string]any{"removed": name})
+		out := map[string]any{"removed": name}
+		if follow != nil && follow.Task != nil {
+			return a.followApply(ctx, api, follow, out)
+		}
+		if follow != nil {
+			out["reapply"] = follow
+		}
+		a.out.emitJSON(out)
 		return exitOK
 	}
 	a.out.human("已删除域名 %s。", name)
-	return exitOK
+	return a.followApply(ctx, api, follow, nil)
 }
 
 func (a *app) domainList(ctx context.Context, api client.API, appName string) int {

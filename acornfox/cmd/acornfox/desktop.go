@@ -55,13 +55,7 @@ func dockerHelp(ep platform.DockerEndpoint, err error) string {
 	case "OrbStack":
 		return "OrbStack 没有运行。打开 OrbStack，等它启动后再试。"
 	case "Docker Desktop":
-		if platform.GOOS == "windows" {
-			return "Docker Desktop 没有运行。从开始菜单打开 Docker Desktop，等左下角显示 Engine running 后再试。"
-		}
 		return "Docker Desktop 没有运行。打开“应用程序”里的 Docker，等菜单栏图标显示 running 后再试。"
-	}
-	if platform.GOOS == "windows" {
-		return "没找到 Docker。请先安装 Docker Desktop（https://www.docker.com/products/docker-desktop/ ，需要 WSL 2），装好并打开后再试。"
 	}
 	if platform.GOOS == "darwin" {
 		return "没找到 Docker。推荐安装 Docker Desktop（https://www.docker.com/products/docker-desktop/ ）；已经在用 OrbStack 或 Colima 的话先把它打开。装好并启动后再试。"
@@ -115,12 +109,7 @@ func waitAPI(ctx context.Context, socket string, d time.Duration) (client.Status
 }
 
 func unixURL(socket string) string {
-	return "unix://" + filepath.ToSlash(func() string {
-		if platform.GOOS == "windows" {
-			return "/" + socket
-		}
-		return socket
-	}())
+	return "unix://" + filepath.ToSlash(socket)
 }
 
 // copyFile copies src to dst (mode 0755 for binaries), via a temp file.
@@ -159,8 +148,6 @@ func stopService(dataDir string) {
 	switch platform.GOOS {
 	case "darwin":
 		_, _ = platform.RunCommand("launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+platform.LaunchAgentLabel)
-	case "windows":
-		_, _ = platform.RunCommand("schtasks", "/End", "/TN", platform.WindowsTaskName)
 	}
 	// The API socket stops answering once the process is gone.
 	sock := filepath.Join(dataDir, "api.sock")
@@ -262,14 +249,8 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 5. The "local" target for the CLI and AI workbenches; on Windows also
-	// put the installed copy on the user's PATH.
+	// 5. The "local" target for the CLI and AI workbenches.
 	ensureLocalTarget(paths.APISocket, stdout, stderr)
-	if changed, err := platform.EnsureUserPath(paths.BinDir); err != nil {
-		fmt.Fprintln(stderr, "把程序目录加入 PATH 失败（可以手动加）：", err)
-	} else if changed {
-		fmt.Fprintln(stdout, "已把 "+paths.BinDir+" 加入用户 PATH（新开的终端里可直接用 acornfox）")
-	}
 
 	_ = st
 	fmt.Fprintf(stdout, "主程序已安装并在后台运行（用时 %d 秒）\n", int(time.Since(start).Seconds()))
@@ -383,32 +364,10 @@ func runUninstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "已清理 Docker：%s\n", removed)
 	}
 
-	// 3. Windows: the LAN firewall rule (removing it needs an administrator)
-	// and, with --purge, the built-in runtime's WSL distribution.
-	if platform.GOOS == "windows" {
-		if platform.FirewallRulePresent() {
-			launch := "try { Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','" +
-				strings.ReplaceAll(platform.FirewallRemovePS(), "'", "''") + "'; exit 0 } catch { exit 5 }"
-			_, _ = platform.RunHidden("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", launch)
-			if platform.FirewallRulePresent() {
-				fmt.Fprintln(stderr, "防火墙规则 "+platform.FirewallRuleName+" 没能删掉（管理员确认被取消？）；可以用管理员 PowerShell 运行："+platform.FirewallRemovePS())
-			} else {
-				fmt.Fprintln(stdout, "已删除防火墙规则 "+platform.FirewallRuleName)
-			}
-		}
-		if *purge {
-			if _, err := platform.RunHidden("wsl.exe", "--unregister", "AcornFox"); err == nil {
-				fmt.Fprintln(stdout, "已删除自带运行环境（WSL 发行版 AcornFox）")
-			}
-		}
-	}
-
-	// 4. Files.
+	// 3. Files.
 	_ = run([]string{"target", "remove", localTargetName}, strings.NewReader(""), io.Discard, io.Discard)
 	if *purge {
 		if left := purgeDataDir(paths.DataDir); len(left) > 0 {
-			// Windows cannot delete the acornfox.exe that is running this
-			// command; everything else is gone.
 			fmt.Fprintln(stderr, "有些文件没能删掉（正在运行的程序文件删不掉，关掉终端后手动删除即可）：", strings.Join(left, "、"))
 		} else {
 			fmt.Fprintln(stdout, "已删除 "+paths.DataDir+" 里 AcornFox 的数据")
@@ -416,7 +375,6 @@ func runUninstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	} else {
 		_ = os.RemoveAll(paths.BinDir)
 	}
-	_ = platform.RemoveUserPath(paths.BinDir)
 	if !*purge {
 		fmt.Fprintln(stdout, "已保留数据（"+paths.DataDir+" 和数据卷），重新安装后应用会恢复；要全部删除请加 --purge")
 	}
@@ -595,6 +553,9 @@ func runDoctorChecks(ctx context.Context, w io.Writer, afterInstall bool) bool {
 func doctorRun(ctx context.Context, afterInstall bool) doctorReport {
 	r := doctorReport{OK: true}
 	paths := platform.DefaultPaths()
+	if !afterInstall {
+		skillVersionChecks(&r)
+	}
 
 	// The server's own view of the runtime setup comes first: it names the
 	// step and the fault code when the setup stopped.

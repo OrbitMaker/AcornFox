@@ -159,43 +159,56 @@ func resolveKnownParams(m *catalog.Manifest, user map[string]any, lenient bool, 
 	vals := Values{}
 	for _, p := range m.Params {
 		raw, given := user[p.Key]
-		var s string
-		if given && raw != nil {
-			v, err := scalarText(raw)
-			if err != nil {
-				return nil, nil, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
-			}
-			s = v
-		} else if p.Default != nil {
-			v, err := scalarText(p.Default)
-			if err != nil {
-				return nil, nil, fault(CodeBadParams, nil, "参数 %s 的默认值不对", p.Key)
-			}
-			s = v
+		s, empty, err := resolveOneParam(p, raw, given && raw != nil)
+		if err != nil {
+			return nil, nil, err
 		}
-		if s == "" && p.Generate != nil {
-			g, err := generateSecret(p.Generate.Length, p.Generate.Charset)
-			if err != nil {
-				return nil, nil, fault(CodeInternal, err, "生成 %s 失败", p.Key)
-			}
-			vals[p.Key] = g
-			continue
-		}
-		if s == "" {
-			if p.Required && lenient {
-				missing = append(missing, ParamMissing{Key: p.Key, Label: p.Label})
-			} else if p.Required {
+		if empty && p.Required {
+			if !lenient {
 				return nil, nil, fault(CodeBadParams, nil, "缺少必填参数 %s（%s）", p.Key, p.Label)
 			}
-			vals[p.Key] = ""
-			continue
-		}
-		if err := checkScalar(p, s); err != nil {
-			return nil, nil, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
+			missing = append(missing, ParamMissing{Key: p.Key, Label: p.Label})
 		}
 		vals[p.Key] = s
 	}
 	return vals, missing, nil
+}
+
+// resolveOneParam is the value of parameter p: the one given for it (given:
+// raw is it), else the manifest's default, else, for a parameter that
+// generates one, a new random value. empty says there is no value at all (a
+// required parameter then is missing). It is the rule of an install and of
+// changing a setting later alike: the same checks (checkScalar), so a value
+// that would not have been accepted at install is not accepted now.
+func resolveOneParam(p catalog.Param, raw any, given bool) (val string, empty bool, err error) {
+	var s string
+	if given {
+		v, err := scalarText(raw)
+		if err != nil {
+			return "", false, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
+		}
+		s = v
+	} else if p.Default != nil {
+		v, err := scalarText(p.Default)
+		if err != nil {
+			return "", false, fault(CodeBadParams, nil, "参数 %s 的默认值不对", p.Key)
+		}
+		s = v
+	}
+	if s == "" && p.Generate != nil {
+		g, err := generateSecret(p.Generate.Length, p.Generate.Charset)
+		if err != nil {
+			return "", false, fault(CodeInternal, err, "生成 %s 失败", p.Key)
+		}
+		return g, false, nil
+	}
+	if s == "" {
+		return "", true, nil
+	}
+	if err := checkScalar(p, s); err != nil {
+		return "", false, fault(CodeBadParams, nil, "参数 %s：%v", p.Key, err)
+	}
+	return s, false, nil
 }
 
 func scalarText(v any) (string, error) {

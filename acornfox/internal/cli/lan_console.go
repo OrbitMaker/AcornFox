@@ -19,10 +19,19 @@ const lanConsoleUsage = `用法：acornfox lan-console status | enable | disable
   status          看开没开、地址、密码设了没有（什么时候、从哪个地址设的）、记住了几台设备。只读
   enable          打开。已经开着就什么都不变。写操作：开始在 18802 端口监听
   disable         关闭。写操作：停止监听，密码、登录状态、记住的设备全部清掉
-  reset-password  清掉密码。写操作：所有登录状态和记住的设备一起作废，下一个从局域网打开的人重新设密码。
-                  忘了密码，或者 status 里设密码的时间、地址不是你，就用它
+  reset-password  清掉密码。写操作：所有登录状态和记住的设备一起作废，下一个从局域网打开的人重新设密码
+                  （新密码在浏览器里设，命令里不显示；不要把密码发给别人或贴进对话）。忘了密码（LAN-CONSOLE-04），
+                  或者 status 里设密码的时间、地址不是你，就用它。重设只能在服务器上做：登录页的“忘了密码”不能直接重设
+                  （不登录就能重设，谁都能抢走控制台），经 SSH 运行：ssh 用户@服务器 acornfox lan-console reset-password。
+                  只想让一台设备退出（例如丢了的手机）不要用它，用 forget 设备编号
   devices         列出记住的设备。只读
   forget 编号     让一台记住的设备失效（它当前的登录也立刻失效）；forget --all 是全部。写操作，可以重复执行
+
+忘了密码，最低路径：
+  1. acornfox lan-console status --json     看开没开、密码什么时候从哪设的（只读）
+  2. 告诉用户重设会让所有登录和记住的设备退出，等他同意
+  3. acornfox lan-console reset-password     清掉密码（写操作；重复运行不出错，没开时返回 lan_console_off）
+  4. 请用户打开 status 给的地址，自己在浏览器里设新密码；再 status 确认 password_set 是 true
 
 例子：
   acornfox lan-console status --json

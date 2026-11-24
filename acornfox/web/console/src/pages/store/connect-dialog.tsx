@@ -5,7 +5,6 @@ import { Link2 } from 'lucide-react'
 import { api, type ApiError } from '@/lib/api'
 import { useConsole } from '@/state'
 import { Button } from '@/components/ui/button'
-import { Spinner } from '@/components/ui/controls'
 import { Dialog, DialogHead } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/ui/toast'
@@ -85,7 +84,7 @@ export function ConnectCatalogDialog({ open, onClose }: { open: boolean; onClose
         <p className="text-2xs text-muted-foreground">命令行写法：acornfox catalog connect &lt;连接码&gt;。连接码不会存在这台机器上。</p>
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={onClose}>取消</Button>
-          <Button type="submit" disabled={busy || !code.trim()}>{busy ? <Spinner /> : <Link2 className="size-3.5" />}连接</Button>
+          <Button type="submit" disabled={!code.trim()} loading={busy}><Link2 className="size-icon" />连接</Button>
         </div>
       </form>
     </Dialog>

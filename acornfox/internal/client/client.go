@@ -196,6 +196,7 @@ func (c *Client) serverError(resp *http.Response) error {
 			RetryAfter    int    `json:"retry_after"`
 			NeedsPlatform string `json:"needs_platform"`
 		} `json:"error"`
+		Plan json.RawMessage `json:"plan"`
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	_ = json.Unmarshal(data, &wire)
@@ -222,6 +223,7 @@ func (c *Client) serverError(resp *http.Response) error {
 			NeedsPlatform: wire.Error.NeedsPlatform,
 		},
 		TaskID: wire.Error.TaskID,
+		Plan:   wire.Plan,
 	}
 }
 

@@ -23,7 +23,8 @@ AI 先安装 Skill，再由 Skill 分别判断你的电脑和服务器在国内�
 
 - **操作系统**: Linux、macOS 12 以上（苹果芯片或 Intel）
 - **工具**: SSH 客户端
-- **Windows 电脑**: 本版本没有 Windows 版命令行。电脑上不用装任何东西，用 `ssh` 登录服务器后直接在服务器上运行 `acornfox`（服务器安装时已经装好）；AI 工作台在 Windows 上时，也让它经 `ssh` 在服务器上运行
+- **Windows 电脑**: 想装在这台电脑上：Windows 10 22H2、Windows 11（64 位 Intel、AMD），AcornFox 装进 WSL 2，见 README 的“1b. 在这台 Windows 电脑上安装”，这份快速开始不用往下做；想管理一台 Linux 服务器：电脑上不用装任何东西，用 `ssh` 登录服务器后直接在服务器上运行 `acornfox`（服务器安装时已经装好）；AI 工作台在 Windows 上时，也让它经 `ssh` 在服务器上运行
+- **Mac 电脑**: 想装在这台 Mac 上：苹果芯片、macOS 26 起，AcornFox 装进苹果 container 开的一台 Debian 虚拟机，见 README 的“1c. 在这台 Mac 上安装”；Intel 的 Mac 或只想管服务器：当命令行客户端，经 SSH 管理 Linux 服务器。
 
 ## 安装步骤
 

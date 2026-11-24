@@ -18,7 +18,7 @@ import (
 )
 
 // anyUpper finds upper-case codes in any text.
-var anyUpper = regexp.MustCompile(`\b(?:CAT-(?:INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|OPEN-APP|APP-VARS|ID-KEY|PDOMAIN|PUBCON|GW-[A-Z]+)-\d{2}\b`)
+var anyUpper = regexp.MustCompile(`\b(?:CAT-(?:INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}\b`)
 
 // moduleRoot is the Go module (acornfox/).
 const moduleRoot = "../.."
@@ -91,6 +91,13 @@ func repoFiles(t *testing.T) (program, docs map[string]string, ok bool) {
 	if b, err := os.ReadFile(filepath.Join(root, "get.sh")); err == nil {
 		program["get.sh"] = string(b)
 	}
+	// The Windows bootstrap and installer raise INSTALL-GET-* and WIN-*.
+	if b, err := os.ReadFile(filepath.Join(root, "get.ps1")); err == nil {
+		program["get.ps1"] = string(b)
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "scripts", "install", "install-windows.ps1")); err == nil {
+		program["scripts/install/install-windows.ps1"] = string(b)
+	}
 	for _, p := range scripts {
 		if strings.HasSuffix(p, ".test.sh") {
 			continue
@@ -101,7 +108,16 @@ func repoFiles(t *testing.T) (program, docs map[string]string, ok bool) {
 		}
 		program["scripts/install/"+filepath.Base(p)] = string(b)
 	}
-	for _, rel := range []string{"skills/acornfox/SKILL.md", "docs/capabilities.md", "docs/user-guide.md", "docs/quick-start.md", "README.md", "README.en.md"} {
+	skillFiles, _ := filepath.Glob(filepath.Join(root, "skills", "acornfox", "*.md"))
+	for _, p := range skillFiles {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, _ := filepath.Rel(root, p)
+		docs[filepath.ToSlash(rel)] = string(b)
+	}
+	for _, rel := range []string{"docs/capabilities.md", "docs/user-guide.md", "docs/quick-start.md", "README.md", "README.en.md"} {
 		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
 			t.Fatal(err)
@@ -142,11 +158,17 @@ func TestEveryWrittenCodeInCatalog(t *testing.T) {
 	} else {
 		t.Log("只有 Go 模块、没有整个仓库：安装脚本、Skill、README、用户文档、发行说明、官网没扫（合并前要在完整的仓库里跑一次）")
 	}
-	// The Skill built into the program (same text as skills/acornfox).
-	if b, err := os.ReadFile(filepath.Join(moduleRoot, "internal", "cli", "skilldata", "SKILL.md")); err == nil {
-		files["internal/cli/skilldata/SKILL.md"] = string(b)
-	} else {
-		t.Fatal(err)
+	// The Skill built into the program (the same files as skills/acornfox).
+	skillData, err := filepath.Glob(filepath.Join(moduleRoot, "internal", "cli", "skilldata", "*.md"))
+	if err != nil || len(skillData) == 0 {
+		t.Fatalf("没找到程序里带的 Skill 文件：%v", err)
+	}
+	for _, p := range skillData {
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		files["internal/cli/skilldata/"+filepath.Base(p)] = string(b)
 	}
 	missing := map[string][]string{}
 	for name, text := range files {
@@ -179,7 +201,7 @@ func TestEveryCatalogCodeRaised(t *testing.T) {
 		if f.Reserved || f.Origin == "gateway" || f.Code == FallbackCode || lowerCode.MatchString(f.Code) {
 			continue
 		}
-		if !haveRepo && (f.Group == "INSTALL" || f.Group == "UPGRADE") && !strings.Contains(all, f.Code) {
+		if !haveRepo && (f.Group == "INSTALL" || f.Group == "UPGRADE" || f.Group == "WIN") && !strings.Contains(all, f.Code) {
 			continue // raised by the scripts, which are not here
 		}
 		if !strings.Contains(all, f.Code) {

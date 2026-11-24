@@ -184,6 +184,31 @@ ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 GET_URL_GITEE="https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/get.sh"
 GET_URL_GITHUB="https://github.com/${ACORNFOX_REPO}/releases/latest/download/get.sh"
 
+# gitee_download URL OUT：从 Gitee 下载一个发行版文件。第一次没成功（连不上，或中途卡住被下面的限速判断
+# 停下）先在 Gitee 上再试一次，两次都不行才返回失败，由调用方换 GitHub。
+# 为什么：Gitee 偶尔在传输中途卡住，下一次连接几乎都是好的（2026-11-20 在 Mac 虚拟机里实测：一次停在
+# 7.9 MB，重下一次 8 秒完成，速度 2 MB/s）；以前一失败就退回 GitHub，国内直连 GitHub 只有几十 KB/s，
+# 用户看到的是“Gitee 明明很快却走了很慢的 GitHub”（P-847）。Gitee 不支持断点续传，重试是整个文件重下。
+# 限速判断：连续 15 秒低于 50 KB/s 就算卡住（curl 的 --speed-limit、--speed-time）。
+# 返回：0 成功；1 两次都失败。每次失败都会写一行日志（curl 退出码、已经下了多少）。
+gitee_download() {
+    local url="$1" out="$2" attempt rc size
+    for attempt in 1 2; do
+        rm -f "$out"
+        rc=0
+        curl_get "$out" "$url" --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15 || rc=$?
+        if [ "$rc" = 0 ]; then return 0; fi
+        size=$(stat -c %s "$out" 2>/dev/null || echo 0)
+        if [ "$attempt" = 1 ]; then
+            log_warn "Gitee 下载中断（curl 退出码 ${rc}，已下 ${size} 字节），在 Gitee 上再试一次"
+        else
+            log_warn "Gitee 第二次也中断（curl 退出码 ${rc}，已下 ${size} 字节）"
+        fi
+    done
+    rm -f "$out"
+    return 1
+}
+
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
     local version="$1" asset="$2" out="$3"
@@ -194,11 +219,10 @@ release_download() {
     fi
     if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
         log_info "从 Gitee 镜像下载 ${asset}"
-        if curl_get "$out" "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}" \
-            --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15; then
+        if gitee_download "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}" "$out"; then
             return 0
         fi
-        log_warn "Gitee 镜像下载失败，改从 GitHub 下载"
+        log_warn "Gitee 镜像两次都没下成功，改从 GitHub 下载"
     fi
     github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
 }
@@ -983,9 +1007,24 @@ parse_args() {
     # 新应用默认的对外方式：空 = 按这台机器定（choose_default_exposure）；--default-exposure 或
     # ACORNFOX_DEFAULT_EXPOSURE 给 lan、local 时照它
     DEFAULT_EXPOSURE_ARG="${ACORNFOX_DEFAULT_EXPOSURE:-}"
+    # --wsl：这台“服务器”是 Windows 里的 WSL 发行版，由 Windows 安装脚本运行（install-windows.ps1）。
+    # 它的私网地址（172.x）只有这台电脑自己连得上，不代表局域网；局域网地址由 Windows 那边用 --public-host 传进来。
+    WSL_MODE=false
+    # --mac-vm：这台“服务器”是 Mac 上苹果 container 开的 Debian 虚拟机，由 Mac 安装程序运行（acornfox mac install）。
+    # 网络上和 WSL 同一回事（虚拟机在 Mac 后面，Mac 上的常驻程序转发端口），所以也当成 WSL_MODE 处理，只是摘要不同。
+    MAC_VM_MODE=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --wsl)
+                WSL_MODE=true
+                shift
+                ;;
+            --mac-vm)
+                WSL_MODE=true
+                MAC_VM_MODE=true
+                shift
+                ;;
             --public-console)
                 [[ $# -ge 2 ]] || error_exit "--public-console 需要一个域名，例如 panel.example.com"
                 PUBLIC_CONSOLE_DOMAIN="$2"
@@ -1113,6 +1152,13 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
                            应用中心装的应用只本机能打开（经 acornfox open 打开），自己部署的项目照旧开在
                            所有网卡上；重装时沿用上次的，升级不改。单个应用以后随时改：
                            acornfox app set --app 应用名 --expose local|lan|public
+    --wsl                  这台机器是 Windows 里的 WSL 发行版（Windows 安装脚本会加这个参数，自己手工装
+                           用不到）：按“局域网服务器”处理（默认打开局域网控制台、新应用默认局域网能打开），
+                           应用访问地址用 --public-host 传进来的 Windows 局域网地址（没传用 127.0.0.1），
+                           装完自动登记本机、摘要里写 Windows 上怎么用
+    --mac-vm               这台机器是 Mac 上苹果 container 开的 Debian 虚拟机（Mac 的安装程序 acornfox mac install
+                           会加这个参数，自己手工装用不到）：网络上同 --wsl（按“局域网服务器”处理，应用访问地址用
+                           --public-host 传进来的 Mac 局域网地址），装完摘要写 Mac 上怎么用
     --force-os             在不在支持列表里的 Ubuntu/Debian 版本上也继续安装（自行承担风险）；
                            对 CentOS、Alibaba Cloud Linux、OpenCloudOS 等其他系统无效
     --cloud 名称           只用于测试：把本机当作某个云厂商的大陆地域，跳过元数据探测；
@@ -1760,6 +1806,12 @@ detect_public_host() {
         log_info "应用访问地址主机: ${PUBLIC_HOST}（手动指定）"
         return
     fi
+    if $WSL_MODE; then
+        # WSL 里 hostname -I 是 WSL 自己的内部地址，局域网和浏览器用不上；Windows 安装脚本会传 --public-host
+        PUBLIC_HOST="127.0.0.1"
+        log_info "应用访问地址主机: ${PUBLIC_HOST}（WSL 里没传 --public-host，只能在这台电脑上打开）"
+        return
+    fi
     local url ip
     for url in \
         http://100.100.100.200/latest/meta-data/eipv4 \
@@ -1788,6 +1840,9 @@ create_systemd_services() {
     # 获取用户 UID（修复 peer credentials 验证问题）
     ACORNFOX_UID=$(id -u acornfox)
     ACORNFOX_EXEC_UID=$(id -u acornfox-exec)
+    # --wsl：服务文件里加 --wsl（只本机的应用也监听所有网卡，谁能连由 Windows 一侧的转发规则定）
+    WSL_FLAG=""
+    if ${WSL_MODE:-false}; then WSL_FLAG=1; fi
 
     log_info "配置 UID: acornfox=$ACORNFOX_UID, acornfox-exec=$ACORNFOX_EXEC_UID"
 
@@ -1804,7 +1859,7 @@ Requires=docker.service
 Type=simple
 User=acornfox
 Group=acornfox
-ExecStart=/usr/local/bin/acornfox server --runner-uid $ACORNFOX_EXEC_UID --listen-group acornfox-users${PUBLIC_HOST:+ --public-host $PUBLIC_HOST}${DEFAULT_EXPOSURE:+ --default-exposure $DEFAULT_EXPOSURE}
+ExecStart=/usr/local/bin/acornfox server --runner-uid $ACORNFOX_EXEC_UID --listen-group acornfox-users${PUBLIC_HOST:+ --public-host $PUBLIC_HOST}${DEFAULT_EXPOSURE:+ --default-exposure $DEFAULT_EXPOSURE}${WSL_FLAG:+ --wsl}
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -1914,6 +1969,8 @@ private_ipv4() {
 # 都用这一个判断。要在 detect_location、detect_public_host 之后调用。
 lan_server() {
     [ -z "${CLOUD:-}" ] || return 1
+    # WSL（Windows 里的 Linux）：这台电脑就是用户家里或办公室的一台局域网电脑，不看 PUBLIC_HOST 是不是私网地址
+    if ${WSL_MODE:-false}; then return 0; fi
     private_ipv4 "${PUBLIC_HOST:-}"
 }
 
@@ -1925,6 +1982,7 @@ lan_server() {
 #   2. 不是全新安装（重装、卸载后保留数据再装）：沿用现有服务文件里的 --default-exposure，没有就不写；
 #   3. 全新安装的局域网服务器（lan_server）：lan；
 #   4. 其余（云主机、公网服务器、取不到地址）：不写。
+#   WSL（--wsl）：上面都没定下来时也是 lan（卸载保留数据再装时服务文件已经没了）。
 # 只读，不改系统；要在 create_systemd_services 之前调用（它会重写服务文件）。重复运行结果一样。
 # upgrade.sh 不重写服务文件里的这一项，所以升级上来的机器保持原样。
 # AFX_SERVER_UNIT 只给测试用，默认 /etc/systemd/system/acornfox-server.service。
@@ -1938,6 +1996,10 @@ choose_default_exposure() {
             DEFAULT_EXPOSURE=$(sed -n 's/^ExecStart=.* --default-exposure \([a-z]*\).*$/\1/p' "$unit" | head -n 1)
         fi
     elif lan_server; then
+        DEFAULT_EXPOSURE=lan
+    fi
+    # WSL（Windows 里的 Linux）：卸载保留数据后重装，服务文件已经没了，不能因此退回“只本机”
+    if [ -z "$DEFAULT_EXPOSURE" ] && ${WSL_MODE:-false} && [ -z "${CLOUD:-}" ]; then
         DEFAULT_EXPOSURE=lan
     fi
     case "$DEFAULT_EXPOSURE" in
@@ -1983,8 +2045,80 @@ enable_lan_console() {
     esac
 }
 
+# register_wsl_local_target：WSL 里装好后替用户登记“本机”（root 的命令行配置里）。
+# Windows 上的 acornfox 命令（wsl 转发）就是以 root 在这里运行的，不登记它第一次用就报“没有服务器”。
+# 重复运行不出错：已经登记过就跳过。只在 --wsl 时运行。
+register_wsl_local_target() {
+    ${WSL_MODE:-false} || return 0
+    local i
+    for i in $(seq 1 20); do
+        [ -S /run/acornfox/api.sock ] && break
+        sleep 1
+    done
+    if /usr/local/bin/acornfox target use local >/dev/null 2>&1; then
+        log_info "本机已经登记过，跳过"
+        return 0
+    fi
+    if /usr/local/bin/acornfox target add local --url unix:///run/acornfox/api.sock >/dev/null 2>&1 \
+        && /usr/local/bin/acornfox target use local >/dev/null 2>&1; then
+        log_success "已登记本机（acornfox target: local）"
+    else
+        log_warn "没能登记本机；装好后在 Windows 里运行 acornfox target add local --url unix:///run/acornfox/api.sock"
+    fi
+}
+
+# show_summary_macvm：Mac 的虚拟机里的摘要：只讲 Mac 上怎么用。
+show_summary_macvm() {
+    cat << EOF
+
+${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
+${GREEN}  AcornFox 已安装在这台 Mac 的虚拟机里${NC}
+${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
+
+${BLUE}服务状态:${NC}
+  • acornfox-server: $(systemctl is-active acornfox-server)
+  • acornfox-runner: $(systemctl is-active acornfox-runner)
+  • 入口容器 acornfox-edge: $(docker inspect -f '{{.State.Status}}' acornfox-edge 2>/dev/null || echo 未创建)
+
+${BLUE}在 Mac 上用:${NC}
+  • 浏览器打开控制台: ${YELLOW}http://127.0.0.1:18802/${NC}（第一次打开时设一个控制台密码）
+  • 命令行: ${YELLOW}acornfox${NC}（在 Mac 上运行，经 ssh 连这台虚拟机）
+${LAN_CONSOLE_RESULT:+  • 局域网里的电脑、手机打开控制台: ${YELLOW}${LAN_CONSOLE_RESULT}${NC}
+}
+EOF
+}
+
+# show_summary_wsl：WSL 里的摘要：只讲 Windows 上怎么用（云服务器那些放行安全组、SSH 的话和这里无关）。
+show_summary_wsl() {
+    cat << EOF
+
+${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
+${GREEN}  AcornFox 已安装在这台电脑的 WSL 里${NC}
+${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
+
+${BLUE}服务状态:${NC}
+  • acornfox-server: $(systemctl is-active acornfox-server)
+  • acornfox-runner: $(systemctl is-active acornfox-runner)
+  • 入口容器 acornfox-edge: $(docker inspect -f '{{.State.Status}}' acornfox-edge 2>/dev/null || echo 未创建)
+
+${BLUE}在 Windows 上用:${NC}
+  • 浏览器打开控制台: ${YELLOW}http://localhost:18800/${NC}
+  • 命令行: ${YELLOW}acornfox${NC}（Windows 安装脚本放在你的用户目录里的小命令，实际在 WSL 里运行）
+${LAN_CONSOLE_RESULT:+  • 局域网里的电脑、手机打开控制台: ${YELLOW}${LAN_CONSOLE_RESULT}${NC}（要先让 Windows 放行，见 acornfox 的 Windows 说明）
+}
+EOF
+}
+
 # 显示安装摘要
 show_summary() {
+    if ${MAC_VM_MODE:-false}; then
+        show_summary_macvm
+        return
+    fi
+    if ${WSL_MODE:-false}; then
+        show_summary_wsl
+        return
+    fi
     # “下一步”分两种情况，和 AcornFox Skill 第 7 步的情况甲、乙一致：
     #   甲：AI 工作台（或用户自己）就登录在这台服务器上，直接登记本机 unix 套接字；
     #   乙：在自己的电脑上操作，装 CLI 后经 SSH 登记这台服务器。
@@ -2163,6 +2297,7 @@ main() {
     remove_replaced_edge
     enable_public_console
     enable_lan_console
+    register_wsl_local_target
 
     # 显示摘要
     show_summary

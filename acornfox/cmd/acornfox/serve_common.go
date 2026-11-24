@@ -86,6 +86,9 @@ type serverOptions struct {
 	// CheckPorts turns on the port check of the console's runtime page
 	// (the Linux server; GET /v1/runtime/checks).
 	CheckPorts bool
+	// WSL: this server runs inside WSL on Windows (--wsl): local-only apps
+	// listen on all interfaces too (reconcile.EdgeConfig.LocalListenAll).
+	WSL bool
 	// LANRelay lets acornfox serve relay <LAN>:P to the edge when Docker
 	// cannot bind the LAN address (lanforward.go). Desktop only.
 	LANRelay bool
@@ -162,7 +165,8 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		proxy, useAdminPort = newEdgeProxy(o, token)
 		edgeCfg = &reconcile.EdgeConfig{Mode: o.EdgeMode, AdminPort: o.EdgeAdminPort, AdminToken: token,
 			PortMin: o.PublicPortMin, PortMax: o.PublicPortMax, LANHost: o.LANHost,
-			UseAdminPort: useAdminPort,
+			LocalListenAll: o.WSL,
+			UseAdminPort:   useAdminPort,
 			OnSwitch: func(info runner.EdgeInfo) {
 				if err := writeEdgeSwitchRecord(o.DataDir, info, time.Now()); err != nil {
 					fmt.Fprintln(stderr, "edge switch record:", err)
@@ -257,6 +261,12 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 		platformvar.Host{PublicHost: o.PublicHost, Desktop: o.LANHost != nil, HTTPSPort: o.HTTPS.HTTPSPort}, o.AppDefaultExposure)
 	defer appCenter.Close()
 	apiCfg.AppCenter = appCenter
+	// App data backups and restores (also the snapshot an upgrade takes).
+	backups := newBackups(st, o.DataDir, runnerAPI, rec)
+	defer backups.Close()
+	apiCfg.Backups = backups
+	// The pre-upgrade snapshot of an app is a backup (internal/appbackup).
+	appCenter.SetSnapshots(backups)
 	apiCfg.PlatformVars = appCenter.PlatformVarProvider()
 	var relay *lanForwarder
 	if o.LANRelay && o.LANHost != nil && edgeCfg != nil && o.EdgeMode == runner.EdgeModeBridge {

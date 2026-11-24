@@ -55,6 +55,7 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		acmeEmail     = fs_.String("acme-email", "", "optional ACME account email")
 		publicListen  = fs_.String("public-console-listen", "127.0.0.1:18801", "public console gateway behind the entry proxy (loopback TCP only; empty disables it)")
 		lanPort       = fs_.Int("lan-console-port", 0, "局域网控制台端口（开启后监听 0.0.0.0；默认 18802）")
+		wslMode       = fs_.Bool("wsl", false, "这台服务器是 Windows 里的 WSL 发行版（install-windows.ps1 装的）或 Mac 上苹果 container 开的虚拟机（acornfox mac install，install.sh --mac-vm）：只本机的应用也监听所有网卡，谁能连到它们由 Windows 或 Mac 一侧的转发决定")
 		exposure      = fs_.String("default-exposure", "public", "新应用默认的对外方式：public、lan、local。不给时是 public（自己部署的项目），应用中心装的应用是 local；"+
 			"给了 lan 或 local 时两者都用它（install.sh 在局域网里新装的服务器上写 lan）")
 	)
@@ -127,6 +128,7 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		DefaultExposure:    *exposure,
 		AppDefaultExposure: appCenterExposure(*exposure),
 		LANConsolePort:     *lanPort,
+		WSL:                *wslMode,
 		CheckPorts:         true,
 		ServerLAN:          serverLANAddress(*publicHost, platform.LinuxInstallCloud("/etc/acornfox/install.env")),
 		Setup: &setupDeps{

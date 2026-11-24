@@ -391,6 +391,12 @@ func TestConsoleRoutesAndLegacyRedirect(t *testing.T) {
 			continue
 		}
 		h := rec.Header()
+		// Pictures from the main site and the Bilibili player, nothing else.
+		if csp := h.Get("Content-Security-Policy"); !strings.Contains(csp, "img-src 'self' data: https://acornfox.com;") ||
+			!strings.Contains(csp, "frame-src https://player.bilibili.com;") || !strings.Contains(csp, "default-src 'self'") ||
+			strings.Contains(csp, "script-src 'self' ") || strings.Count(csp, "https://") != 2 {
+			t.Errorf("GET %s: CSP = %q", path, csp)
+		}
 		if h.Get("Content-Security-Policy") != contentSecurityPolicy || !strings.Contains(h.Get("Content-Security-Policy"), "script-src 'self'") {
 			t.Errorf("GET %s: CSP = %q", path, h.Get("Content-Security-Policy"))
 		}

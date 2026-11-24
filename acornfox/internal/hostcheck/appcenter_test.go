@@ -28,7 +28,9 @@ func TestCheckCatalogSync(t *testing.T) {
 		{"failed", CatalogSync{At: at(30 * time.Minute), Code: "CAT-SYNC-08", Message: "所有来源都失败，继续用手上的目录", Serial: 3, Origin: "cache"}, "warn",
 			[]string{"30 分钟前同步失败", "CAT-SYNC-08 所有来源都失败", "catalog sync --json"}},
 		{"failed, code already in message", CatalogSync{At: at(30 * time.Minute), Code: "CAT-SYNC-07", Message: "CAT-SYNC-07 写不进去"}, "warn", []string{"（CAT-SYNC-07 写不进去）"}},
-		{"stale", CatalogSync{At: at(80 * time.Hour), OK: true, Serial: 3, Origin: "cache"}, "warn", []string{"上次同步是 3 天前", "超过两天"}},
+		{"stale", CatalogSync{At: at(80 * time.Hour), OK: true, Serial: 3, Origin: "cache"}, "warn", []string{"上次同步是 3 天前", "超过一天"}},
+		{"a day old", CatalogSync{At: at(30 * time.Hour), OK: true, Serial: 3, Origin: "cache"}, "warn", []string{"超过一天", "每 6 小时"}},
+		{"within a day", CatalogSync{At: at(20 * time.Hour), OK: true, Serial: 3, Origin: "cache"}, "ok", []string{"同步过"}},
 	}
 	for _, c := range cases {
 		r := &recorder{}
@@ -43,6 +45,79 @@ func TestCheckCatalogSync(t *testing.T) {
 		for _, w := range c.want {
 			if !strings.Contains(l.text, w) {
 				t.Errorf("%s: %q lacks %q", c.name, l.text, w)
+			}
+		}
+	}
+}
+
+func TestCheckCatalogShow(t *testing.T) {
+	cases := []struct {
+		name  string
+		s     ShowInUse
+		level string // "" = no line
+		code  string
+		want  []string
+	}{
+		{"server does not say", ShowInUse{}, "", "", nil},
+		{"in use", ShowInUse{State: "ok", Serial: 12}, "ok", "SETUP-SYNC-01", []string{"展示内容：在用（序号 12）"}},
+		{"none", ShowInUse{State: "none"}, "ok", "SETUP-SYNC-01", []string{"没带展示内容", "清单里的名字和一句话"}},
+		{"signature", ShowInUse{State: "failed", Code: "CAT-SHOW-01", Message: "CAT-SHOW-01 show.json 的签名验不过"}, "warn", "CAT-SHOW-01",
+			[]string{"没法用（CAT-SHOW-01 show.json 的签名验不过）", "装应用不受影响", "acornfox faults CAT-SHOW-01"}},
+		{"code not in the message", ShowInUse{State: "failed", Code: "CAT-SHOW-02", Message: "序号对不上"}, "warn", "CAT-SHOW-02", []string{"（CAT-SHOW-02 序号对不上）"}},
+		{"failed without a code", ShowInUse{State: "failed", Message: "x"}, "warn", "CAT-SHOW-03", []string{"acornfox faults CAT-SHOW-03"}},
+	}
+	for _, c := range cases {
+		r := &recorder{}
+		CheckCatalogShow(r, CatalogSync{Show: c.s})
+		if c.level == "" {
+			if len(r.lines) != 0 {
+				t.Errorf("%s: %+v", c.name, r.lines)
+			}
+			continue
+		}
+		if len(r.lines) != 1 || r.lines[0].level != c.level || r.lines[0].code != c.code {
+			t.Errorf("%s: %+v", c.name, r.lines)
+			continue
+		}
+		for _, w := range c.want {
+			if !strings.Contains(r.lines[0].text, w) {
+				t.Errorf("%s: %q lacks %q", c.name, r.lines[0].text, w)
+			}
+		}
+	}
+}
+
+func TestCheckCatalogSkills(t *testing.T) {
+	cases := []struct {
+		name  string
+		s     SkillsInUse
+		level string // "" = no line
+		code  string
+		want  []string
+	}{
+		{"server does not say", SkillsInUse{}, "", "", nil},
+		{"none listed", SkillsInUse{State: "none"}, "", "", nil},
+		{"all usable", SkillsInUse{State: "ok", Count: 3}, "ok", "SETUP-SYNC-01", []string{"操作手册：3 份都在用"}},
+		{"some missing", SkillsInUse{State: "failed", Count: 2, Code: "CAT-SKILL-02", Message: "有 1 份操作手册没取到或没对上"}, "warn", "CAT-SKILL-02",
+			[]string{"没取全（CAT-SKILL-02 有 1 份", "能用的 2 份", "acornfox faults CAT-SKILL-02"}},
+		{"failed without a code", SkillsInUse{State: "failed", Message: "x"}, "warn", "CAT-SKILL-01", []string{"acornfox faults CAT-SKILL-01"}},
+	}
+	for _, c := range cases {
+		r := &recorder{}
+		CheckCatalogSkills(r, CatalogSync{Skills: c.s})
+		if c.level == "" {
+			if len(r.lines) != 0 {
+				t.Errorf("%s: %+v", c.name, r.lines)
+			}
+			continue
+		}
+		if len(r.lines) != 1 || r.lines[0].level != c.level || r.lines[0].code != c.code {
+			t.Errorf("%s: %+v", c.name, r.lines)
+			continue
+		}
+		for _, w := range c.want {
+			if !strings.Contains(r.lines[0].text, w) {
+				t.Errorf("%s: %q lacks %q", c.name, r.lines[0].text, w)
 			}
 		}
 	}

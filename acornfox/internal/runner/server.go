@@ -69,6 +69,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathImageAdopt, s.handleImageAdopt)
 	s.mux.HandleFunc("POST "+PathImageLoad, s.handleImageLoad)
 	s.mux.HandleFunc("POST "+PathVolumeWrite, s.handleVolumeWrite)
+	s.mux.HandleFunc("POST "+PathVolumeExport, s.handleVolumeExport)
+	s.mux.HandleFunc("POST "+PathVolumeImport, s.handleVolumeImport)
+	s.mux.HandleFunc("POST "+PathVolumeSizes, s.handleVolumeSizes)
 	s.mux.HandleFunc("POST "+PathContainerExec, s.handleContainerExec)
 }
 

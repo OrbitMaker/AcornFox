@@ -48,6 +48,20 @@ const (
 	CodeSyncDisconnected = "CAT-SYNC-11" // a private catalog was disconnected (access revoked or catalog disabled); its cache was removed
 	CodeSyncWrongCatalog = "CAT-SYNC-12" // the signed index names another catalog than the one it was fetched for (one catalog's index passed off as another's)
 
+	// Display content (show.json, show.json.sig). None of these stops an
+	// install or a sync: the pages fall back to the manifests' words.
+	CodeShowSignature = "CAT-SHOW-01" // show.json has no signature or it does not verify with any trusted key
+	CodeShowSerial    = "CAT-SHOW-02" // the show's serial is not the index's (published with another catalog version)
+	CodeShowFormat    = "CAT-SHOW-03" // show.json is not a catalog-show document of schema 1, or breaks a limit (doc over 64 KB, repeated id)
+	CodeShowFetch     = "CAT-SHOW-04" // show.json could not be fetched (network, status other than 200 and 404, too big)
+
+	// Operating manuals of apps and solutions (skills/*.md, listed in show.json).
+	// None of these stops an install or a sync: the app simply has no
+	// manual on this machine until a later sync fetches it.
+	CodeSkillFetch    = "CAT-SKILL-01" // a listed manual could not be fetched (network, not there, HTTP error) or is not in the local cache
+	CodeSkillMismatch = "CAT-SKILL-02" // its size or sha256 differs from show.json, or it is not text; thrown away
+	CodeSkillTooBig   = "CAT-SKILL-03" // over 32 KB (show.json lists a bigger size, or the file is bigger)
+
 	// Local read (Load).
 	CodeLoad = "CAT-LOAD-01" // neither the cache nor the built-in snapshot is usable
 
@@ -92,6 +106,13 @@ var Faults = []FaultDef{
 	{CodeSyncGateway, "向下载网关取私有目录失败（连不上、签名不对或网关拒绝），手上的私有目录不变", "看 message 里的 GW- 编号；GW-AUTH-01 多半是本机时间不准；稍后 acornfox catalog sync 重试"},
 	{CodeSyncDisconnected, "私有目录已断开：授权被撤销或目录被停用。它的应用不再显示，已经装好的照常运行，但不能再装、不能升级", "告诉用户联系给连接码的人；要恢复就拿新连接码 acornfox catalog connect"},
 	{CodeSyncWrongCatalog, "签名的索引写明属于别的目录（例如私有目录的索引被放到公共来源，或网关把别的目录的索引当成这个目录下发），不用", "公共目录：换下一个来源（自动），继续用手上的目录，把这个来源报给维护者；私有目录：手上的版本不变，告诉给连接码的人"},
+	{CodeShowSignature, "展示内容（show.json）没有签名，或签名验不过；这一份展示内容没有用，页面退回用清单里的名字和一句话。装应用不受影响", "不用处理，下一次发布会带新的；持续出现就告诉维护者：发布时的签名钥匙是不是程序认识的"},
+	{CodeShowSerial, "展示内容的序号和目录的序号对不上（两个文件不是同一次发布的），没有用", "不用处理，下一次发布会对上；持续出现告诉维护者发布流程把两个文件分开发了"},
+	{CodeShowFormat, "展示内容的格式不对：不是 schema 1 的 catalog-show、有重复的编号，或某篇介绍超过 64 KB；没有用", "告诉维护者：用 acornfox catalog verify 查发布目录里的 show.json"},
+	{CodeShowFetch, "取展示内容失败（网络不通、返回的不是 200 也不是 404、文件太大）；目录本身不受影响，下次同步再试", "不用处理；一直这样就看 acornfox catalog sync --json 和网络"},
+	{CodeSkillFetch, "展示内容里列了某个应用或解决方案的操作手册，这台机器没取到（网络不通、来源上没有这个文件），或本地缓存里没有；这份手册暂时没有，应用照常装，AI 照通用 Skill 做", "不用处理，下次同步目录会再取；一直这样就看 acornfox catalog sync --json 的 skills 里写的原因"},
+	{CodeSkillMismatch, "取到的操作手册大小或 sha256 和展示内容里写的不一致，或不是文本，已丢弃，不会被使用", "不用处理，下次同步会再取；持续出现告诉维护者：发布目录里的手册和 show.json 对不上（acornfox catalog verify 发布目录 会报）"},
+	{CodeSkillTooBig, "操作手册超过 32 KB 上限，没有使用", "告诉维护者缩短这份手册（上限 32 KB）"},
 	{CodeLoad, "本地缓存和内置快照都用不了", "重新安装程序，或同步一次目录"},
 	{CodePkgAllFailed, "所有来源都没下到和目录一致的应用包", "看 attempts 里每个来源的编号；稍后重试"},
 	{CodePkgMismatch, "下载的应用包 sha256 或大小和目录不一致，已丢弃", "换下一个来源（自动）；都不对就等目录更新"},

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acornfox/acornfox/internal/appbackup"
 	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/deploylog"
 	"github.com/acornfox/acornfox/internal/hostcheck"
@@ -204,6 +205,10 @@ type Config struct {
 	Sources func() DownloadSources
 	// Version is this program's version, reported by GET /v1/status.
 	Version string
+
+	// Backups backs up and restores app data (package appbackup); nil =>
+	// the backup routes answer 404.
+	Backups *appbackup.Manager
 }
 
 // HostProvider returns a point-in-time host resource snapshot. It must return
@@ -250,6 +255,7 @@ type server struct {
 	checkPorts      hostcheck.Ports
 	sources         func() DownloadSources
 	version         string
+	backups         *appbackup.Manager
 
 	// resMu serializes the allocation check and the write that follows it
 	// (app limits, add-ons, new apps, server-wide caps), see resources.go.
@@ -318,6 +324,7 @@ func newServer(cfg Config) *server {
 		checkPorts:      cfg.CheckPorts,
 		sources:         cfg.Sources,
 		version:         cfg.Version,
+		backups:         cfg.Backups,
 	}
 }
 
@@ -381,7 +388,9 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/runtime/checks", s.getRuntimeChecks)
 	s.registerCatalog(mux)
 	s.registerServices(mux)
+	s.registerMachine(mux)
 	s.registerPlatformDomain(mux)
+	s.registerBackups(mux)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the

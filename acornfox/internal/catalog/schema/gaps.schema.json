@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://acornfox.com/catalog/schema/gaps-1.json",
-  "title": "AcornFox 缺变量登记 schema 1",
-  "description": "目录仓库根目录的 gaps.yaml：起草清单时发现平台还没有要用的变量或写法，就登记一条。应用不用等：那一项先写死、标成要用户做一步，或先不配。平台补上后，acornfox catalog gaps 会提示可以改清单了。这个文件不进应用包，也不进 index.json。",
+  "title": "AcornFox 缺口登记 schema 1",
+  "description": "目录仓库根目录的 gaps.yaml，登记两种缺口。变量缺口（kind 不写，或写 variable）：起草清单时发现平台还没有要用的变量或写法，就登记一条；应用不用等，那一项先写死、标成要用户做一步，或先不配；平台补上后，acornfox catalog gaps 会提示可以改清单了。手册缺口（kind: manual）：应用手册里凡是平台做不到、只好让用户自己做（或在手册里绕过去）的一步都要登记，手册里那一行以【要用户自己做】开头、行尾带缺口编号；不登记手册发不出去。这个文件不进应用包，也不进 index.json。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "gaps"],
@@ -12,24 +12,52 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "app", "upstream_key", "want", "layer", "handling", "doc_url", "date", "status"],
-        "properties": {
-          "id": { "type": "string", "pattern": "^GAP-[0-9]{4}$", "description": "编号，按登记顺序往下排，不重复、不复用" },
-          "app": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "哪个应用（apps/ 下的目录名）" },
-          "upstream_key": { "type": "string", "minLength": 1, "description": "上游的配置项名字，例如环境变量名 HF_ENDPOINT、配置文件里的键" },
-          "want": { "type": "string", "minLength": 1, "description": "想要的变量或写法。要平台变量就写 platform.<名字>（例如 platform.mirror.huggingface），平台有了这个名字后会提示可以关了；其他情况用一句话写清楚" },
-          "layer": { "enum": ["platform", "param", "format"], "description": "建议归哪层：platform 值随环境变（地址、时区、下载源、硬件），做成平台变量；param 值随应用变，做成清单参数；format 清单格式要加新写法" },
-          "handling": { "enum": ["hardcoded", "user_step", "omitted"], "description": "现在怎么处理的：hardcoded 写死在清单里；user_step 写进 user_steps 让用户做一步；omitted 先不配" },
-          "doc_url": { "type": "string", "pattern": "^https?://", "description": "上游文档里讲这个配置项的地址" },
-          "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "登记日期" },
-          "status": { "enum": ["open", "planned", "done"], "description": "open 还没定；planned 已排进某个平台版本；done 平台已有，清单已改" },
-          "done_in": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "status 是 done 时必填：哪个平台版本补上的" },
-          "note": { "type": "string" }
-        },
-        "if": { "required": ["status"], "properties": { "status": { "const": "done" } } },
-        "then": { "required": ["done_in"] }
+        "if": { "required": ["kind"], "properties": { "kind": { "const": "manual" } } },
+        "then": { "$ref": "#/$defs/manualGap" },
+        "else": { "$ref": "#/$defs/variableGap" }
       }
+    }
+  },
+  "$defs": {
+    "variableGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "app", "upstream_key", "want", "layer", "handling", "doc_url", "date", "status"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^GAP-[0-9]{4}$", "description": "编号，按登记顺序往下排，不重复、不复用（变量缺口和手册缺口共用一串编号）" },
+        "kind": { "const": "variable", "description": "可以不写：不写就是变量缺口" },
+        "app": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$", "description": "哪个应用（apps/ 下的目录名）" },
+        "upstream_key": { "type": "string", "minLength": 1, "description": "上游的配置项名字，例如环境变量名 HF_ENDPOINT、配置文件里的键" },
+        "want": { "type": "string", "minLength": 1, "description": "想要的变量或写法。要平台变量就写 platform.<名字>（例如 platform.mirror.huggingface），平台有了这个名字后会提示可以关了；其他情况用一句话写清楚" },
+        "layer": { "enum": ["platform", "param", "format"], "description": "建议归哪层：platform 值随环境变（地址、时区、下载源、硬件），做成平台变量；param 值随应用变，做成清单参数；format 清单格式要加新写法" },
+        "handling": { "enum": ["hardcoded", "user_step", "omitted"], "description": "现在怎么处理的：hardcoded 写死在清单里；user_step 写进 user_steps 让用户做一步；omitted 先不配" },
+        "doc_url": { "type": "string", "pattern": "^https?://", "description": "上游文档里讲这个配置项的地址" },
+        "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "登记日期" },
+        "status": { "enum": ["open", "planned", "done"], "description": "open 还没定；planned 已排进某个平台版本；done 平台已有，清单已改" },
+        "done_in": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "status 是 done 时必填：哪个平台版本补上的" },
+        "note": { "type": "string" }
+      },
+      "if": { "required": ["status"], "properties": { "status": { "const": "done" } } },
+      "then": { "required": ["done_in"] }
+    },
+    "manualGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "apps", "want", "handling", "where", "date", "status"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^GAP-[0-9]{4}$", "description": "编号，同变量缺口，手册里 【要用户自己做】 那一行行尾写 （GAP-0004）" },
+        "kind": { "const": "manual" },
+        "apps": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,39}$" }, "description": "哪几个应用的手册碰到了这一步（apps/ 下的目录名）；周报按这里的个数排名" },
+        "want": { "type": "string", "minLength": 1, "description": "希望平台能做什么，一句话。要平台变量就写 platform.<名字>，平台有了这个名字后会提示可以关了；其他情况用一句话写清楚" },
+        "handling": { "enum": ["user_step", "workaround"], "description": "手册现在怎么处理的：user_step 让用户自己做；workaround 手册里绕过去了" },
+        "where": { "type": "string", "minLength": 1, "description": "在手册的哪一节，例如“装好以后怎么用起来”" },
+        "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "登记日期" },
+        "status": { "enum": ["open", "planned", "done"], "description": "open 还没定；planned 已排进某个平台版本；done 平台已有，手册已改" },
+        "done_in": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "status 是 done 时必填：哪个平台版本补上的" },
+        "note": { "type": "string" }
+      },
+      "if": { "required": ["status"], "properties": { "status": { "const": "done" } } },
+      "then": { "required": ["done_in"] }
     }
   }
 }

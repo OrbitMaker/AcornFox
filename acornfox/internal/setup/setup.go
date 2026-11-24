@@ -9,13 +9,14 @@
 //
 //	binary   the acornfox program (already done when the server runs)
 //	runtime  Docker: an existing one, Docker Desktop (only when the user picks
-//	         it), or the built-in runtime (Colima + Lima on macOS, WSL 2 +
-//	         Docker Engine on Windows; no Docker Desktop, no windows)
+//	         it), or the built-in runtime (Colima + Lima on macOS; no Docker
+//	         Desktop, no windows). Windows does not use this step: AcornFox
+//	         runs inside WSL as the Linux build (install-windows.ps1)
 //	edge     the entry proxy (image and container)
 //	checks   self checks; every required one must pass
 //
-// The status is kept in the data directory (setup.json), so a restart (or a
-// reboot Windows asked for) resumes where it stopped. Downloads keep their
+// The status is kept in the data directory (setup.json), so a restart
+// resumes where it stopped. Downloads keep their
 // partial files; resuming continues them. Every failure carries a fault code
 // from Faults (faults.go) with the next step to take.
 package setup
@@ -60,8 +61,6 @@ const (
 // Need kinds (Status.Need.Kind).
 const (
 	NeedChooseRuntime = "choose_runtime"
-	NeedAdmin         = "admin"
-	NeedReboot        = "reboot"
 )
 
 // Item is one piece of work inside a step (a download, starting the VM).
@@ -176,10 +175,8 @@ type Event struct {
 
 // StartOptions is the body of POST /v1/setup/start.
 type StartOptions struct {
-	Runtime      string `json:"runtime,omitempty"`       // "" = decide (existing, else ask or builtin)
-	Mirror       string `json:"mirror,omitempty"`        // download base URL to try first (overrides the configured one)
-	ConfirmAdmin bool   `json:"confirm_admin,omitempty"` // Windows: the user agreed to the admin prompt (used once, not kept)
-	LocalOnly    bool   `json:"local_only,omitempty"`    // Windows: skip the LAN firewall rule; apps open on this computer only
+	Runtime string `json:"runtime,omitempty"` // "" = decide (existing, else ask or builtin)
+	Mirror  string `json:"mirror,omitempty"`  // download base URL to try first (overrides the configured one)
 }
 
 // Detection is what RuntimeProvider.Detect saw.
@@ -445,10 +442,6 @@ func (m *Manager) Start(opts StartOptions) error {
 	if opts.Mirror == "" {
 		opts.Mirror = m.st.Options.Mirror
 	}
-	// "Local only" sticks until the user confirms the admin step again.
-	if !opts.LocalOnly && !opts.ConfirmAdmin {
-		opts.LocalOnly = m.st.Options.LocalOnly
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel, m.running = cancel, true
 	now := m.cfg.Now()
@@ -497,7 +490,7 @@ func (m *Manager) Boot() {
 	m.mu.Lock()
 	state, need := m.st.State, m.st.Need
 	m.mu.Unlock()
-	if state == StateNeedsUser && need != nil && need.Kind != NeedReboot {
+	if state == StateNeedsUser && need != nil {
 		// A choice is still open; detect again in case Docker appeared.
 		_ = m.Start(StartOptions{})
 		return
@@ -509,9 +502,6 @@ func (m *Manager) finish(state string, f *Failure, need *Need) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.running = false
-	// An admin confirmation covers one run: a later boot never elevates
-	// without asking again.
-	m.st.Options.ConfirmAdmin = false
 	now := m.cfg.Now()
 	m.st.State, m.st.Error, m.st.Need = state, f, need
 	switch state {

@@ -40,6 +40,7 @@ type Client struct {
 	standard *peer.Client // for ordinary short requests
 	long     *peer.Client // for long build requests (25 min)
 	pull     *peer.Client // for image pulls (pullTimeout plus a minute)
+	bulk     *peer.Client // for volume data streams (volumedata.go)
 }
 
 // NewClient returns a Client for the runner socket at path, whose server must
@@ -51,6 +52,7 @@ func NewClient(path string, peerUID uint32) *Client {
 		standard: peer.NewClient(path, peerUID, clientDefaultTimeout),
 		long:     peer.NewClient(path, peerUID, buildTimeout),
 		pull:     peer.NewClient(path, peerUID, pullTimeout+time.Minute),
+		bulk:     peer.NewClient(path, peerUID, volumeDataTimeout),
 	}
 }
 

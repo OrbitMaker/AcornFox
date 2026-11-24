@@ -111,6 +111,46 @@ func TestDoctorGatewayUsesGatewayBase(t *testing.T) {
 	}
 }
 
+func TestDoctorCatalogShow(t *testing.T) {
+	old := doctorCatalogStatus
+	t.Cleanup(func() { doctorCatalogStatus = old })
+	at := time.Now().Add(-time.Hour)
+	doctorCatalogStatus = func(context.Context, string) (hostcheck.CatalogSync, bool) {
+		return hostcheck.CatalogSync{At: &at, OK: true, Serial: 3, Origin: "cache",
+			Show: hostcheck.ShowInUse{State: "failed", Code: "CAT-SHOW-01", Message: "CAT-SHOW-01 show.json 的签名验不过"}}, true
+	}
+	r := doctorReport{OK: true}
+	doctorCatalog(context.Background(), &r, "/nonexistent.sock")
+	if len(r.Items) != 2 || r.Items[0].Check != "SETUP-SYNC-01" || r.Items[1].Check != "CAT-SHOW-01" || r.Items[1].Level != "warn" || !strings.Contains(r.Items[1].Text, "展示内容") {
+		t.Fatalf("items %+v", r.Items)
+	}
+}
+
+func TestDoctorCatalogSkills(t *testing.T) {
+	old := doctorCatalogStatus
+	t.Cleanup(func() { doctorCatalogStatus = old })
+	at := time.Now().Add(-time.Hour)
+	for _, c := range []struct {
+		name  string
+		s     hostcheck.SkillsInUse
+		level string
+		check string
+		text  string
+	}{
+		{"all usable", hostcheck.SkillsInUse{State: "ok", Count: 2}, "ok", "SETUP-SYNC-01", "操作手册：2 份都在用"},
+		{"not complete", hostcheck.SkillsInUse{State: "failed", Count: 1, Code: "CAT-SKILL-02", Message: "有 1 份操作手册没取到或没对上"}, "warn", "CAT-SKILL-02", "没取全"},
+	} {
+		doctorCatalogStatus = func(context.Context, string) (hostcheck.CatalogSync, bool) {
+			return hostcheck.CatalogSync{At: &at, OK: true, Serial: 3, Origin: "cache", Show: hostcheck.ShowInUse{State: "ok", Serial: 3}, Skills: c.s}, true
+		}
+		r := doctorReport{OK: true}
+		doctorCatalog(context.Background(), &r, "/nonexistent.sock")
+		if len(r.Items) != 3 || r.Items[2].Check != c.check || r.Items[2].Level != c.level || !strings.Contains(r.Items[2].Text, c.text) {
+			t.Errorf("%s: items %+v", c.name, r.Items)
+		}
+	}
+}
+
 func TestDoctorCatalog(t *testing.T) {
 	old := doctorCatalogStatus
 	t.Cleanup(func() { doctorCatalogStatus = old })

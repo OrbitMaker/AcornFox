@@ -112,8 +112,6 @@ func DesktopSockets() []string {
 
 func defaultDockerHost() string {
 	switch GOOS {
-	case "windows":
-		return "npipe:////./pipe/docker_engine"
 	case "darwin":
 		for _, p := range DesktopSockets() {
 			if _, err := StatFile(p); err == nil {
@@ -135,7 +133,7 @@ func guessRuntime(host string) string {
 		return "OrbStack"
 	case strings.Contains(h, ".colima"):
 		return "Colima"
-	case strings.Contains(h, "/.docker/run/"), strings.Contains(h, "docker_engine") && GOOS == "windows", strings.Contains(h, "dockerdesktop"):
+	case strings.Contains(h, "/.docker/run/"), strings.Contains(h, "dockerdesktop"):
 		return "Docker Desktop"
 	default:
 		return "Docker"

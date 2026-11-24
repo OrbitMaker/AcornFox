@@ -1,6 +1,7 @@
-// 登记一条服务的表单：先选服务类型，再按那种类型的定义（GET /v1/services/kinds 的 fields）生成表单，
-// 必填、保密、枚举、默认值、提示都照定义来，不为某种类型写专门的表单。提交是 POST /v1/services。
-// 设置里的“服务”分区和安装弹窗里的“现在登记一条”共用这里。
+// “添加我已有的”（以前叫“登记一条”，评估 N5）：先问“你手里有哪一种？”，每种写服务类型自带的中文名和说明（目录里定义的，页面不为某一种写专门的说法），
+// 再按那种类型的定义（GET /v1/services/kinds 的 fields）生成表单，必填、保密、枚举、默认值、提示都照定义来，不为某种类型写专门的表单。
+// 提交是 POST /v1/services。同样的事用命令行怎么做收在默认收起的“用命令行”里。
+// 设置里的“服务”分区和安装弹窗里的当场添加共用这里。错误框只写人话，故障编号放进“复制给 AI 工作台”。
 import * as React from 'react'
 import { ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -11,13 +12,16 @@ import {
   type FieldProblem, type ServiceFormValues,
 } from '@/lib/services'
 import type { ServiceField, ServiceKind, ServiceView } from '@/lib/types'
+import { AskAI, CliFold } from '@/components/fold'
 import { Button } from '@/components/ui/button'
-import { Select, Spinner } from '@/components/ui/controls'
+import { Select } from '@/components/ui/controls'
+import { Loading } from '@/components/ui/skeleton'
+import { SkForm } from '@/components/skeletons'
 import { CopyLine } from '@/components/ui/copy'
 import { Dialog, DialogHead } from '@/components/ui/dialog'
 import { Input, Label } from '@/components/ui/input'
 
-export const NOT_SUPPORTED = '这个版本的服务端还没有这项功能，升级 AcornFox 后才有'
+export const NOT_SUPPORTED = '这个版本还没有这项功能，升级 AcornFox 以后才有'
 
 export function useKinds() {
   return usePoll((s) => listKinds(s), 0)
@@ -79,18 +83,25 @@ export function FieldInput({ field: f, value, problem, onChange, idPrefix, place
   )
 }
 
+// ApiErrorBox：出错时的一句话。故障编号不单独显示，带编号的错误旁边给“复制给 AI 工作台”，编号在复制的文字里。
 export function ApiErrorBox({ err, children }: { err: ApiError | Error; children?: React.ReactNode }) {
   const ae = err as ApiError
+  const code = ae.code && /^[A-Z]+-/.test(ae.code) ? ae.code : ''
   return (
     <div className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs" role="alert">
-      <div className="font-medium text-danger">{ae.code && /^[A-Z]+-/.test(ae.code) ? ae.code + ' · ' : ''}{err.message}</div>
-      {ae.hint && <div className="mt-0.5 text-muted-foreground">{ae.hint}</div>}
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-danger">{err.message}</div>
+          {ae.hint && <div className="mt-0.5 text-muted-foreground">{ae.hint}</div>}
+        </div>
+        {code && <AskAI variant="ghost" text={`AcornFox 控制台在服务这一块报错：${code} ${err.message}${ae.hint ? '（' + ae.hint + '）' : ''}。用 acornfox skill 帮我查。`} />}
+      </div>
       {children}
     </div>
   )
 }
 
-// ServiceForm：一种服务类型的登记表单（名字 + 那种类型的各项）。
+// ServiceForm：添加一种服务的表单（名字 + 那种类型的各项）。
 export function ServiceForm({ kind: k, onAdded, onCancel, idPrefix = 'svc-' }: {
   kind: ServiceKind
   onAdded: (s: ServiceView) => void
@@ -128,22 +139,25 @@ export function ServiceForm({ kind: k, onAdded, onCancel, idPrefix = 'svc-' }: {
       {(k.fields || []).map((f) => (
         <FieldInput key={f.key} field={f} idPrefix={idPrefix} value={values[f.key] || ''} problem={problemFor(f.key)} onChange={(v) => setValues((x) => ({ ...x, [f.key]: v }))} />
       ))}
-      <CopyLine text={addCommand(k, name, values)} />
-      {(k.fields || []).some((f) => f.secret) && <p className="-mt-1.5 text-2xs text-muted-foreground">命令行不写保密项的值，运行后会让你输入。登记后页面上保密项只显示后 4 位。</p>}
+      {(k.fields || []).some((f) => f.secret) && <p className="-mt-1 text-2xs text-muted-foreground">添加以后，密码这类只显示后 4 位。</p>}
+      <CliFold>
+        <CopyLine text={addCommand(k, name, values)} />
+        {(k.fields || []).some((f) => f.secret) && <p className="text-2xs text-muted-foreground">命令行不写密码这类的值，运行后会让你输入。</p>}
+      </CliFold>
       {err && <ApiErrorBox err={err} />}
       <div className="flex justify-end gap-2">
         {onCancel && <Button variant="outline" onClick={onCancel}>取消</Button>}
-        <Button onClick={submit} disabled={busy}>{busy && <Spinner />}登记</Button>
+        <Button onClick={submit} loading={busy}>添加</Button>
       </div>
     </div>
   )
 }
 
-// KindPicker：选服务类型。每种带一句说明。
+// KindPicker：“你手里有哪一种？”每种写它自带的中文名，下面带它自己的说明。
 function KindPicker({ kinds, onPick }: { kinds: ServiceKind[]; onPick: (k: ServiceKind) => void }) {
-  if (kinds.length === 0) return <p className="text-xs text-muted-foreground">应用目录里还没有定义任何服务类型。</p>
+  if (kinds.length === 0) return <p className="text-xs text-muted-foreground">现在还没有能添加的服务。</p>
   return (
-    <ul className="flex flex-col gap-1.5" aria-label="服务类型">
+    <ul className="flex flex-col gap-1.5" aria-label="你手里有哪一种">
       {kinds.map((k) => (
         <li key={k.kind}>
           <button type="button" onClick={() => onPick(k)}
@@ -162,7 +176,7 @@ function KindPicker({ kinds, onPick }: { kinds: ServiceKind[]; onPick: (k: Servi
 
 const TITLE_ID = 'svc-add-title'
 
-// RegisterServiceDialog：设置里的“登记一条”。先选类型，再填。
+// RegisterServiceDialog：设置里的“添加我已有的”。先问手里有哪一种，再填。
 export function RegisterServiceDialog({ open, onClose, onAdded }: { open: boolean; onClose: () => void; onAdded: (s: ServiceView) => void }) {
   return (
     <Dialog open={open} onClose={onClose} labelledBy={TITLE_ID}>
@@ -176,8 +190,8 @@ function RegisterBody({ onClose, onAdded }: { onClose: () => void; onAdded: (s: 
   const [picked, setPicked] = React.useState<ServiceKind | null>(null)
   return (
     <>
-      <DialogHead id={TITLE_ID} title={picked ? <>登记：<KindName label={picked.label} kind={picked.kind} /></> : '登记一条服务'} desc={picked ? picked.summary : '先选是哪种服务。登记后，装应用时需要这种服务的都能接上它。'} />
-      {kinds.loading && !kinds.data && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />正在读取…</div>}
+      <DialogHead id={TITLE_ID} title={picked ? <>添加：<KindName label={picked.label} kind={picked.kind} /></> : '你手里有哪一种？'} />
+      <Loading when={kinds.loading && !kinds.data} skeleton={<SkForm n={2} />}>{null}</Loading>
       {kinds.error && <ApiErrorBox err={kinds.error} />}
       {!kinds.loading && !kinds.error && kinds.data === null && <p className="text-sm text-muted-foreground" data-testid="services-unsupported">{NOT_SUPPORTED}</p>}
       {kinds.data && !picked && <KindPicker kinds={kinds.data} onPick={setPicked} />}
@@ -191,17 +205,17 @@ function RegisterBody({ onClose, onAdded }: { onClose: () => void; onAdded: (s: 
   )
 }
 
-// InlineRegister：安装弹窗里当场登记一条指定类型的服务。
+// InlineRegister：安装弹窗里当场添加一条指定类型的服务。
 export function InlineRegister({ kind, onAdded, onCancel, idPrefix }: { kind: string; onAdded: (s: ServiceView) => void; onCancel: () => void; idPrefix: string }) {
   const kinds = useKinds()
   const k = kinds.data?.find((x) => x.kind === kind)
   return (
     <div className="mt-2 rounded-md border bg-muted/40 p-2.5" data-testid="inline-register">
-      {kinds.loading && !kinds.data && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />正在读取…</div>}
+      <Loading when={kinds.loading && !kinds.data} skeleton={<SkForm n={2} />}>{null}</Loading>
       {kinds.error && <ApiErrorBox err={kinds.error} />}
       {!kinds.loading && !kinds.error && !k && (
         <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>{kinds.data === null ? NOT_SUPPORTED : '应用目录里没有这种服务的定义，用下面的命令登记'}</span>
+          <span>{kinds.data === null ? NOT_SUPPORTED : '这种服务现在还不能在页面上添加'}</span>
           <Button size="sm" variant="ghost" onClick={onCancel}>收起</Button>
         </div>
       )}

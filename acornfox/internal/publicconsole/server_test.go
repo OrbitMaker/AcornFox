@@ -277,6 +277,12 @@ func TestGatewayLoginFlow(t *testing.T) {
 		// the Origin check would reject: the login form could never succeed.
 		t.Fatalf("login page Referrer-Policy = %q", rp)
 	}
+	// 忘了密码 on the public entry: the command regenerates the password, with
+	// this entry's domain.
+	if w := f.do("GET", "/login", nil, "", "", ""); !strings.Contains(w.Body.String(), "<code>acornfox public-console enable panel.example.com --reset-password</code>") ||
+		!strings.Contains(w.Body.String(), "PUBCON-05") || !strings.Contains(w.Body.String(), "新密码只显示一次") {
+		t.Fatalf("public login page lacks the forgot-password fold:\n%s", w.Body.String())
+	}
 	// Token login of `acornfox open` is not reachable publicly.
 	if w := f.do("GET", "/console/login?t=x", nil, "", "", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("/console/login = %d", w.Code)

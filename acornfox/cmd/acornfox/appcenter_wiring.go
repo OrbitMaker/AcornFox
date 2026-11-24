@@ -17,6 +17,7 @@ import (
 	"github.com/acornfox/acornfox/internal/identity"
 	"github.com/acornfox/acornfox/internal/platform"
 	"github.com/acornfox/acornfox/internal/platformvar"
+	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -48,6 +49,7 @@ func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRu
 		DataDir:         dataDir,
 		UploadDir:       uploadDir,
 		Gateway:         gw,
+		MirrorProbe:     mirrorProbe(dataDir),
 		Version:         cli.Version,
 		DefaultExposure: appExposure,
 		// The platform variables: the standalone edition's provider, filled
@@ -67,6 +69,36 @@ func newAppCenter(st *state.Store, dataDir, uploadDir string, runnerAPI serverRu
 		// another one (testkeys_tag.go).
 		Arch: testAppArch(),
 	})
+}
+
+// mirrorProbe is how the install engine measures the image sources for an
+// image that also has a gateway archive: the sources' own probe (the first
+// bytes of the image's largest layer; the same table and order the runner
+// pulls with), the fastest usable one. The registry is read when the probe
+// runs, so a changed region or mirror list applies at once.
+func mirrorProbe(dataDir string) func(ctx context.Context, ref, arch string) appinstall.MirrorSpeed {
+	return func(ctx context.Context, ref, arch string) appinstall.MirrorSpeed {
+		reg, _ := sourcesRegistry(dataDir)
+		srcs := reg.Sources()
+		if strings.HasPrefix(ref, runner.GHCRRegistry+"/") {
+			srcs = reg.GHCRSources()
+		}
+		return fastestSource(runner.ProbeSources(ctx, srcs, ref, arch))
+	}
+}
+
+// fastestSource is the usable source with the highest measured speed.
+func fastestSource(res map[string]runner.ProbeResult) appinstall.MirrorSpeed {
+	var best appinstall.MirrorSpeed
+	for host, r := range res {
+		if !r.Usable() {
+			continue
+		}
+		if !best.Usable || r.MBps > best.MBps {
+			best = appinstall.MirrorSpeed{Source: host, MBps: r.MBps, Usable: true}
+		}
+	}
+	return best
 }
 
 // appDiskFree is the free space an install can count on: the partition

@@ -11,7 +11,7 @@ import (
 // Code shapes: upper-case codes of the program and the scripts, lower-case
 // diagnosis codes, and the fallback.
 var (
-	upperCode = regexp.MustCompile(`^(CAT-(INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|OPEN-APP|APP-VARS|ID-KEY|PDOMAIN|PUBCON|GW-[A-Z]+)-\d{2}$`)
+	upperCode = regexp.MustCompile(`^(CAT-(INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}$`)
 	lowerCode = regexp.MustCompile(`^[a-z][a-z_]*[a-z]$`)
 )
 
@@ -26,6 +26,10 @@ func groupOf(code string) string {
 		return "INSTALL"
 	case strings.HasPrefix(code, "UPGRADE-"), strings.HasPrefix(code, "UNINSTALL-"):
 		return "UPGRADE"
+	case strings.HasPrefix(code, "WIN-"):
+		return "WIN"
+	case strings.HasPrefix(code, "MAC-"):
+		return "MAC"
 	case strings.HasPrefix(code, "SETUP-"):
 		return "SETUP"
 	case strings.HasPrefix(code, "EDGE-"):
@@ -34,22 +38,28 @@ func groupOf(code string) string {
 		return "LAN"
 	case strings.HasPrefix(code, "PDOMAIN-"), strings.HasPrefix(code, "PUBCON-"):
 		return "DOMAIN"
+	case strings.HasPrefix(code, "BKP-"):
+		return "BKP"
 	case strings.HasPrefix(code, "OPEN-APP-"):
 		return "OPEN"
-	case strings.HasPrefix(code, "CAT-INST-"), strings.HasPrefix(code, "APP-VARS-"):
+	case strings.HasPrefix(code, "CAT-INST-"), strings.HasPrefix(code, "APP-VARS-"), strings.HasPrefix(code, "APP-APPLY-"), strings.HasPrefix(code, "APP-UPG-"):
 		return "INST"
 	case strings.HasPrefix(code, "CAT-CONN-"):
 		return "CONN"
 	case strings.HasPrefix(code, "CAT-SVC-"):
 		return "SVC"
-	case strings.HasPrefix(code, "CAT-SYNC-"), strings.HasPrefix(code, "CAT-LOAD-"), strings.HasPrefix(code, "CAT-PKG-"):
+	case strings.HasPrefix(code, "CAT-SYNC-"), strings.HasPrefix(code, "CAT-LOAD-"), strings.HasPrefix(code, "CAT-PKG-"), strings.HasPrefix(code, "CAT-SHOW-"), strings.HasPrefix(code, "CAT-SKILL-"):
 		return "SYNC"
 	case strings.HasPrefix(code, "CAT-"):
 		return "PUB"
+	case strings.HasPrefix(code, "CLI-"):
+		return "CLI"
 	case strings.HasPrefix(code, "GW-"):
 		return "GW"
 	case strings.HasPrefix(code, "ID-KEY-"):
 		return "ID"
+	case strings.HasPrefix(code, "MACHINE-"):
+		return "MACHINE"
 	}
 	return "?"
 }

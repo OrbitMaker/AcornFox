@@ -25,7 +25,11 @@ const catalogBrowseUsage = `应用中心（在服务器上看目录、装应用�
                          这台 AcornFox 太旧、装不了的应用和配方后面写“要先升级到 x.y.z”
                          （--json 里是 needs_platform，不用升时是空串）：先升级 AcornFox 再装
   catalog info 应用      应用详情和安装时能填的参数（不含平台生成的密码）。只读
-  catalog sync           让服务器现在同步一次目录
+  catalog show 应用      应用中心页面上这个应用（或解决方案）的展示内容：一句话、角标、行业、搜索词和那篇介绍。
+                         用户问“这个应用能做什么”时读它。只读（acornfox catalog show -h 看详情）
+  catalog skill 应用或解决方案  它的操作手册：这个应用特有的经验（装之前问什么、装好怎么用起来、怎么确认能用、常见问题）。
+                         装或用应用中心里的应用之前先取它，有就照着做；没有也不算出错。只读（acornfox catalog skill -h 看详情）
+  catalog sync           让服务器现在同步一次目录（不管上次是什么时候；平时它每 6 小时自动同步，打开页面时也会看一眼）
   catalog platform-vars  平台变量：平台交给应用的时区、下载源、访问地址等，这台机器上的值、哪些能改。只读
 从目录安装：acornfox install 应用 / acornfox install --recipe 配方（acornfox install -h 看详情）
 装好以后看它是用什么设置装的：acornfox apps vars 应用（只读）`
@@ -459,6 +463,9 @@ func (a *app) cmdCatalogSync(ctx context.Context, args []string) int {
 		a.out.human("%s", st.Message)
 		if st.Code != "" {
 			a.out.human("编号 %s", st.Code)
+		}
+		if sk := st.Skills; sk != nil && sk.State == "failed" {
+			a.out.human("操作手册：%s（编号 %s，不影响装应用，下次同步会再取）", sk.Message, sk.Code)
 		}
 	}
 	if !st.OK {
@@ -1010,6 +1017,10 @@ func (a *app) reportTask(ctx context.Context, ac client.AppCenterAPI, t client.I
 			extra["diagnosis"] = diag
 		}
 		a.emitRaw(t.Raw, extra)
+	} else if t.Kind == "reapply" {
+		a.reportReapply(t)
+	} else if t.Kind == "upgrade" || t.Kind == "rollback" {
+		a.reportUpgradeTask(t)
 	} else {
 		switch t.Status {
 		case "running":
@@ -1141,7 +1152,7 @@ func verdictOf(t client.InstallTask) installtiming.Verdict {
 	if t.Timing != nil {
 		return *t.Timing
 	}
-	it := installtiming.Task{ID: t.ID, Status: t.Status, CreatedAt: t.CreatedAt, FinishedAt: t.FinishedAt, KeepVolumes: t.KeepVolumes}
+	it := installtiming.Task{ID: t.ID, Status: t.Status, CreatedAt: t.CreatedAt, FinishedAt: t.FinishedAt, KeepVolumes: t.KeepVolumes, Reapply: t.Kind == "reapply", Upgrade: t.Kind == "upgrade", Rollback: t.Kind == "rollback"}
 	if t.Fault != nil {
 		it.FaultCode, it.FaultMsg = t.Fault.Code, t.Fault.Message
 	}

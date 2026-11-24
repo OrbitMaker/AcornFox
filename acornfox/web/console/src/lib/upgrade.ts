@@ -1,9 +1,35 @@
-// AcornFox 自身的升级，和“应用要更新版本的 AcornFox 才能装”的判断。都是纯函数和常量，测试见 upgrade.test.ts。
+// AcornFox 自身的升级（有没有新版本、这台机器该用哪条命令），和“应用要更新版本的 AcornFox 才能装”的判断。
+// 都是纯函数和常量，测试见 upgrade.test.ts。
 import type { AppDetail, Recipe } from './types'
 
 // 升级命令和 README、Skill 里公开的一致（管道运行就视为同意，不用 -y）。设置的“升级”分区和应用中心的提示共用。
 export const UPGRADE_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade'
 export const UPGRADE_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash -s -- upgrade'
+
+// upgradeCommand：这台机器该用的那一条升级命令。china 取自体检结果（GET /v1/runtime/checks 的 sources.china），
+// 页面知道这台机器在国内还是海外，就只给一条（评估 N13）；不知道（null）时两条都给。
+export function upgradeCommand(china: boolean | null | undefined): string[] {
+  if (china === true) return [UPGRADE_CN]
+  if (china === false) return [UPGRADE_GLOBAL]
+  return [UPGRADE_CN, UPGRADE_GLOBAL]
+}
+
+// upgradeState：现在的版本和线上最新的比（latest 取自 GET /v1/status 的 latest_version，样稿第 10 版的假字段，要服务端配合）。
+//   new：有新版本；latest：已是最新；unknown：不知道线上最新是哪个（旧服务端没给）。
+export function upgradeState(version: string | undefined, latest: string | undefined): 'new' | 'latest' | 'unknown' {
+  if (!version || !latest) return 'unknown'
+  return latest !== version && higherVersion(latest, version) === latest ? 'new' : 'latest'
+}
+
+// upgradeForAI：“复制给 AI 工作台帮我升级”复制的那段话，带上该用的命令。
+export function upgradeForAI(version: string | undefined, latest: string | undefined, cmds: string[]): string {
+  const to = latest && upgradeState(version, latest) === 'new' ? latest : '最新版'
+  return [
+    `用 acornfox skill 帮我把这台机器上的 AcornFox 从 ${version || '现在的版本'} 升级到 ${to}。`,
+    cmds.length === 1 ? '在这台机器上运行（会先打印要做的事；升级没成功会自动恢复原样）：' : '这台机器在国内用第一条，在海外用第二条（会先打印要做的事；升级没成功会自动恢复原样）：',
+    ...cmds,
+  ].join('\n')
+}
 
 // needsPlatform：这个应用或配方要先把 AcornFox 升到哪个版本；不用升级（空串）或旧服务端没给这一项时是 ''。
 export function needsPlatform(x: { needs_platform?: string } | null | undefined): string {

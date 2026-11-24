@@ -43,15 +43,19 @@ describe('整理安装设置', () => {
     const g = groupVars(differ().vars)
     expect(g.mine.map((v) => v.name)).toEqual(['params.admin_email', 'params.smtp_password'])
     expect(g.platform.map((v) => v.name)).toEqual(['platform.app.url', 'platform.region', 'platform.tz'])
-    expect(g.custom.map((v) => v.name)).toEqual(['params.encryption_key', 'params.prune_days'])
+    // 平台生成、用户不用记的密钥（加密密钥）不列
+    expect(g.custom.map((v) => v.name)).toEqual(['params.prune_days'])
     expect(g.differs.map((v) => v.name)).toEqual(['platform.app.url'])
     // 安装时改过的平台给的值也算用户填的
     expect(groupVars([row({ layer: 'system', origin: 'platform_user' })]).mine.length).toBe(1)
   })
   it('收起时那一句：都没变、一项不一样、几项不一样', () => {
     expect(varsSummary(varsOf())).toEqual({ text: '都是自动配好的，不用管', tone: '' })
-    expect(varsSummary(differ())).toEqual({ text: '访问地址和现在的不一样', tone: 'warning' })
-    expect(varsSummary(varsOf({}, [{ ...url, name: 'platform.app.host', label: '这个应用访问地址里的主机' }, url])).text).toBe('访问地址等 2 项和现在的不一样')
+    expect(varsSummary(differ())).toEqual({ text: '打开的地址和现在的不一样', tone: 'warning' })
+    const tz = row({ name: 'platform.tz', layer: 'system', label: '时区', value: 'Asia/Shanghai', value_now: 'UTC', differs: true, origin: 'platform' })
+    expect(varsSummary(varsOf({}, [tz, url])).text).toBe('打开的地址等 2 项和现在的不一样')
+    // 访问地址里的主机、协议并进“打开的地址”，不单独算一项
+    expect(varsSummary(varsOf({}, [{ ...url, name: 'platform.app.host', label: '这个应用访问地址里的主机' }, url])).text).toBe('打开的地址和现在的不一样')
   })
   it('服务端的说明：页面上已经有的（不一样那条、只能看、只显示后 4 位）不重复列，其余原样', () => {
     const legacy = '这个应用是用旧格式的清单装的：照常运行'
@@ -106,7 +110,8 @@ describe('设置里的安装设置', () => {
     const set = await openSettings()
     const sum = await within(set).findByTestId('summary-vars')
     expect(sum.textContent).toBe('都是自动配好的，不用管')
-    expect(sections(set)).toEqual(['access', 'vars', 'limits', 'data', 'more', 'delete'])
+    // 从应用中心装的应用没有“开发者设置”那一行
+    expect(sections(set)).toEqual(['access', 'vars', 'limits', 'data', 'delete'])
     expect(within(set).getByRole('button', { name: /安装设置/ }).getAttribute('aria-expanded')).toBe('false')
     expect(set.querySelector('[data-section="vars"]')!.textContent).not.toMatch(/变量|platform\.|params\./)
   })
@@ -115,7 +120,7 @@ describe('设置里的安装设置', () => {
     routes['GET /v1/apps/n8n/vars'] = differ
     const set = await openSettings()
     const sum = await within(set).findByTestId('summary-vars')
-    expect(sum.textContent).toBe('访问地址和现在的不一样')
+    expect(sum.textContent).toBe('打开的地址和现在的不一样')
     expect(sum.parentElement!.querySelector('.bg-warning')).not.toBeNull()
   })
 
@@ -124,28 +129,30 @@ describe('设置里的安装设置', () => {
     const set = await openSettings('n8n', 'vars')
     const body = await within(set).findByTestId('vars-body')
     const box = within(body).getByTestId('var-differs')
-    expect(box.textContent).toContain('访问地址和现在的不一样：装的时候是 http://127.0.0.1:18810，现在应该是 http://192.168.31.64:18810。')
+    expect(box.textContent).toContain('打开的地址和现在的不一样：装的时候是 http://127.0.0.1:18810，现在应该是 http://192.168.31.64:18810。')
     expect(box.textContent).toContain('应用里记的还是装的时候的，用到它的地方可能不对。')
     expect(within(box).getByText('怎么办')).toBeTruthy()
-    expect(box.textContent).toContain('APP-VARS-01')
+    // 故障编号只在“复制给 AI 工作台”的文字里，页面上不写
+    expect(box.textContent).not.toContain('APP-VARS-01')
     expect(within(box).getByTestId('var-fix').textContent).toBe(FIX)
     expect(within(body).getAllByTestId('var-item').map((x) => x.textContent)).toEqual(['管理员邮箱admin@example.com', '发信密码******9z8y'])
-    expect((await within(body).findByTestId('var-link')).textContent).toBe('数据库用的是 postgres16 的')
+    expect((await within(body).findByTestId('var-link')).textContent).toBe('数据库用的是postgres16')
     expect(within(body).getByTestId('vars-notes').textContent).toBe('这个应用是用旧格式的清单装的')
-    expect(within(body).getByText('其余 5 项是自动填好的')).toBeTruthy()
+    expect(within(body).getByText('还有 4 项是自动填好的')).toBeTruthy()
     expect(within(body).queryByText('时区')).toBeNull()
     expect(body.textContent).not.toMatch(/变量|platform\.|params\.|--set|--reveal/)
   })
 
-  it('全部显示：分“平台填的”“自定义的”两组，每项中文名和值；最下面写只能看', async () => {
+  it('全部显示：分“平台自动填的”“安装设置”两组，每项中文名和值', async () => {
     const set = await openSettings('n8n', 'vars')
     const body = await within(set).findByTestId('vars-body')
     fireEvent.click(within(body).getByRole('button', { name: '全部显示' }))
-    const plat = within(body).getByTestId('vars-group-平台填的')
-    expect(within(plat).getAllByTestId('var-item').map((x) => x.textContent)).toEqual(['访问地址http://192.168.31.64:18810', '网络区域cn', '时区Asia/Shanghai'])
-    const custom = within(body).getByTestId('vars-group-自定义的')
-    expect(within(custom).getAllByTestId('var-item').map((x) => x.textContent)).toEqual(['加密密钥******a3f9', '每周清理旧记录14'])
-    expect(within(body).getByText('现在只能看，还不能在这里改。')).toBeTruthy()
+    const plat = within(body).getByTestId('vars-group-平台自动填的')
+    expect(within(plat).getAllByTestId('var-item').map((x) => x.textContent)).toEqual(['打开的地址http://192.168.31.64:18810', '网络区域cn', '时区Asia/Shanghai'])
+    const custom = within(body).getByTestId('vars-group-安装设置')
+    expect(within(custom).getAllByTestId('var-item').map((x) => x.textContent)).toEqual(['每周清理旧记录14'])
+    // 不讲还没做的功能（改设置）
+    expect(within(body).queryByText(/还不能在这里改/)).toBeNull()
     expect(within(body).queryByRole('button', { name: '全部显示' })).toBeNull()
   })
 
@@ -156,9 +163,10 @@ describe('设置里的安装设置', () => {
     fireEvent.click(within(body).getByRole('button', { name: '显示发信密码' }))
     expect(await within(body).findByText('pw-12345679z8y')).toBeTruthy()
     expect(calls.filter((c) => c === '/v1/apps/n8n/vars?reveal=true').length).toBe(1)
-    // 别的保密项还遮着
+    // 平台生成、用户不用记的密钥一直不列，也不会取到完整值
     fireEvent.click(within(body).getByRole('button', { name: '全部显示' }))
-    expect(within(body).getByText('******a3f9')).toBeTruthy()
+    expect(within(body).queryByText('******a3f9')).toBeNull()
+    expect(within(body).queryByText('k-0123456789a3f9')).toBeNull()
     fireEvent.click(within(body).getByRole('button', { name: '遮住发信密码' }))
     expect(within(body).queryByText('pw-12345679z8y')).toBeNull()
     fireEvent.click(within(body).getByRole('button', { name: '显示发信密码' }))
@@ -197,19 +205,19 @@ describe('设置里的安装设置', () => {
     expect(sections(set)).not.toContain('vars')
   })
   it('几项和现在不一样时只有一个提示框：先说一句，再一项一行，怎么办只出现一次', async () => {
-    const host = { ...url, name: 'platform.app.host', label: '这个应用访问地址里的主机（不带端口）', value: '127.0.0.1', value_now: '192.168.31.64' }
+    const host = row({ name: 'platform.tz', layer: 'system', label: '时区', value: 'Asia/Shanghai', value_now: 'UTC', differs: true, origin: 'platform', code: 'APP-VARS-01', fix: FIX })
     routes['GET /v1/apps/n8n/vars'] = () => varsOf({}, [host, url])
     location.hash = '#app-n8n/settings/vars'
     render(<App />)
     const set = await screen.findByTestId('app-settings')
-    await vi.waitFor(() => expect(within(set).getByTestId('summary-vars').textContent).toBe('访问地址等 2 项和现在的不一样'))
+    await vi.waitFor(() => expect(within(set).getByTestId('summary-vars').textContent).toBe('打开的地址等 2 项和现在的不一样'))
     const body = await within(set).findByTestId('vars-body')
     expect(within(body).getAllByTestId('var-differs').length).toBe(1)
     const box = within(body).getByTestId('var-differs')
     expect(box.textContent).toContain('有 2 项和现在的不一样。应用里记的还是装的时候的，用到它们的地方可能不对。')
     expect(within(box).getAllByTestId('var-differs-item').map((x) => x.textContent)).toEqual([
-      '访问地址里的主机：装的时候是 127.0.0.1，现在应该是 192.168.31.64',
-      '访问地址：装的时候是 http://127.0.0.1:18810，现在应该是 http://192.168.31.64:18810',
+      '时区：装的时候是 Asia/Shanghai，现在应该是 UTC',
+      '打开的地址：装的时候是 http://127.0.0.1:18810，现在应该是 http://192.168.31.64:18810',
     ])
     expect(within(box).getAllByTestId('var-fix').length).toBe(1)
   })

@@ -17,9 +17,19 @@ import (
 // and routes apps through it (Config.Proxy). Nil manages no container (the
 // tests that only look at routes).
 type EdgeConfig struct {
-	Mode       string // runner.EdgeModeHost (Linux) | runner.EdgeModeBridge (macOS, Windows)
+	Mode       string // runner.EdgeModeHost (Linux, also inside WSL on Windows) | runner.EdgeModeBridge (macOS)
 	AdminPort  int
 	AdminToken string
+
+	// LocalListenAll (host mode, inside WSL on Windows): apps whose exposure
+	// is local listen on all interfaces like the others instead of on
+	// 127.0.0.1. Who may reach them is decided by Windows: the portproxy
+	// rules install-windows.ps1 keeps cover only the apps that are not local.
+	// Why: WSL's localhost forwarding keeps a stale mapping when a port that
+	// listened on every interface starts listening on 127.0.0.1 only (the edge
+	// reloads without a gap), so a local-only app would stop opening on the
+	// Windows computer itself.
+	LocalListenAll bool
 
 	// UseAdminPort is called when the runner reports the entry container's
 	// management endpoint on another port than the one in use (after a
@@ -111,7 +121,7 @@ func (r *Reconciler) appRoute(a state.App, ci runner.ContainerInfo) (edge.Route,
 	if r.bridgeMode() && r.exposureOf(a) != state.ExposureLocal {
 		rt.LANPort = a.PublicPort + LANPortOffset
 	}
-	if !r.bridgeMode() && r.exposureOf(a) == state.ExposureLocal {
+	if !r.bridgeMode() && r.exposureOf(a) == state.ExposureLocal && !(r.cfg.Edge != nil && r.cfg.Edge.LocalListenAll) {
 		rt.Listen = "127.0.0.1"
 	}
 	return rt, true

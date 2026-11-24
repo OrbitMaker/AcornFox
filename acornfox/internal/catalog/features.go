@@ -57,6 +57,10 @@ const BasePlatform = "0.6.0"
 
 const v060 = BasePlatform
 
+// v070 is the platform version that first reapplies settings to an app
+// already installed (init steps with when on_reapply and on_change).
+const v070 = "0.7.0"
+
 // Feature is one row of the table.
 type Feature struct {
 	Key   string `json:"key"`
@@ -229,6 +233,10 @@ var featureTable = withExecRows(withStepRows([]Feature{
 	{"manifest:/init/*/name", v060},
 	{"manifest:/init/*/when", v060},
 	{"manifest:/init/*/when=after_healthy", v060},
+	{"manifest:/init/*/when=on_reapply", v070},
+	{"manifest:/init/*/when=on_change", v070},
+	{"manifest:/init/*/watch", v070},
+	{"manifest:/init/*/watch/*", v070},
 	{"manifest:/init/*/http", v060},
 	{"manifest:/init/*/http/method", v060},
 	{"manifest:/init/*/http/method=GET", v060},

@@ -5,7 +5,7 @@ package main
 // Docker's data root, the ports AcornFox needs, the clock, the download
 // gateway, the app catalog sync, the entry proxy (doctor_edge.go) and the
 // services the installed apps are plugged into (fault codes SETUP-SVC-01, EDGE-01..04, SETUP-DISK-01, SETUP-PORT-01..05,
-// SETUP-CLOCK-01, SETUP-GW-01, SETUP-SYNC-01 and CAT-SVC-08; the full
+// SETUP-CLOCK-01, SETUP-GW-01, SETUP-SYNC-01, CAT-SVC-08 and BKP-01, BKP-08, BKP-10, BKP-14; the full
 // entries are in internal/faults, `acornfox faults <code>`).
 
 import (
@@ -101,7 +101,10 @@ func linuxHostChecks(ctx context.Context, r *doctorReport, dc *dockerclient.Clie
 	if svc.err == nil {
 		doctorCatalog(ctx, r, socket)
 		doctorAppServices(ctx, r, socket)
+		doctorAppsBehind(ctx, r, socket)
+		doctorAppsOutdated(ctx, r, socket)
 		doctorPlatformDomain(ctx, r, socket)
+		doctorBackups(ctx, r, socket)
 	}
 	doctorLANConsole(r, use.LANNoPassword)
 }
@@ -147,6 +150,8 @@ func doctorCatalog(ctx context.Context, r *doctorReport, socket string) {
 		return
 	}
 	hostcheck.CheckCatalogSync(r, s, time.Now())
+	hostcheck.CheckCatalogShow(r, s)
+	hostcheck.CheckCatalogSkills(r, s)
 }
 
 // queryCatalogSync reads GET /v1/catalog of acornfox-server.
@@ -166,10 +171,17 @@ func queryCatalogSync(ctx context.Context, socket string) (hostcheck.CatalogSync
 	if err != nil {
 		return hostcheck.CatalogSync{}, false
 	}
-	return hostcheck.CatalogSync{
+	cs := hostcheck.CatalogSync{
 		At: l.Sync.At, OK: l.Sync.OK, Skipped: l.Sync.Skipped, Code: l.Sync.Code, Message: l.Sync.Message,
 		Source: l.Sync.Source, Serial: l.Serial, Origin: l.Origin,
-	}, true
+	}
+	if sh := l.Sync.Show; sh != nil {
+		cs.Show = hostcheck.ShowInUse{State: sh.State, Code: sh.Code, Message: sh.Message, Serial: sh.Serial}
+	}
+	if sk := l.Sync.Skills; sk != nil {
+		cs.Skills = hostcheck.SkillsInUse{State: sk.State, Count: sk.Count, Code: sk.Code, Message: sk.Message}
+	}
+	return cs, true
 }
 
 // doctorAppServices reports the services the installed apps are plugged
@@ -185,6 +197,75 @@ func doctorAppServices(ctx context.Context, r *doctorReport, socket string) {
 		return
 	}
 	hostcheck.CheckAppServices(r, q.services, q.unreadable, q.installed)
+}
+
+// doctorAppsBehind warns about each app from the app center whose settings
+// are behind (the platform's values or the services it is plugged into
+// changed since it was applied: APP-VARS-01). Read-only; nothing is added
+// when the server cannot be asked or is older than reapply.
+func doctorAppsBehind(ctx context.Context, r *doctorReport, socket string) {
+	qctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	c, err := client.Connect(qctx, client.Target{URL: unixURL(socket)})
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	ap, ok := any(c).(client.AppApplyAPI)
+	if !ok {
+		return
+	}
+	v, err := ap.PlatformAffected(qctx, "")
+	if err != nil {
+		return
+	}
+	for _, a := range v.Apps {
+		if a.Blocked != "" || !a.Differs {
+			continue
+		}
+		var names []string
+		for _, x := range a.Vars {
+			names = append(names, x.Name)
+		}
+		restart := ""
+		if a.Restart {
+			restart = "，会重启它"
+		}
+		r.warn("APP-VARS-01", "应用 %s 的设置落在后面了（%s 和现在的不一样）：acornfox apps reapply %s --plan 看会改什么%s，用户同意后加 --yes", a.App, strings.Join(names, "、"), a.App, restart)
+	}
+}
+
+// doctorAppsOutdated says which apps from the app center have a newer version
+// (not a fault: a line to look at; the user decides when to upgrade) and
+// which have a snapshot from before an upgrade kept (APP-UPG-*). Read-only;
+// nothing is added when the server cannot be asked or is older than upgrades.
+func doctorAppsOutdated(ctx context.Context, r *doctorReport, socket string) {
+	qctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	c, err := client.Connect(qctx, client.Target{URL: unixURL(socket)})
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	apps, err := c.Apps(qctx)
+	if err != nil {
+		return
+	}
+	for _, a := range apps {
+		u := a.Upgrade
+		if u == nil {
+			continue
+		}
+		switch {
+		case u.Available != "" && u.CanUpgrade:
+			r.add(true, "APP-UPG-01", "应用 %s 有新版本 %s（现在 %s）：acornfox apps upgrade %s --plan 看会怎么升，升级要用户同意", a.Name, u.Available, a.CatalogVersion, a.Name)
+		case u.Available != "":
+			r.add(true, "APP-UPG-01", "应用 %s 有新版本 %s（现在 %s），但现在不能升级：%s %s", a.Name, u.Available, a.CatalogVersion, u.BlockedCode, u.Blocked)
+		}
+		if u.CanRollback && u.Snapshot != nil {
+			r.add(true, "APP-UPG-07", "应用 %s 留着升级前（%s）的快照 %s（约 %d MB），出问题可以 acornfox apps rollback %s --plan 退回", a.Name, u.Snapshot.Version, u.Snapshot.ID, u.Snapshot.SizeMB, a.Name)
+		}
+	}
 }
 
 // servicesQuery is the service registry as acornfox-server answered it.

@@ -1,9 +1,32 @@
-/* 字体自托管：Geist / Geist Mono（OFL-1.1，来自 @fontsource），只带拉丁字符；中文落到系统字体。 */
-@import '@fontsource/geist-sans/latin-400.css';
-@import '@fontsource/geist-sans/latin-500.css';
-@import '@fontsource/geist-sans/latin-600.css';
-@import '@fontsource/geist-mono/latin-400.css';
-@import '@fontsource/geist-mono/latin-500.css';
+/* 字体自托管：Geist / Geist Mono（OFL-1.1，字体文件来自 @fontsource），只管拉丁字母、数字和西文标点；中文落到系统字体。
+   样稿第 11 版：@font-face 自己写、带 unicode-range。原来直接引 @fontsource 的样式（没有 unicode-range），Geist 字体文件里带了
+   全角逗号、冒号、分号、句号、括号这些中文标点的字形，画出来是半角的样子（“5 个应用,4 个正常”）；现在这些标点、中文引号、
+   破折号、省略号都交给系统的中文字体（苹方等）画成全角。范围照 @fontsource 的 latin 子集，去掉 U+2014、U+2018-201D、U+2026。 */
+@font-face {
+  font-family: 'Geist Sans'; font-style: normal; font-display: swap; font-weight: 400;
+  src: url('../node_modules/@fontsource/geist-sans/files/geist-sans-latin-400-normal.woff2') format('woff2'), url('../node_modules/@fontsource/geist-sans/files/geist-sans-latin-400-normal.woff') format('woff');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2010-2013, U+2020-2022, U+2030, U+2032-2033, U+2039-203A, U+2044, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist Sans'; font-style: normal; font-display: swap; font-weight: 500;
+  src: url('../node_modules/@fontsource/geist-sans/files/geist-sans-latin-500-normal.woff2') format('woff2'), url('../node_modules/@fontsource/geist-sans/files/geist-sans-latin-500-normal.woff') format('woff');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2010-2013, U+2020-2022, U+2030, U+2032-2033, U+2039-203A, U+2044, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist Sans'; font-style: normal; font-display: swap; font-weight: 600;
+  src: url('../node_modules/@fontsource/geist-sans/files/geist-sans-latin-600-normal.woff2') format('woff2'), url('../node_modules/@fontsource/geist-sans/files/geist-sans-latin-600-normal.woff') format('woff');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2010-2013, U+2020-2022, U+2030, U+2032-2033, U+2039-203A, U+2044, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist Mono'; font-style: normal; font-display: swap; font-weight: 400;
+  src: url('../node_modules/@fontsource/geist-mono/files/geist-mono-latin-400-normal.woff2') format('woff2'), url('../node_modules/@fontsource/geist-mono/files/geist-mono-latin-400-normal.woff') format('woff');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2010-2013, U+2020-2022, U+2030, U+2032-2033, U+2039-203A, U+2044, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist Mono'; font-style: normal; font-display: swap; font-weight: 500;
+  src: url('../node_modules/@fontsource/geist-mono/files/geist-mono-latin-500-normal.woff2') format('woff2'), url('../node_modules/@fontsource/geist-mono/files/geist-mono-latin-500-normal.woff') format('woff');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2010-2013, U+2020-2022, U+2030, U+2032-2033, U+2039-203A, U+2044, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 
 @tailwind base;
 @tailwind components;
@@ -25,7 +48,8 @@
   --logo: 204 61% 15%; --tile-l: 36%;
   /* 图表的系列颜色（首页看板），照控制台样稿 */
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --s-other: #a1a1aa;
-  --radius: 0.5rem;
+  /* 圆角（样稿第 12 版）：四档，都在 4 的格子上。小件 4、控件 8、卡片和浮层 12、弹窗 16。规则见下面“圆角”一段。 */
+  --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px; --radius-xl: 16px; --radius: var(--radius-lg);
   --font-sans: 'Geist Sans', 'Geist', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   color-scheme: light;
@@ -65,6 +89,132 @@
   color-scheme: dark;
 }
 
+/* ───── 样稿第 12 版：动画档位、按钮材质、占位形状的变量 ─────
+   动画只用这一组曲线和时长（页面和组件里不另写 ease、不另写毫秒数）：
+     进场 --ease-out；点了以后马上落位的小件 --ease-out-strong；离场 --ease-in（只给离场）；
+     留在屏幕上只是挪位置、变大小 --ease-in-out；小的确认（开关的圆钮）--ease-overshoot；
+     从一处带到另一处（列表进详情）--ease-carry；转圈、进度条用 linear。
+   时长：悬停 --dur-hover、按下 --dur-press；小浮层（菜单、提示）进 --dur-sm-in、出 --dur-sm-out；
+     弹窗、抽屉进 --dur-md-in、出 --dur-md-out；页面间的过渡 --dur-lg；选中块滑动 --dur-move；带回弹的小件 --dur-settle。离场比进场短。
+   例外只有“等待”那一期自带的几个数（占位亮带 1.2 秒、内容淡入 200 毫秒相隔 40、刷新图标一圈 640 毫秒、提示的亮带 900 毫秒），写在各自的规则里。 */
+:root {
+  --ease-out: cubic-bezier(0, 0, .58, 1);
+  --ease-out-strong: cubic-bezier(.22, 1, .36, 1);
+  --ease-in: cubic-bezier(.42, 0, 1, 1);
+  --ease-in-out: cubic-bezier(.42, 0, .58, 1);
+  --ease-overshoot: cubic-bezier(.34, 1.56, .64, 1);
+  --ease-carry: cubic-bezier(.32, .72, 0, 1);
+  --dur-press: 120ms; --dur-hover: 140ms; --dur-color: 160ms;
+  --dur-sm-in: 180ms; --dur-sm-out: 130ms;
+  --dur-md-in: 280ms; --dur-md-out: 200ms;
+  --dur-lg: 380ms; --dur-move: 260ms; --dur-settle: 220ms;
+
+  /* 按钮材质（五层：面、边、上沿高光、下沿暗线、两层投影）。每种样子只换数值，结构在下面 .btn-face。
+     主要按钮和危险按钮的面从各自的底色（--primary、--destructive）按明度推出来，换主色不用改这里：
+     --pri-*-l 是在底色明度上加减多少（oklch 的 l，0～1）。 */
+  --pri-top-l: .075; --pri-bot-l: 0; --pri-top-hl: .115; --pri-bot-hl: .04; --pri-top-al: -.02; --pri-bot-al: .04; --pri-edge-l: -.09;
+  --pri-hi: rgb(255 255 255 / .18); --pri-lo: rgb(0 0 0 / .22); --pri-press: rgb(0 0 0 / .4); --pri-under: transparent;
+  --pri-tint: 100%; --pri-d1: 16%; --pri-d2: 22%; --pri-ts: 0 -1px 0 rgb(0 0 0 / .28);
+  /* 描边按钮（白键） */
+  --key-top: hsl(0 0% 100%); --key-bot: hsl(240 5% 96.4%); --key-top-h: hsl(0 0% 100%); --key-bot-h: hsl(240 5% 98.4%);
+  --key-top-a: hsl(240 5% 93.6%); --key-bot-a: hsl(240 5% 96.8%); --key-edge: hsl(240 6% 10% / .14);
+  --key-hi: rgb(255 255 255 / 1); --key-lo: rgb(0 0 0 / .06); --key-press: rgb(0 0 0 / .14); --key-under: rgb(255 255 255 / .9);
+  --key-d1: rgb(24 24 27 / .06); --key-d2: rgb(24 24 27 / .08);
+  /* 灰按钮（灰键） */
+  --key2-top: hsl(240 5% 96.2%); --key2-bot: hsl(240 5% 92.4%); --key2-top-h: hsl(240 5% 97.6%); --key2-bot-h: hsl(240 5% 94.2%);
+  --key2-top-a: hsl(240 5% 90.6%); --key2-bot-a: hsl(240 5% 93.6%); --key2-edge: hsl(240 6% 10% / .1); --key2-hi: rgb(255 255 255 / .85);
+  /* 幽灵按钮：平时没有面，悬停一层很淡的灰，按下是一个凹下去的槽 */
+  --ghost-hover: hsl(240 6% 10% / .06); --ghost-press: hsl(240 6% 10% / .1); --ghost-well: rgb(0 0 0 / .12);
+  /* 输入框、分段标签的槽：凹下去的一点暗；分段标签选中的那一块、开关的圆钮：浮起来的一点亮 */
+  --well: rgb(0 0 0 / .045); --well-strong: rgb(0 0 0 / .1);
+  --raise: 0 1px 2px rgb(24 24 27 / .1), 0 0 0 1px rgb(24 24 27 / .05); --raise-face: hsl(0 0% 100%);
+
+  /* 占位形状（等数据时）：底色和扫过去的亮带 */
+  --sk: rgb(240 240 242); --sk-band: rgb(255 255 255 / .75);
+  /* 提示（toast）的面 */
+  --toast-top: hsl(0 0% 100%); --toast-bot: hsl(220 30% 97.6%); --toast-edge: rgb(214 219 227 / .95);
+  --toast-shadow: 0 16px 36px rgb(17 24 39 / .08), 0 3px 10px rgb(17 24 39 / .05);
+}
+/* 彩色主色（蓝、绿、橙）在浅色下：面上下差得小一点，高光亮一点。 */
+:root[data-accent] { --pri-tint: 45%; --pri-d1: 20%; --pri-d2: 20%; --pri-top-l: .055; --pri-bot-l: -.015; --pri-top-hl: .085; --pri-bot-hl: .02; --pri-top-al: -.04; --pri-bot-al: .015; --pri-edge-l: -.12; --pri-hi: rgb(255 255 255 / .26); --pri-lo: rgb(0 0 0 / .16); --pri-ts: 0 -1px 0 rgb(0 0 0 / .18); }
+/* 深色：主要按钮在“中性”主色下是一颗白键（面几乎是白的，往下暗一点），描边和灰按钮是深灰键；投影换成黑的、收紧，免得糊成一片。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+  --pri-top-l: 0; --pri-bot-l: -.075; --pri-top-hl: 0; --pri-bot-hl: -.04; --pri-top-al: -.1; --pri-bot-al: -.05; --pri-edge-l: -.16;
+  --pri-hi: rgb(255 255 255 / 1); --pri-lo: rgb(0 0 0 / .1); --pri-press: rgb(0 0 0 / .2); --pri-under: rgb(255 255 255 / .05);
+  --pri-tint: 0%; --pri-d1: 55%; --pri-d2: 40%; --pri-ts: none;
+  --key-top: hsl(240 4% 17.5%); --key-bot: hsl(240 4% 13.5%); --key-top-h: hsl(240 4% 20.5%); --key-bot-h: hsl(240 4% 16%);
+  --key-top-a: hsl(240 4% 11%); --key-bot-a: hsl(240 4% 14%); --key-edge: hsl(240 4% 23%);
+  --key-hi: rgb(255 255 255 / .075); --key-lo: rgb(0 0 0 / .28); --key-press: rgb(0 0 0 / .5); --key-under: rgb(255 255 255 / .045);
+  --key-d1: rgb(0 0 0 / .5); --key-d2: rgb(0 0 0 / .32);
+  --key2-top: hsl(240 4% 15%); --key2-bot: hsl(240 4% 12.5%); --key2-top-h: hsl(240 4% 17.5%); --key2-bot-h: hsl(240 4% 14.5%);
+  --key2-top-a: hsl(240 4% 10%); --key2-bot-a: hsl(240 4% 12.5%); --key2-edge: hsl(240 4% 18%); --key2-hi: rgb(255 255 255 / .05);
+  --ghost-hover: hsl(0 0% 100% / .07); --ghost-press: hsl(0 0% 100% / .05); --ghost-well: rgb(0 0 0 / .5);
+  --well: rgb(0 0 0 / .35); --well-strong: rgb(0 0 0 / .5);
+  --raise: 0 1px 2px rgb(0 0 0 / .5), inset 0 1px 0 rgb(255 255 255 / .07); --raise-face: hsl(240 4% 20%);
+  --sk: rgb(255 255 255 / .08); --sk-band: rgb(255 255 255 / .07);
+  --toast-top: hsl(240 5% 13%); --toast-bot: hsl(240 6% 10.5%); --toast-edge: hsl(240 4% 21%);
+  --toast-shadow: 0 16px 36px rgb(0 0 0 / .45), 0 3px 10px rgb(0 0 0 / .35);
+  }
+  :root:not([data-theme='light'])[data-accent] {
+  --pri-top-l: .06; --pri-bot-l: -.01; --pri-top-hl: .095; --pri-bot-hl: .03; --pri-top-al: -.035; --pri-bot-al: .02; --pri-edge-l: -.12;
+  --pri-hi: rgb(255 255 255 / .22); --pri-lo: rgb(0 0 0 / .2); --pri-press: rgb(0 0 0 / .35); --pri-under: rgb(255 255 255 / .05); --pri-ts: none;
+  }
+}
+:root[data-theme='dark'] {
+  --pri-top-l: 0; --pri-bot-l: -.075; --pri-top-hl: 0; --pri-bot-hl: -.04; --pri-top-al: -.1; --pri-bot-al: -.05; --pri-edge-l: -.16;
+  --pri-hi: rgb(255 255 255 / 1); --pri-lo: rgb(0 0 0 / .1); --pri-press: rgb(0 0 0 / .2); --pri-under: rgb(255 255 255 / .05);
+  --pri-tint: 0%; --pri-d1: 55%; --pri-d2: 40%; --pri-ts: none;
+  --key-top: hsl(240 4% 17.5%); --key-bot: hsl(240 4% 13.5%); --key-top-h: hsl(240 4% 20.5%); --key-bot-h: hsl(240 4% 16%);
+  --key-top-a: hsl(240 4% 11%); --key-bot-a: hsl(240 4% 14%); --key-edge: hsl(240 4% 23%);
+  --key-hi: rgb(255 255 255 / .075); --key-lo: rgb(0 0 0 / .28); --key-press: rgb(0 0 0 / .5); --key-under: rgb(255 255 255 / .045);
+  --key-d1: rgb(0 0 0 / .5); --key-d2: rgb(0 0 0 / .32);
+  --key2-top: hsl(240 4% 15%); --key2-bot: hsl(240 4% 12.5%); --key2-top-h: hsl(240 4% 17.5%); --key2-bot-h: hsl(240 4% 14.5%);
+  --key2-top-a: hsl(240 4% 10%); --key2-bot-a: hsl(240 4% 12.5%); --key2-edge: hsl(240 4% 18%); --key2-hi: rgb(255 255 255 / .05);
+  --ghost-hover: hsl(0 0% 100% / .07); --ghost-press: hsl(0 0% 100% / .05); --ghost-well: rgb(0 0 0 / .5);
+  --well: rgb(0 0 0 / .35); --well-strong: rgb(0 0 0 / .5);
+  --raise: 0 1px 2px rgb(0 0 0 / .5), inset 0 1px 0 rgb(255 255 255 / .07); --raise-face: hsl(240 4% 20%);
+  --sk: rgb(255 255 255 / .08); --sk-band: rgb(255 255 255 / .07);
+  --toast-top: hsl(240 5% 13%); --toast-bot: hsl(240 6% 10.5%); --toast-edge: hsl(240 4% 21%);
+  --toast-shadow: 0 16px 36px rgb(0 0 0 / .45), 0 3px 10px rgb(0 0 0 / .35);
+}
+:root[data-theme='dark'][data-accent] {
+  --pri-top-l: .06; --pri-bot-l: -.01; --pri-top-hl: .095; --pri-bot-hl: .03; --pri-top-al: -.035; --pri-bot-al: .02; --pri-edge-l: -.12;
+  --pri-hi: rgb(255 255 255 / .22); --pri-lo: rgb(0 0 0 / .2); --pri-press: rgb(0 0 0 / .35); --pri-under: rgb(255 255 255 / .05); --pri-ts: none;
+}
+
+/* 大小档位：字号、行高、控件高度只在这里写数值，tailwind.config.ts 的 fontSize、spacing 指到这些变量。
+   默认这一组是定下来的“放大一档”（正文 14、按钮高 36）。
+   字分三层：正文 sm 14；次要文字、小号按钮、分段标签、小卡片标题 xs 13；角标、状态字、时间、坐标轴 2xs 12（角标和状态字加粗一档）。
+   应用图块（tile-*）、概览里的圆环（donut）、开关（sw-w × sw-h）也在这里；表头行高用 ctl。 */
+:root {
+  --fs-2xs: 12px; --lh-2xs: 16px;
+  --fs-xs: 13px; --lh-xs: 19px;
+  --fs-sm: 14px; --lh-sm: 21px;
+  --fs-base: 15px; --lh-base: 22px;
+  --fs-lg: 18px; --lh-lg: 26px;
+  --fs-xl: 20px; --lh-xl: 28px;
+  --fs-2xl: 24px; --lh-2xl: 30px;
+  --fs-page: 18px; --lh-page: 26px;
+  --fs-title: 18px; --lh-title: 26px;
+  --fs-section: 15px; --lh-section: 22px;
+  --fs-field: 14px;
+  --ctl: 36px; --ctl-sm: 32px; --ctl-xs: 28px; --ctl-lg: 40px;
+  --nav: 36px; --bar: 56px; --icon: 16px; --row: 14px;
+  --tile-xs: 28px; --tile-sm: 32px; --tile-md: 36px; --tile-lg: 48px;
+  --donut: 84px; --sw-w: 36px; --sw-h: 20px;
+  --tabs: var(--ctl); --tap: 0px; --tap-min: 0px;
+}
+/* 手机宽度（<768，默认这一组）：可点的东西至少 44 高，输入框的字 16。最小的图标按钮看上去是 36，
+   可点的范围用 .tap 往外扩到 44（--tap 是往外扩多少）；分段标签的槽 48、里面每格 44（--tabs）；
+   一行字那样的链接、折叠标题、句子里的文字链接、勾选框加 .tap-h：看着不变，可点的范围上下扩到 --tap-min。 */
+@media (max-width: 767px) {
+  :root {
+    --ctl: 44px; --ctl-sm: 44px; --ctl-xs: 36px; --ctl-lg: 48px;
+    --nav: 44px; --fs-field: 16px; --tabs: 48px; --tap: 5px; --tap-min: 44px;
+  }
+}
+
 /* 主色（设置 → 通用 → 主色）：默认中性就是上面的 --primary；选了蓝、绿、橙时换这三个变量。颜色值照控制台样稿。 */
 :root[data-accent='blue'] { --primary: 221.2 83.2% 53.3%; --primary-foreground: 210 40% 98%; --ring: 221.2 83.2% 53.3%; }
 :root[data-accent='green'] { --primary: 142.1 76.2% 36.3%; --primary-foreground: 355.7 100% 97.3%; --ring: 142.1 76.2% 36.3%; }
@@ -84,41 +234,322 @@
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
-    font-size: 13px;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
   }
-  h1, h2, h3 { text-wrap: balance; }
   code, pre, kbd { font-family: var(--font-mono); }
+  /* 等宽数字只给会变的数字、排成一列的数字用（样稿第 14 版）：表格、图表、时间，和标了 .tnum 的统计数字、时间戳、版本号。
+     成句的文字（“5 个应用，4 个正常”“约 3 分钟装好”）用比例数字——第 12 版整站都等宽，句子里的数字两边显得松。 */
+  table, time, [data-chart], .tnum { font-variant-numeric: tabular-nums; }
+
+  /* 排版开关（样稿第 12 版，都是渐进增强，浏览器不认识就忽略）。
+     标题几行差不多长；段落最后一行不剩一个字；中文和英文、数字之间自动留一条细缝；行首的左括号、左引号不留半个空。
+     中文的规则用 :lang(zh) 限定（根节点要有 lang="zh-CN"）。 */
+  h1, h2, h3, h4 { text-wrap: balance; }
+  p, li, dd, blockquote, figcaption { text-wrap: pretty; }
+  :lang(zh) { text-autospace: normal; text-spacing-trim: trim-start; }
+  :lang(zh) :is(code, pre, kbd, input, textarea, select, .mono, .font-mono) { text-autospace: no-autospace; }
 }
 
 @layer utilities {
   .gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
   @media (min-width: 768px) { .gutter { padding-left: 24px; padding-right: max(24px, env(safe-area-inset-right, 0px)); } }
   .mono { font-family: var(--font-mono); }
-  .tnum { font-variant-numeric: tabular-nums; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { scrollbar-width: none; }
   .pb-safe { padding-bottom: max(20px, env(safe-area-inset-bottom, 0px)); }
+  /* 看上去比 44 小的可点的东西（最小的图标按钮、开关）：可点的范围往外扩 --tap（只有放大一档的手机宽度下不是 0）。 */
+  :where(.tap) { position: relative; }
+  .tap::after { content: ''; position: absolute; inset: calc(var(--tap) * -1); }
+  /* 一行字那样的链接、折叠标题、句子里的文字链接、勾选框：看着不变，手机宽度下可点的范围以它为中心扩到 44 × 44
+     （别的时候 --tap-min 是 0，可点范围就是它自己）。样稿第 14 版以前是把它撑到 44 高，一列折叠标题显得松。 */
+  :where(.tap-h) { position: relative; }
+  .tap-h::after { content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, var(--tap-min)); height: max(100%, var(--tap-min)); transform: translate(-50%, -50%); }
   /* 应用图块：颜色由 --tile-h（色相）决定，见 components/tile.tsx */
   .tile { background: hsl(var(--tile-h) 70% 50% / .1); color: hsl(var(--tile-h) 62% var(--tile-l)); border-color: hsl(var(--tile-h) 60% 50% / .2); }
 }
 
-/* 首页看板的网格：12 列，每行 112px；手机宽度一张一行，平板两张一行。照控制台样稿。 */
+/* 首页看板的网格：12 列，每行 112px；手机宽度一张一行。
+   平板宽度（640～1023）：1/4、1/2 的两张一行，1/3、2/3 的各占一整行（1/3 和 2/3 是配成一行用的，各自半行会留一个洞）。
+   1024～1199：1/4 的还是两张一行（四张一行时每张不到 230，矮卡片里“数字 / 总量 + 右边一句”放不下），其余照宽度；1200 起都照宽度。 */
 .dash { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-auto-rows: 112px; gap: 12px; grid-auto-flow: row dense; }
 .wd { grid-column: span 12; }
 .dash.pv { grid-template-columns: 1fr; }
 .dash.pv .wd { grid-column: 1 / -1 !important; }
 .wd[data-h='2'] { grid-row: span 2; }
 .wd[data-h='3'] { grid-row: span 3; }
-@media (min-width: 640px) and (max-width: 1023px) { .wd[data-w='3'], .wd[data-w='4'], .wd[data-w='6'] { grid-column: span 6; } }
+@media (min-width: 640px) and (max-width: 1023px) { .wd[data-w='3'], .wd[data-w='6'] { grid-column: span 6; } }
 @media (min-width: 1024px) {
-  .wd[data-w='3'] { grid-column: span 3; }
+  .wd[data-w='3'] { grid-column: span 6; }
   .wd[data-w='4'] { grid-column: span 4; }
   .wd[data-w='6'] { grid-column: span 6; }
   .wd[data-w='8'] { grid-column: span 8; }
 }
+@media (min-width: 1200px) { .wd[data-w='3'] { grid-column: span 3; } }
 
+/* 卡片里放不下的列表（首页“最近发生的事”）：最下面淡出去，被截住的那一行不是硬切的；能滚动，不显示滚动条。 */
+.list-fade { -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent); mask-image: linear-gradient(#000 calc(100% - 28px), transparent); padding-bottom: 12px; }
+
+/* ───── 样稿第 12 版：圆角 ─────
+   里面的圆角 = 外面的圆角 − 边距，最小 4（两个圆角同一个圆心）：
+     浮层（菜单）12、内边距 4 → 菜单项 8；分段标签的槽 8、内边距 2 → 选中块 6；提示 16、图标块离边 8 → 8；
+     弹窗 16、关闭钮离边 8 → 8；搜索面板（弹窗 16）里的每一行离边 4 → 12。边距不小于外圆角时（卡片 12、内边距 12 以上），里面按自己那一层：控件 8、小件 4。
+   同一层的东西同一个圆角。圆点、开关、胶囊（rounded-full）保持正圆。
+   连续曲率（superellipse）是渐进增强：Chrome、Edge 139 起画成更顺的弧，别的浏览器照旧画普通圆角。 */
+@supports (corner-shape: superellipse(1.25)) {
+  :where(*) { corner-shape: superellipse(1.25); }
+  .rounded-full, .sk-round { corner-shape: round; }
+}
+
+@property --b-top { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --b-bot { syntax: '<color>'; inherits: false; initial-value: transparent; }
+
+@layer components {
+  /* ───── 按钮（components/ui/button.tsx 的几种样子都落到这里）─────
+     --u 是随字号缩放的单位（字号 ÷ 14），投影的位移和模糊都用它；--u1 是“一条线”的粗细（不小于 1px）。
+     有面的按钮同一套五层，只换变量：--b-top、--b-bot 面的上下两色，--b-edge 边，--b-hi 上沿高光，--b-lo 下沿暗线，
+     --b-d1、--b-d2 贴身的和托起来的两层投影；--b-press 按下时上沿的内阴影，--b-under 按下时底下那一条亮线。
+     内阴影都写在按钮自己的 box-shadow 里（跟着内圆角走），平时和按下层数一样，过渡才不会跳。 */
+  .btn {
+    --u: calc(1em / 14); --u1: max(1px, var(--u));
+    position: relative; border: 1px solid transparent;
+    transition: transform var(--dur-press) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out),
+      --b-top var(--dur-color) var(--ease-out), --b-bot var(--dur-color) var(--ease-out),
+      color var(--dur-color) var(--ease-out), background-color var(--dur-color) var(--ease-out), border-color var(--dur-color) var(--ease-out), opacity var(--dur-color) var(--ease-out);
+  }
+  .btn:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+  .btn:disabled, .btn[aria-disabled='true'] { pointer-events: none; opacity: .5; }
+
+  /* 第 15 版（“按钮的那个太厚了，我需要恢复的干净简洁一点”）：面是平的一个颜色，不再有上下渐变、上沿高光、
+     下沿暗线和托起的投影；只留 1px 边和一层很轻的贴身投影。悬停换一档底色，按下再深一档、投影收掉，不位移。
+     每种样子给三样：--b-face（常态）、--b-face-h（悬停）、--b-face-a（按下）。原来五层材质的变量（--pri-*、--key-* 里的高光、暗线、
+     第二层投影）留着没删，现在只用到其中的面色和 --b-d1。 */
+  .btn-face {
+    color: var(--b-fg); border-color: var(--b-edge);
+    background: var(--b-face) border-box;
+    box-shadow: 0 var(--u1) calc(var(--u) * 2) var(--b-d1);
+  }
+  .btn-face:hover { background-color: var(--b-face-h); }
+  .btn-face:active { background-color: var(--b-face-a); box-shadow: 0 0 0 transparent; }
+  .btn-face:disabled, .btn-face[aria-disabled='true'] { box-shadow: 0 0 0 transparent; }
+
+  /* 主要、危险：同一套深色面，底色不同。面、边、投影都从底色按明度推。 */
+  .btn-primary { --b-base: hsl(var(--primary)); --b-fg: hsl(var(--primary-foreground)); }
+  .btn-danger { --b-base: hsl(var(--destructive)); --b-fg: hsl(var(--destructive-foreground)); }
+  .btn-primary, .btn-danger {
+    --b-face: var(--b-base); --b-edge: var(--b-base);
+    --b-face-h: color-mix(in srgb, var(--b-base) 90%, hsl(var(--background)));
+    --b-face-a: color-mix(in srgb, var(--b-base) 82%, hsl(var(--background)));
+    --b-d1: color-mix(in srgb, var(--b-base) 14%, transparent);
+  }
+  /* 描边 → 白键；灰 → 灰键。悬停、按下是在面色里掺一点文字色，浅色深色都成立。 */
+  .btn-key {
+    --b-fg: hsl(var(--foreground)); --b-face: var(--key-top); --b-edge: var(--key-edge); --b-d1: var(--key-d1);
+    --b-face-h: color-mix(in srgb, var(--key-top) 96%, hsl(var(--foreground)));
+    --b-face-a: color-mix(in srgb, var(--key-top) 92%, hsl(var(--foreground)));
+  }
+  .btn-key2 {
+    --b-fg: hsl(var(--secondary-foreground)); --b-face: var(--key2-top); --b-edge: transparent; --b-d1: transparent;
+    --b-face-h: color-mix(in srgb, var(--key2-top) 95%, hsl(var(--foreground)));
+    --b-face-a: color-mix(in srgb, var(--key2-top) 90%, hsl(var(--foreground)));
+  }
+  /* 幽灵：平时没有面；悬停一层淡灰；按下再深一点。 */
+  .btn-ghost:hover { background-color: var(--ghost-hover); color: hsl(var(--accent-foreground)); }
+  .btn-ghost:active { background-color: var(--ghost-press); }
+  /* 链接：一行字带细下划线，后面的箭头悬停时往右挪一点。 */
+  .btn-text { height: auto; padding: 0; border: 0; color: hsl(var(--foreground)); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; text-decoration-color: hsl(var(--foreground) / .3); }
+  .btn-text[data-arrow] { margin-right: 1.25em; }
+  .btn-text[data-arrow]::after { content: '→'; position: absolute; left: 100%; margin-left: .2em; transition: transform var(--dur-hover) var(--ease-out); }
+  .btn-text:hover { text-decoration-color: currentColor; }
+  .btn-text[data-arrow]:hover::after { transform: translateX(2px); }
+
+  /* 按钮上的等待：字和宽度不变。前面有图标的，图标换成转圈；没有图标的，字先隐去、转圈在正中。
+     转圈在按下 300 毫秒后才出现、至少留 500 毫秒（lib/hooks.ts 的 useDelayedFlag），不把按钮变灰。 */
+  .btn[aria-busy='true'] { pointer-events: none; }
+  .btn[aria-busy='true']:disabled, .btn[data-loading]:disabled { opacity: 1; }
+  .btn-spin { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--b-fg, hsl(var(--foreground))); text-shadow: none; animation: ov-fade-in var(--dur-sm-in) var(--ease-out) both; }
+  .btn[data-loading]:has(> svg:first-child) > svg:first-child { opacity: 0; }
+  .btn[data-loading]:has(> svg:first-child) > .btn-spin { inset: 0 auto 0 0; padding-left: var(--btn-pl, 0px); }
+  .btn[data-loading]:not(:has(> svg:first-child)) { color: transparent; text-shadow: none; }
+  /* 图标本身就表示这个动作的（刷新、同步）：从按下起转，至少转满一圈，停在整圈上。 */
+  .btn[data-turning] > svg:first-child { animation: btn-turn 640ms cubic-bezier(.45, .05, .55, .95) infinite; }
+
+  /* 分段标签：槽凹下去一点，选中的那一块浮起来一点，换页签时滑过去（components/ui/controls.tsx）。 */
+  .seg { box-shadow: inset 0 1px 2px var(--well); }
+  .seg-pill { position: absolute; top: 0; bottom: 0; border-radius: calc(var(--radius-md) - 2px); background: var(--raise-face); box-shadow: var(--raise); pointer-events: none; }
+  .seg-pill[data-ready] { transition: left var(--dur-move) var(--ease-in-out), right var(--dur-move) var(--ease-in-out); }
+  /* 往右走时右边先走、左边跟上（往左相反），路上被拉长一点，落位时收回来。 */
+  .seg-pill[data-ready][data-dir='right'] { transition-timing-function: var(--ease-in-out), var(--ease-out-strong); }
+  .seg-pill[data-ready][data-dir='left'] { transition-timing-function: var(--ease-out-strong), var(--ease-in-out); }
+  /* 左侧菜单选中的那一块：上下滑。 */
+  .nav-pill { position: absolute; left: 0; right: 0; border-radius: var(--radius-md); background: hsl(var(--accent)); pointer-events: none; }
+  .nav-pill[data-ready] { transition: top var(--dur-move) var(--ease-in-out), bottom var(--dur-move) var(--ease-in-out); }
+  .nav-pill[data-ready][data-dir='right'] { transition-timing-function: var(--ease-in-out), var(--ease-out-strong); }
+  .nav-pill[data-ready][data-dir='left'] { transition-timing-function: var(--ease-out-strong), var(--ease-in-out); }
+
+  /* 开关：槽凹下去，圆钮浮起来，拨过去时稍微冲过一点再回来。大小跟着“大小档位”走（--sw-w × --sw-h，圆钮比槽小一圈边）。 */
+  .switch { width: var(--sw-w); height: var(--sw-h); box-shadow: inset 0 1px 2px var(--well-strong); transition: background-color var(--dur-color) var(--ease-out); }
+  .switch-knob { width: calc(var(--sw-h) - 4px); height: calc(var(--sw-h) - 4px); background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / .28), inset 0 -1px 0 rgb(0 0 0 / .06); transition: transform var(--dur-settle) var(--ease-overshoot); }
+  .switch[aria-checked='true'] > .switch-knob { transform: translateX(calc(var(--sw-w) - var(--sw-h))); }
+  /* 输入框、下拉：上沿一点暗，像压进纸里。和聚焦时的描边叠在一起（都是 box-shadow）。 */
+  .field { --tw-shadow: inset 0 1px 2px var(--well); box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow); transition: border-color var(--dur-color) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out); }
+
+  /* ───── 浮层的进场和离场（弹窗、抽屉、菜单、提示共用；data-state 由 lib/hooks.ts 的 usePresence 写）─────
+     进场 ease-out，离场 ease-in、原路退回、更短；淡入比位移早一点到。离场时不挡点击。 */
+  .ov[data-state='closed'] { pointer-events: none; }
+  .ov-fade[data-state='open'] { animation: ov-fade-in var(--dur-md-in) var(--ease-out) both; }
+  .ov-fade[data-state='closed'] { animation: ov-fade-out var(--dur-md-out) var(--ease-in) both; }
+  /* 菜单、下拉：从靠近按钮的那一角长出来（--ov-origin 由组件给），收回同一点。 */
+  .ov-pop { transform-origin: var(--ov-origin, top center); }
+  .ov-pop[data-state='open'] { animation: ov-pop-in var(--dur-sm-in) var(--ease-out) both; }
+  .ov-pop[data-state='closed'] { animation: ov-pop-out var(--dur-sm-out) var(--ease-in) both; }
+  /* 弹窗：窄屏从底下升上来；宽屏从点它的按钮那个方向长出来（--ov-origin），没有按钮时从正中。 */
+  .ov-dialog[data-state='open'] { animation: ov-up-in var(--dur-md-in) var(--ease-out) both; }
+  .ov-dialog[data-state='closed'] { animation: ov-up-out var(--dur-md-out) var(--ease-in) both; }
+  @media (min-width: 640px) {
+    .ov-dialog { transform-origin: var(--ov-origin, center); }
+    .ov-dialog[data-state='open'] { animation-name: ov-dialog-in; }
+    .ov-dialog[data-state='closed'] { animation-name: ov-dialog-out; }
+  }
+  .ov-right[data-state='open'] { animation: ov-right-in var(--dur-md-in) var(--ease-out) both; }
+  .ov-right[data-state='closed'] { animation: ov-right-out var(--dur-md-out) var(--ease-in) both; }
+  .ov-left[data-state='open'] { animation: ov-left-in var(--dur-md-in) var(--ease-out) both; }
+  .ov-left[data-state='closed'] { animation: ov-left-out var(--dur-md-out) var(--ease-in) both; }
+
+  /* ───── 提示（components/ui/toast.tsx）─────
+     在内容区底部正中：离底 24，手机上让开底部的安全区。 */
+  .toasts { bottom: max(24px, env(safe-area-inset-bottom, 0px) + 12px); }
+  .toast { border: 1px solid var(--toast-edge); background: linear-gradient(180deg, var(--toast-top), var(--toast-bot)) border-box; box-shadow: var(--toast-shadow); border-radius: var(--radius-xl); overflow: hidden; }
+  .toast[data-state='open'] { animation: toast-in var(--dur-md-in) var(--ease-out) both; }
+  .toast[data-state='closed'] { animation: toast-out var(--dur-md-out) var(--ease-in) both; }
+  /* 事情办成时一道亮带扫过一次。 */
+  .toast[data-sheen]::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(100deg, transparent 30%, var(--sk-band) 50%, transparent 70%); transform: translateX(-100%); animation: toast-sheen 900ms var(--ease-out) 120ms both; }
+  .toast-swap { animation: toast-swap var(--dur-md-in) var(--ease-out) both; }
+  .toast-ring circle + circle { transition: stroke-dashoffset 240ms linear; }
+
+  /* ───── 占位形状（components/ui/skeleton.tsx）─────
+     形状按真内容的位置和大小画；一道亮带每 1.2 秒扫过整片（所有形状共用一条固定在窗口上的渐变，所以是一起扫过去的）。
+     数据来了，真内容在原位淡入：从上到下，每块 200 毫秒、相隔 40 毫秒。 */
+  .sk { display: block; flex-shrink: 0; border-radius: 6px; background-color: var(--sk);
+    background-image: linear-gradient(100deg, transparent 0, var(--sk-band) 50%, transparent 100%); background-size: 320px 100%; background-repeat: no-repeat; background-attachment: fixed;
+    animation: sk-band 1.2s linear infinite; }
+  .sk-round { border-radius: 9999px; }
+  .sk-zone { animation: ov-fade-in var(--dur-sm-in) var(--ease-out) both; }
+  .sk-reveal > *, .sk-reveal > .sk-kids > * { animation: sk-in 200ms var(--ease-out) both; }
+  .sk-reveal > .sk-kids { animation: none; }
+  .sk-kids > :nth-child(2) { animation-delay: 40ms; } .sk-kids > :nth-child(3) { animation-delay: 80ms; } .sk-kids > :nth-child(4) { animation-delay: 120ms; }
+  .sk-kids > :nth-child(5) { animation-delay: 160ms; } .sk-kids > :nth-child(6) { animation-delay: 200ms; } .sk-kids > :nth-child(n + 7) { animation-delay: 240ms; }
+  .sk-reveal > :nth-child(2) { animation-delay: 40ms; } .sk-reveal > :nth-child(3) { animation-delay: 80ms; }
+  .sk-reveal > :nth-child(4) { animation-delay: 120ms; } .sk-reveal > :nth-child(5) { animation-delay: 160ms; }
+  .sk-reveal > :nth-child(6) { animation-delay: 200ms; } .sk-reveal > :nth-child(n + 7) { animation-delay: 240ms; }
+}
+
+@keyframes ov-fade-in { from { opacity: 0; } }
+@keyframes ov-fade-out { to { opacity: 0; } }
+@keyframes ov-pop-in { from { opacity: 0; transform: scale(.96); } 70% { opacity: 1; } }
+@keyframes ov-pop-out { to { opacity: 0; transform: scale(.96); } }
+@keyframes ov-dialog-in { from { opacity: 0; transform: translateY(8px) scale(.96); } 70% { opacity: 1; } }
+@keyframes ov-dialog-out { to { opacity: 0; transform: translateY(4px) scale(.98); } }
+@keyframes ov-up-in { from { opacity: 0; transform: translateY(24px); } 60% { opacity: 1; } }
+@keyframes ov-up-out { to { opacity: 0; transform: translateY(24px); } }
+@keyframes ov-right-in { from { opacity: 0; transform: translateX(24px); } 60% { opacity: 1; } }
+@keyframes ov-right-out { to { opacity: 0; transform: translateX(24px); } }
+@keyframes ov-left-in { from { opacity: 0; transform: translateX(-24px); } 60% { opacity: 1; } }
+@keyframes ov-left-out { to { opacity: 0; transform: translateX(-24px); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px) scale(.96); filter: blur(6px); } 75% { opacity: 1; } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(6px); filter: blur(4px); } }
+@keyframes toast-sheen { to { transform: translateX(100%); } }
+@keyframes toast-swap { from { opacity: 0; transform: translateY(5px); filter: blur(3px); } }
+@keyframes sk-band { from { background-position: -320px 0; } to { background-position: calc(100vw + 320px) 0; } }
+@keyframes sk-in { from { opacity: 0; } }
+@keyframes btn-turn { to { transform: rotate(360deg); } }
+
+/* ───── 界面连续性：列表进详情（浏览器自带的视图过渡；不支持的浏览器照旧硬切）─────
+   点进一个应用时，它的图标和名字从卡片的位置挪到详情页页头（返回时原路回去），其余内容淡出淡入。
+   名字只放大、不叠两份；哪两个元素算“同一个”，由 lib/continuity.ts 在过渡前后现标（vt-icon、vt-name）。 */
+::view-transition-old(root) { animation: ov-fade-out var(--dur-sm-out) var(--ease-in) both; }
+::view-transition-new(root) { animation: ov-fade-in var(--dur-md-in) var(--ease-out) 60ms both; }
+::view-transition-group(vt-icon), ::view-transition-group(vt-name) { animation-duration: var(--dur-lg); animation-timing-function: var(--ease-carry); }
+::view-transition-old(vt-icon), ::view-transition-new(vt-icon) { height: 100%; width: 100%; object-fit: cover; animation-duration: var(--dur-md-out); }
+::view-transition-old(vt-name) { display: none; }
+::view-transition-new(vt-name) { animation: none; height: 100%; width: 100%; object-fit: contain; object-position: left center; }
+
+/* “减少动效”：状态照常变，只留短的淡入淡出；位移、缩放、模糊、亮带、弹一下都去掉。 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+  .ov[data-state='open'], .toast[data-state='open'] { animation: ov-fade-in 150ms linear both !important; }
+  .ov[data-state='closed'], .toast[data-state='closed'] { animation: ov-fade-out 150ms linear both !important; }
+  .sk-reveal > * { animation: sk-in 150ms linear both !important; animation-delay: 0ms !important; }
+  .animate-spin { animation: soft-pulse 1.4s ease-in-out infinite !important; }
+  ::view-transition-group(*) { animation: none !important; }
+  ::view-transition-old(*) { animation: ov-fade-out 150ms linear both !important; }
+  ::view-transition-new(*) { animation: ov-fade-in 150ms linear both !important; }
 }
+@keyframes soft-pulse { 50% { opacity: .35; } }
+
+/* 应用中心（样稿第 4 版：超市货架）。页面不铺深色背景（第 3 版时去掉的）；
+   颜色只出现在每个应用自己的封面和图标上：封面用应用的主色（--c）调淡，浅色、深色页面都跟着走。
+   样稿第 10 版（评估 X1、X5）：卡片和控制台别的卡片同一种（rounded-lg border bg-card），悬停只把边框加深一点，不浮起；
+   页面里不再有自己的大搜索框（.store-search 去掉了），搜索用顶栏那一个，货架那一排留一个小的筛选框。 */
+
+/* 商品卡、解决方案卡：悬停时边框变深一点，播放钮放大一点。 */
+.store-card, .store-hero { transition: border-color var(--dur-hover) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out); }
+.store-card:hover { border-color: hsl(var(--foreground) / .22); box-shadow: 0 4px 12px -8px hsl(var(--foreground) / .35); }
+.store-hero:hover { border-color: hsl(var(--foreground) / .22); }
+.store-icon { border-radius: 22%; box-shadow: 0 0 0 1px hsl(var(--foreground) / .1); }
+
+/* 封面：应用主色的淡底（上面放图标、封面图或播放键）。 */
+.store-cover { overflow: hidden; --c: #64748b;
+  background:
+    radial-gradient(90% 80% at 92% -5%, color-mix(in srgb, var(--c) 55%, #fff) 0%, transparent 60%),
+    linear-gradient(140deg, color-mix(in srgb, var(--c) 78%, hsl(var(--card))), color-mix(in srgb, var(--c) 46%, hsl(var(--card)))); }
+.store-play { background: hsl(var(--card) / .94); color: hsl(var(--foreground)); box-shadow: 0 6px 18px -6px rgb(0 0 0 / .45); transition: transform var(--dur-hover) var(--ease-out-strong); }
+.store-card:hover .store-play, .store-hero:hover .store-play, button:hover > .store-play { transform: translate(-50%, -50%) scale(1.1); }
+.store-time { background: hsl(var(--card) / .92); color: hsl(var(--foreground)); }
+
+/* 角标：热门、新上架、推荐、已装。 */
+.store-flag-hot { background: hsl(24 92% 46%); color: #fff; }
+.store-flag-new { background: hsl(var(--success)); color: hsl(var(--background)); }
+.store-flag-pick { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.store-have { background: hsl(var(--card) / .94); color: hsl(var(--success)); }
+
+/* 货架：横着排，放不下横向滑；不显示滚动条。 */
+.store-row { scroll-snap-type: x proximity; scrollbar-width: none; }
+.store-row::-webkit-scrollbar { display: none; }
+.store-row > * { scroll-snap-align: start; }
+.store-aisle { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.store-aisle-tab { background: hsl(var(--card)); color: hsl(var(--foreground)); transition: background-color var(--dur-hover) var(--ease-out), border-color var(--dur-hover) var(--ease-out); }
+.store-aisle-tab:hover { background: hsl(var(--muted)); }
+.store-aisle-tab.on { background: hsl(var(--foreground)); color: hsl(var(--background)); border-color: hsl(var(--foreground)); }
+.store-dot { background: hsl(var(--foreground) / .2); transition: width var(--dur-move) var(--ease-in-out), background-color var(--dur-color) var(--ease-out); }
+.store-dot.on { background: hsl(var(--foreground)); }
+
+/* 详情页的视频区：小图选中时描边；占位播放时的说明和进度条。 */
+.store-thumb { transition: box-shadow var(--dur-hover) var(--ease-out); }
+.store-thumb.on { box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--foreground)); }
+.store-note { background: hsl(var(--card) / .96); border: 1px solid hsl(var(--border)); box-shadow: 0 10px 30px -14px rgb(0 0 0 / .4); }
+.store-bar { background: hsl(var(--card) / .94); border-top: 1px solid hsl(var(--border)); }
+.store-progress { background: hsl(var(--muted)); }
+.store-progress > span { display: block; height: 100%; width: 0; border-radius: inherit; background: hsl(var(--foreground)); animation: store-progress linear forwards; }
+@keyframes store-progress { from { width: 0; } to { width: 100%; } }
+
+/* 介绍文档（样稿第 9 版）：应用页、解决方案页的介绍就是一篇文档（pages/store/doc.tsx），这里是它的排版。
+   样稿第 10 版（评估 J4）：正文和控制台别的页面同一档（sm），小标题 base 一档；图最高 320px（在 doc.tsx 里）。字号跟着“大小档位”走。 */
+.store-doc { font-size: var(--fs-sm); line-height: 1.7; overflow-wrap: anywhere; }
+/* 中文段落两端对齐（样稿第 12 版）：只在段落宽度能取整到整字数时才开（round()），窄栏和列表不开。 */
+@supports (width: round(down, 100%, 1em)) {
+  .store-doc > p:lang(zh) { width: round(down, 100%, 1em); text-align: justify; }
+}
+.store-doc > * + * { margin-top: .625rem; }
+.store-doc h2 { margin-top: 1.25rem; font-size: var(--fs-base); font-weight: 600; line-height: 1.4; }
+.store-doc h3 { margin-top: 1rem; font-size: var(--fs-sm); font-weight: 600; line-height: 1.4; }
+.store-doc > :first-child { margin-top: 0; }
+.store-doc ul { list-style: disc; padding-left: 1.25rem; }
+.store-doc ol { list-style: decimal; padding-left: 1.25rem; }
+.store-doc li + li { margin-top: .25rem; }
+.store-doc li::marker { color: hsl(var(--muted-foreground)); }
+.store-doc a { text-decoration: underline; text-underline-offset: 3px; }
+.store-doc blockquote { border-left: 3px solid hsl(var(--border)); padding-left: .875rem; color: hsl(var(--muted-foreground)); }
+.store-doc code { border-radius: 4px; background: hsl(var(--muted)); padding: .1em .35em; font-size: calc(var(--fs-sm) - 1px); }
+.store-doc figure { margin-top: .875rem; }

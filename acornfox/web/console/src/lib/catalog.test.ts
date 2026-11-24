@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   abbr, buildRequest, categoryTabs, changedPlatform, checkForm, cliCommand, faultForAI, filterApps, freeMB, groupSteps, installingApps, memoryCheck,
   newInstallForm, recipeMemory, taskProgress, appKey, catalogAppOf, disconnectedSources, filterSource, findApp, sourceId, sourceTabs,
-  FORMER_CODE, formerNote, isFormerFault, storeEmpty,
+  FORMER_CODE, formerNote, isFormerFault, storeEmpty, applyShow, industriesOf, industryName, industryNames, matchRecipe, orderSolutions, sortByShowOrder,
 } from './catalog'
 import { ApiError } from './api'
 import { FORMER_NOTE, catalog, catalogFormer, hermesDetail, hermesWithModel, newApiDetail, recipeDetailsWithModel, resources, task } from '@/test/fixtures'
-import type { AppDetail, PlatformVarView } from './types'
+import type { AppDetail, PlatformVarView, Recipe } from './types'
 
 describe('分类和搜索', () => {
   it('只列目录里有的分类，两个 AI 子类归到 AI', () => {
@@ -254,5 +254,58 @@ describe('应用自己的必填设置项（例如模型名）', () => {
     expect(checkForm(f)).toEqual([])
     expect(buildRequest(f)).toEqual({ recipe: r.id, params: { 'hermes-agent.model': 'qwen-plus' } })
     expect(cliCommand(f)).toBe('acornfox install --recipe ' + r.id + ' --set hermes-agent.model=qwen-plus')
+  })
+})
+
+// ---- 展示内容（经营系统签名发布，读到目录时并进来）----
+describe('展示内容 applyShow', () => {
+  const view = {
+    ...catalog,
+    industries: [{ id: 'office', name: '通用办公' }, { id: 'home', name: '个人和家庭' }],
+    apps: [{ ...catalog.apps[0], show: { name: '爱马仕助手', keywords: ['聊天'] } }, catalog.apps[1]],
+    recipes: [{ ...catalog.recipes[1], show: { name: '按问题起的名字', industries: ['office', 'gone'], keywords: ['办公'] } }, catalog.recipes[0]],
+  }
+  it('展示名字换掉清单里的名字，搜索词合并；没有展示内容的原样', () => {
+    const v = applyShow(view)
+    expect(v.apps[0].name).toBe('爱马仕助手')
+    expect(v.apps[0].keywords).toEqual([...(catalog.apps[0].keywords || []), '聊天'])
+    expect(v.apps[1]).toBe(catalog.apps[1])
+    expect(v.recipes[0].title).toBe('按问题起的名字')
+    expect(v.recipes[1]).toBe(catalog.recipes[0])
+  })
+  it('解决方案挂的行业名（认得的）也能被搜到，认不得的 id 不进搜索词', () => {
+    const r = applyShow(view).recipes[0]
+    expect(r.keywords).toContain('通用办公')
+    expect(r.keywords).not.toContain('gone')
+    expect(matchRecipe(r, '通用办公')).toBe(true)
+  })
+  it('展示名字是空串时用清单里的名字', () => {
+    const v = applyShow({ ...view, apps: [{ ...catalog.apps[0], show: { name: '', tagline: '一句话' } }] })
+    expect(v.apps[0].name).toBe(catalog.apps[0].name)
+  })
+})
+
+describe('行业和解决方案的顺序', () => {
+  const cat = { ...catalog, industries: [{ id: 'office', name: '通用办公' }, { id: 'retail', name: '电商零售' }, { id: 'home', name: '个人和家庭' }] }
+  const r = (id: string, over: Partial<Recipe> = {}): Recipe => ({ ...catalog.recipes[1], id, title: id, ...over })
+  it('行业按目录给的顺序，一个解决方案都没有的行业不列；行业 id 换成名字，认不得的略过', () => {
+    const list = [r('a', { show: { industries: ['home', 'office'] } }), r('b', { show: { industries: ['office', 'nope'] } })]
+    expect(industriesOf(cat, list)).toEqual([{ id: 'office', name: '通用办公', n: 2 }, { id: 'home', name: '个人和家庭', n: 1 }])
+    expect(industryNames(cat, list[1])).toEqual(['通用办公'])
+    expect(industryName(cat, 'retail')).toBe('电商零售')
+    expect(industryName(cat, 'nope')).toBe('')
+    // 目录里没有行业这一项：不显示，也不露出 id
+    expect(industriesOf({ ...catalog }, list)).toEqual([])
+    expect(industryNames({ ...catalog }, list[0])).toEqual([])
+  })
+  it('同一排里按 order 排，没排的在后面、保持原来的顺序', () => {
+    const xs = [{ id: 'x', show: { order: 0 } }, { id: 'y', show: { order: 5 } }, { id: 'z' }, { id: 'w', show: { order: 2 } }]
+    expect(sortByShowOrder(xs).map((x) => x.id)).toEqual(['w', 'y', 'x', 'z'])
+  })
+  it('目录说了首页摆哪几个就按它的顺序排最前面；没说时推荐的在前；其余按 order', () => {
+    const list = [r('a'), r('b', { show: { flag: 'pick' } }), r('c', { show: { order: 1 } }), r('d')]
+    expect(orderSolutions(list, ['d', 'zzz', 'a']).map((x) => x.id)).toEqual(['d', 'a', 'c', 'b'])
+    expect(orderSolutions(list).map((x) => x.id)).toEqual(['b', 'c', 'a', 'd'])
+    expect(orderSolutions(list, []).map((x) => x.id)).toEqual(['b', 'c', 'a', 'd'])
   })
 })

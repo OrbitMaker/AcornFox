@@ -1,7 +1,10 @@
-// 控制台外壳：读会话 → 左侧菜单 + 顶栏 + 页面；⌘K 命令面板、安装弹窗挂在这一层。
+// 控制台外壳：读会话 → 左侧菜单 + 顶栏 + 页面；⌘K 搜索面板、安装弹窗挂在这一层。
+// 样稿第 10 版（评估 X7）：“需要重新登录”“连不上控制台”只说一句情况、给一个按钮；命令收进默认收起的“用命令行”，出错原文收进“详细信息”。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { api, type ApiError } from './lib/api'
 import { parseHash, type AppTab, type Route, type SettingsSection } from './lib/router'
+import { carry } from './lib/continuity'
 import type { Session } from './lib/types'
 import { ConsoleProvider, type InstallTarget } from './state'
 import { Header } from './components/shell/header'
@@ -10,14 +13,16 @@ import { CommandPalette } from './components/shell/command-palette'
 import { Logo, PageSlots } from './components/bits'
 import { Button, buttonVariants } from './components/ui/button'
 import { Spinner } from './components/ui/controls'
+import { CliFold, Fold } from './components/fold'
 import { Sheet } from './components/ui/dialog'
 import { ToastProvider } from './components/ui/toast'
 import { DashboardPage } from './pages/home/dashboard-page'
-import { RuntimePage } from './pages/runtime/runtime-page'
 import { PrefsPage } from './pages/prefs/prefs-page'
 import { StorePage } from './pages/store/store-page'
+import { SolutionPage, SolutionsPage } from './pages/store/solution-page'
 import { ItemPage } from './pages/store/item-page'
 import { InstallDialog } from './pages/store/install-dialog'
+import { ReapplyHost } from './pages/apps/reapply'
 import { AppsPage } from './pages/apps/apps-page'
 import { AppPage } from './pages/apps/app-page'
 
@@ -70,11 +75,17 @@ function SignedOut({ reason, message }: { reason: 'expired' | 'logout' | 'error'
       <div className="flex max-w-sm flex-col items-center gap-3 text-center">
         <Logo className="size-8" />
         <h1 className="text-base font-semibold">{title}</h1>
-        <p className="text-xs text-muted-foreground">
-          {reason === 'error' ? message : gateway ? '用密码重新登录。' : <>在服务器上运行 <code className="rounded bg-muted px-1">acornfox open</code>，用它给的新链接打开控制台。</>}
+        <p className="text-sm text-muted-foreground">
+          {reason === 'error' ? '这台机器上的控制台没有回应，可能是关机了或网络断了。' : gateway ? '用密码重新登录。' : '这个链接过期了，从这台机器重新打开控制台。'}
         </p>
         {reason === 'error' && <Button variant="outline" size="sm" onClick={() => location.reload()}>重试</Button>}
         {reason !== 'error' && gateway && <a href="/login" className={buttonVariants({ size: 'sm' })}>重新登录</a>}
+        {reason === 'error' && message && <Fold title="详细信息"><p className="break-all text-left text-2xs text-muted-foreground">{message}</p></Fold>}
+        {reason !== 'error' && !gateway && (
+          <CliFold>
+            <p className="text-left text-2xs text-muted-foreground">在这台机器上运行 <code className="mono rounded bg-muted px-1">acornfox open</code>，用它给的新链接打开控制台。</p>
+          </CliFold>
+        )}
       </div>
     </div>
   )
@@ -95,10 +106,14 @@ function Shell({ session, onLoggedOut }: { session: Session; onLoggedOut: () => 
     const h = () => {
       const prev = routeRef.current
       const next = parseHash(location.hash)
-      // 只换标签时不滚回顶部
-      if (!(prev.page === 'app' && next.page === 'app' && prev.id === next.id)) window.scrollTo(0, 0)
-      routeRef.current = next
-      setRoute(next)
+      const apply = () => {
+        // 只换标签时不滚回顶部
+        if (!(prev.page === 'app' && next.page === 'app' && prev.id === next.id)) window.scrollTo(0, 0)
+        routeRef.current = next
+        setRoute(next)
+      }
+      // 样稿第 12 版：列表和详情之间换页时，把图标和名字带过去（lib/continuity.ts）；别的换页照旧。
+      carry(prev, next, (sync) => { if (sync) flushSync(apply); else apply() })
     }
     window.addEventListener('hashchange', h)
     return () => window.removeEventListener('hashchange', h)
@@ -114,6 +129,11 @@ function Shell({ session, onLoggedOut }: { session: Session; onLoggedOut: () => 
     return () => window.removeEventListener('keydown', k)
   }, [])
   const install = useCallback((t: InstallTarget) => setTarget(t), [])
+  // 退出登录（样稿第 11 版：入口从右上角的头像菜单挪到了“设置 › 访问”最下面）。
+  const logout = useCallback(async () => {
+    try { await api.post('/v1/console/logout') } catch { /* 会话已经没了也算退出 */ }
+    onLoggedOut()
+  }, [onLoggedOut])
 
   let page
   switch (route.page) {
@@ -122,24 +142,26 @@ function Shell({ session, onLoggedOut }: { session: Session; onLoggedOut: () => 
     case 'app': page = <AppPage key={route.id} name={route.id || ''} tab={(route.tab || 'overview') as AppTab} section={route.section as SettingsSection | undefined} />; break
     case 'store': page = <StorePage />; break
     case 'item': page = <ItemPage key={(route.query?.catalog || '') + route.id} id={route.id || ''} catalog={route.query?.catalog} />; break
-    case 'runtime': page = <RuntimePage />; break
+    case 'solutions': page = <SolutionsPage />; break
+    case 'solution': page = <SolutionPage key={(route.query?.catalog || '') + route.id} id={route.id || ''} catalog={route.query?.catalog} />; break
     default: page = <PrefsPage sec={route.id} />
   }
 
   return (
-    <ConsoleProvider session={session} install={install}>
+    <ConsoleProvider session={session} install={install} installTarget={target} logout={logout}>
       <div className="flex min-h-full">
         <aside className="sticky top-0 hidden h-screen w-48 shrink-0 border-r md:block"><Sidebar route={route} /></aside>
         <Sheet open={nav} onClose={() => setNav(false)} side="left" className="w-60 p-0" label="菜单">
           <Sidebar route={route} onNavigate={() => setNav(false)} />
         </Sheet>
         <div className="flex min-w-0 flex-1 flex-col">
-          <Header route={route} openCmd={() => setCmd(true)} openNav={() => setNav(true)} onLoggedOut={onLoggedOut} metaSlot={setMetaEl} actionsSlot={setActionsEl} />
+          <Header route={route} openCmd={() => setCmd(true)} openNav={() => setNav(true)} metaSlot={setMetaEl} actionsSlot={setActionsEl} />
           <main className="gutter mx-auto w-full max-w-7xl flex-1 pb-24 pt-5"><PageSlots.Provider value={slots}>{page}</PageSlots.Provider></main>
         </div>
       </div>
       <CommandPalette open={cmd} onClose={() => setCmd(false)} />
       <InstallDialog target={target} onClose={() => setTarget(null)} />
+      <ReapplyHost />
     </ConsoleProvider>
   )
 }

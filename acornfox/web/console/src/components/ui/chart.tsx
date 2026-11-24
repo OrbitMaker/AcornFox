@@ -19,7 +19,7 @@ export function ChartContainer({ config, className, children }: { config: ChartC
       style={style}
       className={cn(
         'h-full w-full min-w-0 text-2xs',
-        '[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line]:stroke-border',
+        '[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-axis-tick_text]:text-2xs [&_.recharts-cartesian-grid_line]:stroke-border',
         '[&_.recharts-curve.recharts-tooltip-cursor]:stroke-muted-foreground [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted/60',
         '[&_.recharts-surface]:outline-none [&_.recharts-wrapper]:outline-none',
         className,

@@ -261,6 +261,10 @@ const (
 	ReasonRollback    = "rollback"
 	ReasonAddonAdd    = "addon_add"
 	ReasonAddonRemove = "addon_remove"
+	ReasonRestore     = "restore" // data restored from a backup (internal/appbackup)
+	// ReasonReapply: the app's container made again after its settings
+	// were changed and applied (appinstall/reapply.go).
+	ReasonReapply = "reapply"
 )
 
 // Config configures Open.

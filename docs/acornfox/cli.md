@@ -46,6 +46,19 @@
 
 `rollback` 回退的是你的应用，不是 AcornFox 平台。AcornFox 平台本身只能升级，见 [使用手册的“只能升级”](../user-guide.md#只能升级)。
 
+## 备份和恢复
+
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `backup create [应用] [--note 话] [--plan] [--no-wait]` | 给应用的数据做一份手动备份（应用暂停到打完包，自动继续）；`--plan` 只看会怎样、磁盘够不够 | `acornfox backup create web --note 升级之前` |
+| `backup list [应用]` | 列出应用的备份（新的在前：编号、种类、时间、大小、当时的版本）；不带应用名看整个备份目录、各应用份数和磁盘 | `acornfox backup list web` |
+| `backup show 应用 编号\|latest [--verify]` | 一份备份的清单；`--verify` 核对每个文件的校验和 | `acornfox backup show web latest --verify` |
+| `backup restore 应用 编号\|latest [--plan] [--yes] [--allow-current-version]` | 用备份覆盖应用现在的数据：先自动另存现在的、换数据和变量、按备份时的版本启动，失败自动退回；覆盖数据要用户同意，`--yes` | `acornfox backup restore web latest --yes` |
+| `backup rm 应用 编号 [--yes]` | 删一份备份（删了找不回来，不加 `--yes` 只提示） | `acornfox backup rm web 20261124-153012-ab12 --yes` |
+| `backup task 任务编号` | 看一次备份或恢复做到哪一步 | `acornfox backup task 0123456789ab` |
+
+都支持 `--json`。故障编号 `BKP-01`～`BKP-16`，`acornfox faults BKP-01` 看原因和处理办法。说明见 [使用手册的“备份和恢复应用数据”](../user-guide.md#备份和恢复应用数据)。
+
 ## 日志和状态
 
 | 命令 | 做什么 | 例子 |
@@ -130,16 +143,34 @@
 | --- | --- | --- |
 | `doctor` | 检查这台服务器：Docker、后台服务、磁盘空间、端口占用、时钟，以及下载网关能不能连上、应用目录上次同步的情况（这两项 v0.5.1 起，只给警告）、已装的应用接着的服务现在能不能用（`CAT-SVC-08`，v0.6.0 起，只给警告）；每个问题带故障编号（`--json` 输出 JSON）。用 sudo 运行看得更全 | `sudo acornfox doctor` |
 | `faults [编号]` | 故障目录：一个故障编号是什么、可能的原因和怎么判断、按什么顺序查、怎么处理、什么时候要先问你；不带编号列出全部，`--group 组` 只列一组，`--markdown` 输出全文。只读，不连服务器，Mac 上也能用；v0.5.1 起 | `acornfox faults CAT-INST-27` |
+| `capabilities [--json]` | 这个 acornfox 程序自己能做什么：每条命令和参数、故障编号、平台变量、内置的服务类型、清单格式各项功能从哪个版本起支持、通用 Skill 里登记的通用做法。只读，不连服务器；查“这个版本有没有某条命令”以它为准。v0.7.0 起 | `acornfox --json capabilities` |
 | `identity show` | 这台机器在下载网关上的安装编号和公钥（还没生成时说明原因，不会生成） | `sudo acornfox identity show` |
 | `identity reset` | 重新生成机器钥匙，安装编号随之改变；不加 `--yes` 只说明会做什么。之后 `sudo systemctl restart acornfox-server` 才生效 | `sudo acornfox identity reset --yes` |
 | `version` | 版本号 | `acornfox version` |
+
+## Mac 本机（装在这台 Mac 上的 AcornFox，苹果芯片、macOS 26 起）
+
+AcornFox 在 Mac 上是苹果 container 开的一台 Debian 虚拟机；下面的命令管 Mac 这一侧。装好之前用一行命令 `curl -fsSL <get.sh 地址> | bash`（见 README）。所有动作支持 `--json`；`install`、`upgrade`、`uninstall` 支持 `--plan`（试跑，什么都不改）。
+
+| 命令 | 做什么 | 例子 |
+| --- | --- | --- |
+| `mac install` / `mac upgrade` | 安装、升级（每一步做过就跳过，重复运行不出错）；要管理员密码的一步（装苹果的 container）由你自己在终端里输，没有终端时停下并打印命令，退出码 5。选项：`--idle 分钟\|off`、`--memory GB`、`--cpus N`、`--no-lan`、`--no-open`、`--china`/`--global`、`--version`、`--release-base`、`--local-package` | `acornfox mac install --plan` |
+| `mac status` | 虚拟机、常驻程序、转发端口的状态；不会把停着的虚拟机叫起来 | `acornfox mac status --json` |
+| `mac doctor` | 逐项检查，每项带故障编号 `MAC-…`；`--wake` 先叫起虚拟机再查里面。`acornfox doctor` 在装了 Mac 本机版的电脑上等于它加 Skill 版本核对加虚拟机里的 doctor | `acornfox mac doctor --json` |
+| `mac stop` / `mac start` | 现在停掉（把内存还给 macOS）/ 现在叫起虚拟机；有人访问时也会自动叫起 | `acornfox mac stop` |
+| `mac set` | 改设置：`--idle 分钟\|off`、`--lan on\|off`、`--memory GB`、`--cpus N`（下次启动生效）、`--public-host 地址\|auto`（Mac 的局域网地址变了） | `acornfox mac set --idle 60` |
+| `mac uninstall` | 卸载；默认保留虚拟机和里面的数据，`--purge --yes` 连数据一起删。苹果的 container 本身不卸 | `acornfox mac uninstall --plan` |
+| `mac daemon` | 常驻小程序，由 launchd 在登录后运行，不用手工运行 | — |
+| `mac pack-base 根文件系统.tar.xz 输出.oci.tar` | 做虚拟机的基础镜像包（准备放进下载网关的文件）；只在 Mac 上能用 | — |
 
 ## Skill
 
 | 命令 | 做什么 | 例子 |
 | --- | --- | --- |
-| `skill install` | 把和命令行同版本的 AcornFox Skill 装到 AI 工作台（Claude Code、Codex；`--dir` 指定其他目录） | `acornfox skill install` |
-| `skill print` | 把 Skill 内容打印出来，给其他工具用 | `acornfox skill print > SKILL.md` |
+| `skill install` | 把和命令行同版本的 AcornFox Skill（入口 `SKILL.md` 加全部分册）装到 AI 工作台（Claude Code、Codex；`--dir` 指定其他目录）；每个文件头带命令行的版本号；旧版本留下的分册会删掉，`machine-*.md` 保留 | `acornfox skill install` |
+| `skill print` | 把 Skill 内容打印出来，给其他工具用：默认打印入口，`--all` 打印全部文件，`--file 文件名` 打印一册（例如 `install-linux.md`） | `acornfox skill print > SKILL.md`、`acornfox skill print --file deploy.md` |
+| `skill refresh` | 重新写 Skill 目录里的“本机能力”分册 `machine-服务器名.md`（`skill install` 会给每台登记的服务器写一份；命令行里装、删、升级、退回、恢复应用和改设置之后自己刷新，在页面上动过应用后手动运行）；`--target` 只刷新一台，已经不登记的服务器的旧分册会删掉。里面没有密码和 Key。写不进目录 `MACHINE-02`，连不上服务器 `MACHINE-03`。v0.7.0 起 | `acornfox skill refresh` |
+| `machine` | 这台服务器现在能做什么：装了哪些应用和解决方案、状态、怎么打开、有没有手册、有哪些服务和谁在用、平台能备份和升级吗。只读，现场算，没有密码和 Key；AI 工作台开始做事前先看它。v0.7.0 起，服务器也要是 0.7.0 | `acornfox --json machine` |
 
 ## 目录维护（给维护应用目录的人用）
 

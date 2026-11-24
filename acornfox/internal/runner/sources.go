@@ -11,7 +11,8 @@ package runner
 //	self      our own registry (none yet; see "Adding the self layer" below)
 //	cloud     the cloud vendor's internal accelerator, only on that vendor's servers
 //	public    other people's public domestic mirrors of Docker Hub / ghcr.io
-//	upstream  Docker Hub / ghcr.io itself (last in China, first elsewhere)
+//	upstream  Docker Hub / ghcr.io itself (first elsewhere; in China not used
+//	          unless the user names it: both are blocked there)
 //
 // plus "user": addresses the user configured (ACORNFOX_REGISTRY_MIRRORS, or a
 // registry-mirrors entry of /etc/docker/daemon.json that is not in the table,
@@ -165,14 +166,20 @@ func (r Registry) Sources() []ImageSource {
 }
 
 // GHCRSources lists the ghcr.io sources in pull order: in mainland China the
-// mirrors first and ghcr.io last, elsewhere ghcr.io first.
+// mirrors only (ghcr.io itself is blocked there, see SkipsGHCRUpstream),
+// elsewhere ghcr.io first.
 func (r Registry) GHCRSources() []ImageSource {
 	mirrors := ghcrMirrors()
 	var hosts []string
 	if r.China && len(mirrors) > 0 {
-		hosts = append(append(hosts, mirrors...), GHCRRegistry)
+		hosts = append(hosts, mirrors...)
 	} else {
-		hosts = append(append(hosts, GHCRRegistry), mirrors...)
+		hosts = append(hosts, GHCRRegistry)
+		for _, m := range mirrors {
+			if m != GHCRRegistry {
+				hosts = append(hosts, m)
+			}
+		}
 	}
 	var out []ImageSource
 	for _, h := range hosts {
@@ -258,6 +265,9 @@ func DaemonMirrors(ctx context.Context, cloud string) []string {
 	if hosts == nil {
 		hosts = registryMirrors()
 	}
+	// Docker Hub is no mirror of itself (a user may list it to have the
+	// runner ask it, see Registry.SkipsUpstream).
+	hosts = slices.DeleteFunc(slices.Clone(hosts), func(h string) bool { return h == DockerHubRegistry })
 	pctx, cancel := context.WithTimeout(ctx, probeTotal)
 	defer cancel()
 	ok := make([]bool, len(hosts))

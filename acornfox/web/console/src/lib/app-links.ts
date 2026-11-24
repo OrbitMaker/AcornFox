@@ -1,6 +1,7 @@
 // 一个应用和别的应用之间的连接：它用着谁的服务、谁在用它提供的服务。
 // 数据只来自 GET /v1/services（每条服务的 source、app、used_by、kind_label），这里只做整理，结论（能不能用）沿用 lib/services.ts。
-// 用在应用概览的“连接”卡片和应用设置“安装设置”里的“它连着谁”。单元测试见 app-links.test.ts。
+// 用在应用概览的“它用到的服务”卡片和应用设置“安装设置”里，以及删除应用时“谁正在用它”。单元测试见 app-links.test.ts。
+// 给人看的句子（评估 E2）：“PostgreSQL 数据库用的是：PostgreSQL 16”，用户自己添加的写“发信邮箱用的是：你添加的“我的邮箱””。
 import { useEffect, useState } from 'react'
 import { kindLabel, listServices, serviceStatus, usedByApps, type StatusText } from './services'
 import type { ServiceView } from './types'
@@ -35,9 +36,20 @@ export function hasLinks(l: AppLinks | null | undefined): l is AppLinks {
   return !!l && (l.uses.length > 0 || l.usedBy.length > 0)
 }
 
-// usesText：“用的是 postgres16 的”或“用的是你登记的“名字””（前面的服务类型由页面放）。
-export function usesText(u: UsesLink): string {
-  return u.provider ? `用的是 ${u.provider} 的` : `用的是你登记的“${u.service}”`
+// usesPurpose：“PostgreSQL 数据库用的是”这一截。说法只用服务类型自带的中文名（目录里定义的），页面不为某一种服务类型写专门的话。
+export function usesPurpose(u: UsesLink): string {
+  return u.kind + '用的是'
+}
+
+// usesWho：冒号后面那一截。提供方是装好的应用时给它的显示名（name 把代号换成应用中心里的名字），
+// 用户自己添加的写“你添加的“名字””。
+export function usesWho(u: UsesLink, name: (app: string) => string = (x) => x): string {
+  return u.provider ? name(u.provider) : `你添加的“${u.service}”`
+}
+
+// usesText：一整句“PostgreSQL 数据库用的是：PostgreSQL 16”。
+export function usesText(u: UsesLink, name?: (app: string) => string): string {
+  return usesPurpose(u) + '：' + usesWho(u, name)
 }
 
 // useAppLinks：读服务列表并整理出和 app 有关的连接。旧服务端没有服务接口（404）或读不出来时是 null（页面不显示）。

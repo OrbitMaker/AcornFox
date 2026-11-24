@@ -1,6 +1,8 @@
-// 服务：这台机器上能给应用用的东西（装好的应用提供的，或用户自己登记的），
+// 服务：这台机器上能给应用用的东西（装好的应用提供的，或用户自己添加的），
 // 以及安装前的计划（这个应用需要哪些服务、接上了哪条、还缺什么）。
 // 请求、状态文字、按服务类型定义生成的表单、计划的整理都在这里；页面只负责显示。单元测试见 services.test.ts。
+// 样稿第 10 版：页面上“登记”一律改叫“添加”（添加我已有的）；说到应用的地方都可以传 nameOf（页面用 useAppNames()），
+// 把代号换成应用中心里的名字，不传时照旧用代号；故障编号不放进给人看的那句话，放进“复制给 AI 工作台”的文字。
 //
 // 接口：GET /v1/services/kinds、GET /v1/services、POST /v1/services、PATCH /v1/services/{name}、
 //       POST /v1/services/{name}/test、DELETE /v1/services/{name}、POST /v1/catalog/plan。
@@ -112,8 +114,12 @@ export interface StatusText { text: string; tone: Tone; detail?: string }
 // 状态颜色对应的标签样式。
 export const TONE_BADGE: Record<Tone, 'success' | 'warning' | 'danger' | 'outline'> = { success: 'success', warning: 'warning', danger: 'danger', muted: 'outline' }
 
+// NameOf：应用代号 → 给人看的名字（页面传 useAppNames()；不传就是代号本身）。
+export type NameOf = (app: string) => string
+const same: NameOf = (x) => x
+
 // serviceStatus：一条服务现在能不能用。还差的项用中文名列出来。
-export function serviceStatus(s: ServiceView): StatusText {
+export function serviceStatus(s: ServiceView, nameOf: NameOf = same): StatusText {
   switch (s.status) {
     case 'ok':
       return { text: '可用', tone: 'success' }
@@ -126,9 +132,9 @@ export function serviceStatus(s: ServiceView): StatusText {
       return out
     }
     case 'provider_stopped':
-      return { text: s.app ? `提供它的应用 ${s.app} 停着` : '提供它的应用停着', tone: 'warning' }
+      return { text: s.app ? `${nameOf(s.app)} 停了，暂时用不了` : '提供它的应用停了，暂时用不了', tone: 'warning' }
     case 'provider_gone':
-      return { text: s.app ? `提供它的应用 ${s.app} 已删` : '提供它的应用已删', tone: 'danger' }
+      return { text: s.app ? `${nameOf(s.app)} 已经删了` : '提供它的应用已经删了', tone: 'danger' }
     case 'not_ready': {
       const out: StatusText = { text: '还不能用', tone: 'warning' }
       if (s.ready_detail) out.detail = s.ready_detail
@@ -140,8 +146,8 @@ export function serviceStatus(s: ServiceView): StatusText {
 }
 
 // slotsText：这条服务还能不能再接别的应用。被独占、接满时说清是谁占着；有上限时说还能接几个；不限时 text 是空串（不显示）。
-export function slotsText(s: ServiceView): { text: string; full: boolean } {
-  if (s.dedicated_to) return { text: `被应用 ${s.dedicated_to} 独占，别的应用接不了`, full: true }
+export function slotsText(s: ServiceView, nameOf: NameOf = same): { text: string; full: boolean } {
+  if (s.dedicated_to) return { text: `只给 ${nameOf(s.dedicated_to)} 用，别的应用接不了`, full: true }
   if (typeof s.slots_left === 'number') {
     if (s.slots_left <= 0) return { text: `已经接满（最多 ${s.max_consumers || 0} 个），别的应用接不了`, full: true }
     return { text: `还能接 ${s.slots_left} 个（最多 ${s.max_consumers || 0} 个）`, full: false }
@@ -168,8 +174,8 @@ export function appServiceStatus(u: AppServiceUse): StatusText {
   }
 }
 
-export function sourceText(s: ServiceView): string {
-  return s.source === 'app' ? `由应用 ${s.app || '（未知）'} 提供` : '自己登记的'
+export function sourceText(s: ServiceView, nameOf: NameOf = same): string {
+  return s.source === 'app' ? `${s.app ? nameOf(s.app) : '一个应用'} 提供的` : '你自己添加的'
 }
 
 function appsOf(list: ServiceUse[]): string[] {
@@ -190,21 +196,21 @@ export function goneUsers(s: ServiceView): string[] {
 
 export const goneText = (app: string) => app + '（已删除，数据还留着）'
 
-export function usedByText(s: ServiceView): string {
-  const apps = usedByApps(s)
-  const gone = goneUsers(s)
+export function usedByText(s: ServiceView, nameOf: NameOf = same): string {
+  const apps = usedByApps(s).map(nameOf)
+  const gone = goneUsers(s).map(nameOf)
   const head = apps.length ? apps.join('、') + ' 在用' : gone.length ? '没有已装的应用在用' : '还没有应用在用'
   return gone.length ? head + '；' + gone.map(goneText).join('、') : head
 }
 
-// providerText：一行里“谁提供”那半句。应用提供的写“应用名 提供”；自己登记的写“你登记的“名字””。
-export function providerText(s: ServiceView): string {
-  return s.source === 'app' ? `${s.app || '（未知的应用）'} 提供` : `你登记的“${s.name}”`
+// providerText：一行里“谁提供”那半句。应用提供的写“应用名 提供”；自己添加的写“你添加的“名字””。
+export function providerText(s: ServiceView, nameOf: NameOf = same): string {
+  return s.source === 'app' ? `${s.app ? nameOf(s.app) : '一个应用'} 提供` : `你添加的“${s.name}”`
 }
 
 // usersText：展开后“谁在用”那一项。已删、数据还留着的写成“名字（已删除，数据还留着）”；一个都没有时说“还没有”。
-export function usersText(s: ServiceView): string {
-  return [...usedByApps(s), ...goneUsers(s).map(goneText)].join('、') || '还没有'
+export function usersText(s: ServiceView, nameOf: NameOf = same): string {
+  return [...usedByApps(s).map(nameOf), ...goneUsers(s).map(nameOf).map(goneText)].join('、') || '还没有'
 }
 
 // ---- 平台自动填的 ----
@@ -224,11 +230,18 @@ export function platformSummary(n: number): string {
   return n > 0 ? `时区、下载源等 ${n} 项。装应用时平台替你填好，不用管` : '这台机器上现在没有要平台替你填的项'
 }
 
+// platformValue：一项现在的值怎么给人看。网络区域的 cn、global 写成“国内网络”“海外网络”（评估 X9），别的原样。
+export function platformValue(v: PlatformVarView): string {
+  const raw = (v.value || '').trim()
+  if (v.name === 'region') return raw === 'cn' ? '国内网络' : raw === 'global' ? '海外网络' : raw
+  return raw
+}
+
 // removeConfirmText：删除前确认的那句话。有已装的应用在用：说要先把它们删掉或换掉（服务端会拒绝）；
 // 只有已删、数据还留着的应用接着它：说它们的接入会一起删掉，以后装回来时要重新接服务。
-export function removeConfirmText(s: ServiceView): string {
-  const apps = usedByApps(s)
-  const gone = goneUsers(s)
+export function removeConfirmText(s: ServiceView, nameOf: NameOf = same): string {
+  const apps = usedByApps(s).map(nameOf)
+  const gone = goneUsers(s).map(nameOf)
   if (apps.length) return `删除“${s.name}”？现在 ${apps.join('、')} 在用它，要先把它们删掉或换成别的服务。`
   if (gone.length) return `删除“${s.name}”？${gone.map(goneText).join('、')}接着它的记录会一起删掉，以后装回来时要重新接服务。`
   return `删除“${s.name}”？`
@@ -253,6 +266,19 @@ export function shownValues(s: ServiceView) {
 // waitingAsk：要用户在应用里做一步、还没填的项（显示那句提示和“填这一项”）。
 export function waitingAsk(s: ServiceView) {
   return shownValues(s).filter((v) => !!v.ask && !v.set)
+}
+
+// testPlain：“试一下”的结果给人看的那一句（样稿第 10 版）：不带故障编号和连的地址，这些放进 testForAI 给 AI 工作台。
+export function testPlain(r: ServiceTestResult): StatusText & { kind: 'ok' | 'skipped' | 'failed' } {
+  const why = r.detail || r.message || ''
+  if (r.skipped) return { kind: 'skipped', tone: 'muted', text: '这次试不了' + (why ? '：' + why : '') }
+  if (r.ok) return { kind: 'ok', tone: 'success', text: '通了' + (why ? '：' + why : '') }
+  return { kind: 'failed', tone: 'danger', text: '没通' + (why ? '：' + why : '') }
+}
+
+export function testForAI(name: string, r: ServiceTestResult): string {
+  return [`用 acornfox skill 帮我查一下这台机器上的服务“${name}”为什么试不通（acornfox services test ${name} --json）。页面上试的结果：`,
+    `- ${r.ok ? '通了' : r.skipped ? '试不了' : '没通'}${r.code ? ' · ' + r.code : ''}${r.target ? ' · 连的是 ' + r.target : ''}${r.detail || r.message ? ' · ' + (r.detail || r.message) : ''}`].join('\n')
 }
 
 // testText：“试一下”的结果怎么说。skipped：这次试不了（不是没通）；target 有值时说连的是哪。
@@ -284,9 +310,21 @@ export function fieldControl(f: ServiceField): 'select' | 'password' | 'number' 
   return 'text'
 }
 
-// fieldOptions：枚举和是否的选项；可以不填的项前面多一个“不填”。
+// PLAIN_OPTION：枚举值给人看的说法（评估 X9：disable→不加密、tls→加密）。存的值不变，只换显示；表里没有的原样显示。
+export const PLAIN_OPTION: Record<string, string> = {
+  disable: '不加密', none: '不加密', require: '加密', tls: '加密', starttls: '加密（STARTTLS）', 'verify-full': '加密并核对证书', true: '是', false: '否',
+}
+
+// plainValue：展开后一项的值怎么显示。枚举、是否换成人话；别的原样（保密项本来就是遮住的）。
+export function plainValue(v: { value: string; secret?: boolean }, f?: ServiceField): string {
+  if (v.secret) return v.value
+  const enumLike = !f || f.type === 'enum' || f.type === 'bool'
+  return enumLike && Object.prototype.hasOwnProperty.call(PLAIN_OPTION, v.value) ? PLAIN_OPTION[v.value] : v.value
+}
+
+// fieldOptions：枚举和是否的选项；可以不填的项前面多一个“不填”。选项的值不变，显示的字换成人话（PLAIN_OPTION）。
 export function fieldOptions(f: ServiceField): [string, string][] {
-  const opts: [string, string][] = f.type === 'bool' ? [['true', '是'], ['false', '否']] : (f.options || []).map((o) => [String(o), String(o)])
+  const opts: [string, string][] = f.type === 'bool' ? [['true', '是'], ['false', '否']] : (f.options || []).map((o) => [String(o), PLAIN_OPTION[String(o)] || String(o)])
   return f.required || defaultText(f) ? opts : [['', '不填'], ...opts]
 }
 
@@ -312,7 +350,7 @@ export function checkFieldValue(f: ServiceField, raw: string): string {
   if (f.type === 'int' && !/^-?\d+$/.test(v)) return `${label}要填整数`
   if (f.type === 'url' && !/^https?:\/\/\S+$/.test(v)) return `${label}要以 http:// 或 https:// 开头`
   if (f.type === 'bool' && v !== 'true' && v !== 'false') return `${label}只能选“是”或“否”`
-  if (f.type === 'enum' && f.options?.length && !f.options.map(String).includes(v)) return `${label}只能选 ${f.options.join('、')}`
+  if (f.type === 'enum' && f.options?.length && !f.options.map(String).includes(v)) return `${label}只能选 ${f.options.map((o) => PLAIN_OPTION[String(o)] || String(o)).join('、')}`
   return ''
 }
 
@@ -329,7 +367,7 @@ export function checkServiceForm(k: ServiceKind, name: string, values: ServiceFo
   return out
 }
 
-// buildServiceRequest：登记一条服务的请求。没填的项不发；值都按字符串发（和命令行 --set 项=值 一样）。
+// buildServiceRequest：添加一条服务的请求。没填的项不发；值都按字符串发（和命令行 --set 项=值 一样）。
 export function buildServiceRequest(k: ServiceKind, name: string, values: ServiceFormValues): AddServiceRequest {
   const out: Record<string, string> = {}
   for (const f of k.fields || []) {

@@ -204,18 +204,28 @@
     },
     "init": {
       "type": "array",
-      "description": "健康检查通过后替用户做的初始化步骤。一组步骤共用一个会话（同一个 Cookie 罐，save 下来的值后面的步骤都能用），按顺序执行，一步不过就停",
+      "description": "健康检查通过后替用户做的步骤，按什么时候跑分三种（when）：after_healthy 只在首次安装时跑（接上旧数据重装时跳过）；on_reapply 每次“改设置重新生效”之后都跑（要写成重复跑不出错的）；on_change 只在 watch 里列的某一项变了才跑。同一种时机（on_change 还要 watch 相同）的步骤是一组，共用一个会话（同一个 Cookie 罐，save 下来的值后面的步骤都能用），按顺序执行，一步不过就停；不同的组互相看不到对方 save 的值",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["when"],
         "properties": {
           "name": { "type": "string", "description": "可选，出错时用来说是哪一步" },
-          "when": { "enum": ["after_healthy"] },
+          "when": { "enum": ["after_healthy", "on_reapply", "on_change"] },
+          "watch": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "description": "when 是 on_change 时必写：看哪几项，其中任何一项的值变了就跑这一步。引用不带 {{ }}：params.<参数名>、platform.<平台变量名>、uses.<需要名>.<项>",
+            "items": { "type": "string", "pattern": "^(params\\.[a-z][a-z0-9_]*|platform\\.[a-z][a-z0-9_.]*|uses\\.[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*)$" }
+          },
           "http": { "$ref": "#/$defs/stepHTTP" },
           "exec": { "$ref": "#/$defs/stepExec" }
         },
-        "oneOf": [{ "required": ["http"] }, { "required": ["exec"] }]
+        "oneOf": [{ "required": ["http"] }, { "required": ["exec"] }],
+        "if": { "properties": { "when": { "const": "on_change" } }, "required": ["when"] },
+        "then": { "required": ["watch"] },
+        "else": { "not": { "required": ["watch"] } }
       }
     },
     "first_login": {

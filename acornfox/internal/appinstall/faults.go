@@ -71,11 +71,27 @@ const (
 	// holding, a start command that would carry a secret (steps.go).
 	CodeRender = "CAT-INST-39"
 
+	// CodeSegDL: the image archive could not be brought through the download
+	// gateway by the segmented download (segdl.go): the download cache could
+	// not be written, a segment kept failing, or the address kept expiring.
+	// What is in the cache stays, so the next try goes on from it.
+	CodeSegDL = "CAT-INST-40"
+
 	// A platform variable an installed app was given at install time is
 	// not what the platform would give it now (its address after the
 	// exposure changed or a domain was bound): `apps vars` marks the row
 	// with it. Not an error; nothing is rewritten in this version.
 	CodeVarsStale = "APP-VARS-01"
+
+	// Changing an installed app's settings and applying them again
+	// (reapply.go): `acornfox apps set`, `apps reapply`, the address of an
+	// app following its exposure or domain, a platform variable or a
+	// service the app is plugged into that changed.
+	CodeApplyCannot  = "APP-APPLY-01" // this app cannot be applied again now (not from the app center, manifest not saved, stopped with steps to run, an install or another apply is running)
+	CodeApplyEdit    = "APP-APPLY-02" // this setting cannot be changed after the install (editable never or reinstall), or a required one was emptied
+	CodeApplyFailed  = "APP-APPLY-03" // applying failed and everything was put back as it was (the cause's code is in the message)
+	CodeApplyUndone  = "APP-APPLY-04" // applying failed and putting it back did not work either: the app may be in a mixed state
+	CodeApplyConfirm = "APP-APPLY-05" // the change restarts the app and the request did not say it is agreed to (confirm_restart); nothing was changed
 
 	// Connecting a private catalog with a code (POST /v1/catalog/connect).
 	CodeConnFormat    = "CAT-CONN-01" // the code is not AFXC- plus 16 letters/digits (checked here, not sent)
@@ -139,7 +155,23 @@ var Faults = []FaultDef{
 	{CodeCheckStop, svcCheckStopMeaning, svcCheckStopAction},
 	{CodeTaken, svcTakenMeaning, svcTakenAction},
 	{CodeRender, renderMeaning, renderAction},
+	{CodeSegDL, segDLMeaning, segDLAction},
 	{CodeVarsStale, varsStaleMeaning, varsStaleAction},
+	{CodeApplyCannot, applyCannotMeaning, applyCannotAction},
+	{CodeApplyEdit, applyEditMeaning, applyEditAction},
+	{CodeApplyFailed, applyFailedMeaning, applyFailedAction},
+	{CodeApplyUndone, applyUndoneMeaning, applyUndoneAction},
+	{CodeApplyConfirm, applyConfirmMeaning, applyConfirmAction},
+	{CodeUpgCannot, upgCannotMeaning, upgCannotAction},
+	{CodeUpgNeed, upgNeedMeaning, upgNeedAction},
+	{CodeUpgChanged, upgChangedMeaning, upgChangedAction},
+	{CodeUpgConfirm, upgConfirmMeaning, upgConfirmAction},
+	{CodeUpgFailed, upgFailedMeaning, upgFailedAction},
+	{CodeUpgUndone, upgUndoneMeaning, upgUndoneAction},
+	{CodeRollbackCannot, rollbackCannotMeaning, rollbackCannotAction},
+	{CodeRollbackConfirm, rollbackConfirmMeaning, rollbackConfirmAction},
+	{CodeRollbackFailed, rollbackFailedMeaning, rollbackFailedAction},
+	{CodeRollbackUndone, rollbackUndoneMeaning, rollbackUndoneAction},
 	{CodeConnFormat, "连接码格式不对（应是 AFXC- 加 16 个字母数字），没有发给网关", "让用户照原样再抄一遍；0、1、8 会当成 O、I、B"},
 	{CodeConnNoGateway, "这台服务器关掉了下载网关，连不了私有目录", "问用户是否打开下载网关（去掉 ACORNFOX_GATEWAY=off 或 network.json 里的 \"gateway\": \"off\"）"},
 	{CodeConnUnknown, "连接码不存在、抄错了，或已经被别的机器用过（一码一机）", "让用户核对连接码；还不行就找给码的人要新码。不要反复试"},
@@ -202,8 +234,14 @@ func (f *Fault) HTTPStatus() int {
 	case CodeBadParams, CodeUnsupported, CodeConnFormat, CodeBadPlatform, CodeChooseService, CodeBadUse:
 		return http.StatusBadRequest
 	case CodeNameTaken, CodeBusy, CodeNoMemory, CodeNoDisk, CodeArch, CodeNoPort, CodeTooOld, CodeOldVolumes, CodeNoService,
-		CodeDisconnected, CodeConnNoGateway, CodeBadManifest, CodeLegacyManifest, CodeTaken, CodeRender:
+		CodeDisconnected, CodeConnNoGateway, CodeBadManifest, CodeLegacyManifest, CodeTaken, CodeRender,
+		CodeApplyCannot, CodeApplyEdit, CodeApplyConfirm,
+		CodeUpgCannot, CodeUpgNeed, CodeUpgChanged, CodeUpgConfirm, CodeRollbackCannot, CodeRollbackConfirm, "BKP-03", "BKP-09":
 		return http.StatusConflict
+	case "BKP-01":
+		return http.StatusInsufficientStorage
+	case "BKP-11":
+		return http.StatusNotImplemented
 	case CodePrivateDenied, CodeConnDisabled:
 		return http.StatusForbidden
 	case CodeConnExpired:
@@ -262,10 +300,22 @@ const (
 	svcCheckStopAction  = "先查提供方：acornfox status 提供方 看它是否在运行，acornfox logs 提供方 --tail 200 看日志；提供方好了再装一次（还是 --reuse-data）。确认原来的数据还在不在（例如用户在提供方里删过库、改过密码就会这样）。只有用户确定不要原来的数据时，才改接别的服务：加 --use 需要名=服务名 再装；不要自己删库、改密码"
 	svcTakenMeaning     = "要接的那条服务现在接不了这个应用：别的应用把它独占了（清单写了只接没有别的使用方在用的服务），这个应用要独占它但已经有别的应用在用，或者提供它的应用限制了同时接几个、已经接满。删了但数据还留着的应用也占着它的位置（它装回来时要接回去）。安装前就停下了，或者在接的那一刻发现被同时在装的别的应用先接上了，这次安装已清理（这次刚发的凭据已收回，提供方清单写了删数据步骤的，给它新建的库或数据也已删掉；没删成的在任务的 apps[].carried 里有 CAT-INST-35 提醒）"
 	svcTakenAction      = "acornfox services list 看每条服务被谁独占、还能接几个；acornfox install 应用 --plan 看现在能接哪条。有别的同类服务就用 --use 需要名=服务名 指定；没有就登记一条你已有的（acornfox services add …）。占着位置的是删了但数据还留着的应用、用户也确认它不要了：它已经删了，不能直接 delete --volumes，也不要手工 docker volume rm（接入记录还在，位置照样占着）；问过用户后先 acornfox install --name 原来的名字 --reuse-data 装回来，再 acornfox delete 原来的名字 --volumes 连数据一起删，位置才让出来。不要为了腾位置去删别的应用，要删先问用户"
+	segDLMeaning        = "镜像包经下载网关分段下载没成：下载缓存写不了（磁盘满了或没权限）、某一段连着多次下不下来，或者下载地址反复失效。已经下好的部分留在下载缓存里，下次接着下；公共目录的应用接着换镜像站拉，私有目录的应用停下"
+	segDLAction         = "看 message 是哪一种：写缓存失败先看磁盘空间和权限（acornfox doctor 的 SETUP-DISK-01）；某一段多次下不下来，多半是网络或网盘暂时不通，稍后重装会从缓存接着下，已下的不用重下；缓存在数据目录 uploads/dl-cache，3 天没动会自己清，磁盘紧张时可以由用户确认后删；要退回单连接下载，环境变量 ACORNFOX_DL_SEGMENTED=0"
 	renderMeaning       = "清单里写的一个值算不出来：环境变量、启动命令、配置文件、首次登录信息或初始化步骤里的 {{…}} 写法读不了（检查工具会报 CAT-LINT-46、47），一个变换没做成（例如 map 对照表里没有取到的那个值，又没写 \"*=值\" 兜底），if 条件读不了，同名的两条环境变量的条件同时成立，或者启动命令引用了保密的值。这是清单的问题，不是操作不对；这次安装已失败并清理"
 	renderAction        = "看 message 是哪一处的哪个 {{…}}（message 里不带取到的值）。是 map 没对上、条件同时成立这类、要靠换一个值解决的（例如换一种对外方式、--set 改设置项；acornfox catalog platform-vars 看本机平台变量的值），问用户后再装；写法读不了、启动命令带保密值的，是目录的问题，把 message 反馈给我们，不要想办法绕过"
-	varsStaleMeaning    = "应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。这一版平台不会去改已经装好的应用：应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行。这只是提醒，不是出错"
-	varsStaleAction     = "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：经用户同意，acornfox delete 应用（默认保留数据）后 acornfox install 应用 --reuse-data，对外方式和这台机器给新应用的默认（install --plan 里的 apps[].exposure）不一样时加 --expose 现在的对外方式（local、lan 或 public）。是因为绑了域名才不一样的，删了重装也解决不了：删应用时绑的域名会一起删掉，重装时算出来的还是 http 地址，先不动。以后的版本会有“改了设置重新生效”，不用删了重装"
+	varsStaleMeaning    = "应用装的时候，平台把这个平台变量的值（多半是应用的访问地址 app.url、app.scheme、app.host）算好写进了应用；装好以后改了对外方式、绑了域名，或者这台机器的设置变了，现在算出来的和装时的不一样了。应用里用的还是装时的值（例如应用里的 webhook 地址还是旧的），应用照常运行：要让它用上现在的值，用 acornfox apps reapply 重新生效。这只是提醒，不是出错"
+	varsStaleAction     = "apps vars 里 value 是装时的值，value_now 是现在算出来的值。不影响用就先不动；要让应用用上现在的值：先 acornfox apps reapply 应用 --plan 看会改什么、会不会重启它，经用户同意后 acornfox apps reapply 应用 --yes（会按现在的值重写它的环境变量和配置文件并重启，数据不动，失败自动退回）；一次看有哪些应用落后了：acornfox apps affected"
+	applyCannotMeaning  = "这个应用现在不能重新生效：它不是从应用中心装的、装的时候没保存清单或用的是旧格式的清单（那样算不出每一项该是什么），还没有上线，正在装或正在重新生效，或者它停着而这次改动要在应用里做步骤（停着的应用不能在里面做事）。什么都没改"
+	applyCannotAction   = "看 message 是哪一种：正在装或正在重新生效的，用 acornfox install status 任务编号 --wait 等它结束再来；停着的先问用户，同意后 acornfox start 应用，再重新生效；清单没存或是旧格式的，这个应用只能删了重装（保留数据 --reuse-data，要先问用户）"
+	applyEditMeaning    = "这一项设置装好以后不能改：清单写了 editable: never（改了应用会坏，例如加密密钥）或 reinstall（要重装才能改），或者这是平台生成的值，或者把必填项清空了、值的格式不对。什么都没改"
+	applyEditAction     = "按 message 说的做：不能改的，不要想办法绕过（不要手工 env set）；写了“重装才能改”的，问用户同意后保留数据删掉重装（acornfox delete 应用，再 acornfox install 应用 --reuse-data）；值不对的，改对再试。acornfox apps vars 应用 看每一项能不能改"
+	applyFailedMeaning  = "重新生效没成功，平台已经把环境变量、启动命令和配置文件、应用的容器都退回了原来的样子，应用照原来的设置在运行，改动没有留下。message 里写了没成功的原因和它的编号（新的容器没起来、健康检查没通过，或清单里“重新生效后做的步骤”没通过）"
+	applyFailedAction   = "把 message 里的原因告诉用户；原因里的编号用 acornfox faults 编号 看怎么办；多半是用户改的值让应用起不来（例如端口、地址写错），改对了再试一次；先用 acornfox apps set … --plan 看会改什么。应用已经退回，不用再处理"
+	applyUndoneMeaning  = "重新生效没成功，而且退回原来的样子时也出了错：应用可能停在新旧设置混在一起的状态（环境变量、配置文件或容器有的是新的、有的是旧的）。message 里写了两边的原因"
+	applyUndoneAction   = "这是要人处理的：先把 message 告诉用户，不要再重复运行重新生效，不要改密钥或删数据；acornfox status 应用 和 acornfox logs 应用 --tail 200 看现在的样子；acornfox apps vars 应用 看环境变量是新的还是旧的；用户同意后可以 acornfox restart 应用，或 acornfox apps reapply 应用 --force 再按保存的设置生效一次"
+	applyConfirmMeaning = "这次改动会重启这个应用（它的地址或设置变了，应用里用到这些值），请求里没有写明用户同意重启，所以什么都没改。这是确认规则，不是出错"
+	applyConfirmAction  = "把 message 里写的会改什么、会重启哪个应用告诉用户，问他同意后在同一条命令上加 --yes（接口里是 confirm_restart: true）再运行一次；用户不想重启，可以加 --no-reapply（接口里 reapply: skip）只改访问方式，应用里的地址以后用 acornfox apps reapply 再对"
 	retiredMeaning      = "已不再使用的编号：以前是平台内置的大模型来源（--llm）出的错。大模型接口现在是一种普通的服务，这一类问题报 CAT-INST-31～35。编号保留，不会再分给别的错误"
 	retiredAction       = "这一版不会再出现这个编号。遇到了说明看的是旧版本的输出：按 acornfox faults CAT-INST-31 等新编号处理"
 )

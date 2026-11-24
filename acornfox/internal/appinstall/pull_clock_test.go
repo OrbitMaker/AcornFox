@@ -23,18 +23,20 @@ func shortLimits(t *testing.T, task, pull time.Duration) {
 
 // Pulling from the public sources does not count toward the task's limit: a
 // recipe whose two pulls together take three times the limit is installed.
+// The limit leaves 2 s for the other steps so a busy test machine does not
+// run out of it.
 func TestPullTimeNotCountedInTaskLimit(t *testing.T) {
-	shortLimits(t, time.Second, time.Minute)
+	shortLimits(t, 2*time.Second, time.Minute)
 	v := setup(t)
 	v.w.mu.Lock()
-	v.w.pullDelay = 1500 * time.Millisecond
+	v.w.pullDelay = 3 * time.Second
 	v.w.mu.Unlock()
 	t0 := time.Now()
 	tv := v.install(t, Request{Recipe: "hermes-with-new-api", Params: hermesModel()})
 	if tv.Status != state.TaskSucceeded {
 		t.Fatalf("%s %+v", tv.Status, tv.Fault)
 	}
-	if el := time.Since(t0); el < 3*time.Second || len(v.w.pulled) != 2 {
+	if el := time.Since(t0); el < 6*time.Second || len(v.w.pulled) != 2 {
 		t.Fatalf("took %v, pulled %v: the pulls did not run as long as the test needs", el, v.w.pulled)
 	}
 }

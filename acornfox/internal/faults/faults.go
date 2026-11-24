@@ -30,8 +30,8 @@
 // when only the module is present, with a line saying so. Run the tests in a
 // full checkout of the repository before merging.
 //
-// What is in it: the CAT-* (CAT-SVC-* among them), SETUP-*, EDGE-*, LAN-CONSOLE-*,
-// INSTALL-*, UPGRADE-*, UNINSTALL-*, OPEN-APP-*, APP-VARS-*, ID-KEY-*, PDOMAIN-*, PUBCON-* codes, the download gateway's GW-* codes
+// What is in it: the CAT-* (CAT-SVC-* among them), CLI-*, WIN-*, MAC-*, SETUP-*, EDGE-*, LAN-CONSOLE-*,
+// INSTALL-*, UPGRADE-*, UNINSTALL-*, OPEN-APP-*, APP-VARS-*, APP-APPLY-*, APP-UPG-*, ID-KEY-*, PDOMAIN-*, PUBCON-*, BKP-*, MACHINE-* codes, the download gateway's GW-* codes
 // as this machine sees them, and the lower-case diagnosis codes of deploys
 // (stage upload … route, addon), of connecting to a server (stage connect),
 // of domains and the public console, of the LAN console and of installing
@@ -99,21 +99,25 @@ type Fault struct {
 var Groups = []struct{ Key, Name string }{
 	{"INSTALL", "安装脚本（install.sh）"},
 	{"UPGRADE", "升级和卸载脚本"},
+	{"WIN", "Windows 安装（install-windows.ps1）"},
+	{"MAC", "Mac 安装（acornfox mac，install-mac.sh）"},
 	{"SETUP", "准备运行环境和本机自检（doctor）"},
 	{"EDGE", "入口代理（应用网址和域名前面的入口容器）"},
 	{"LAN", "局域网控制台"},
 	{"LINK", "连接服务器（diagnosis.stage 为 connect）"},
 	{"DEPLOY", "部署诊断（deploy、redeploy、start 等返回的 diagnosis.code）"},
 	{"DOMAIN", "域名和公网控制台"},
+	{"BKP", "应用数据备份和恢复（BKP）"},
 	{"OPEN", "打开应用"},
 	{"CLI", "命令行在这台电脑上的操作（安装 Skill）"},
 	{"INST", "应用中心安装（CAT-INST）"},
 	{"CONN", "连接私有目录（CAT-CONN）"},
 	{"SVC", "服务登记（CAT-SVC）"},
-	{"SYNC", "应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG）"},
+	{"SYNC", "应用目录同步和读取（CAT-SYNC、CAT-LOAD、CAT-PKG、CAT-SHOW、CAT-SKILL）"},
 	{"PUB", "打包、签名、检查目录（维护目录的人用：CAT-LINT、CAT-BUILD、CAT-KEY、CAT-VER）"},
 	{"GW", "下载网关返回的编号（GW）"},
 	{"ID", "本机身份（ID-KEY）"},
+	{"MACHINE", "本机能力和分册（MACHINE）"},
 	{"ANY", "兜底"},
 }
 
@@ -130,8 +134,8 @@ const FallbackCode = "ANY-00"
 
 // Catalog is every entry, grouped in the order of Groups, the fallback last.
 var Catalog = join(
-	installFaults, upgradeFaults, setupFaults, edgeFaults, lanFaults, linkFaults, deployFaults, domainFaults, pdomainFaults, openFaults, cliFaults,
-	instFaults, connFaults, svcFaults, syncFaults, pubFaults, gatewayFaults, idFaults, anyFaults,
+	installFaults, upgradeFaults, winFaults, macFaults, setupFaults, edgeFaults, lanFaults, linkFaults, deployFaults, domainFaults, pdomainFaults, backupFaults, openFaults, cliFaults,
+	instFaults, connFaults, svcFaults, syncFaults, pubFaults, gatewayFaults, idFaults, machineFaults, anyFaults,
 )
 
 func join(parts ...[]Fault) []Fault {

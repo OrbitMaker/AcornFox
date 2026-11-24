@@ -45,7 +45,10 @@ func TestMacLocalStop(t *testing.T) {
 		t.Fatalf("human install: %d %q %q", code, out.String(), errBuf.String())
 	}
 
-	// doctor keeps its own report shape.
+	// doctor keeps its own report shape. (It also looks at Skills installed in
+	// the home directory: use an empty one.)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
 	out.Reset()
 	errBuf.Reset()
 	code := run([]string{"doctor", "--json"}, strings.NewReader(""), &out, &errBuf)

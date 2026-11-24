@@ -298,7 +298,13 @@ func (w *fakeWorld) kick(app string) {
 			})
 			continue
 		}
-		_, _ = w.st.UpdateDeployment(ctx, d.ID, func(x *state.Deployment) error { x.Status = state.StatusRouting; return nil })
+		_, _ = w.st.UpdateDeployment(ctx, d.ID, func(x *state.Deployment) error {
+			x.Status = state.StatusRouting
+			if x.SourceKind == state.SourceImage {
+				x.ImageID = x.SourceRef // the reconciler resolves an image source to its ID
+			}
+			return nil
+		})
 		_ = w.st.SetCurrentDeployment(ctx, app, d.ID)
 	}
 }

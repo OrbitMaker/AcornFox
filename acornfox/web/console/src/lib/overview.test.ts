@@ -53,24 +53,24 @@ describe('圆环的百分比', () => {
 
 describe('版本时间线 versionTimeline', () => {
   const d = (seq: number, status: string, at = '2026-10-15T08:00:00Z'): Deployment => ({ id: 'd' + seq, app: 'web', seq, source_kind: 'upload', source_ref: '', status, created_at: at })
-  it('从旧到新，正在服务的标出来，别的写上线那天', () => {
+  it('从旧到新，正在用的标出来，别的写上线那天', () => {
     const n = versionTimeline([d(3, 'live'), d(2, 'superseded'), d(1, 'superseded')], 3)
     expect(n.map((x) => x.seq)).toEqual([1, 2, 3])
-    expect(n[2]).toMatchObject({ live: true, when: '正在服务' })
+    expect(n[2]).toMatchObject({ live: true, when: '正在用' })
     expect(n[0].when).toMatch(/^10-1[56]$/)
   })
-  it('版本多时只留最近 3 个；没上线的写“没上线”', () => {
+  it('版本多时只留最近 3 个；没上线的写“没换上”', () => {
     const n = versionTimeline([d(6, 'failed'), d(5, 'live'), d(4, 'superseded'), d(3, 'superseded'), d(2, 'superseded')], 5)
     expect(n.map((x) => x.seq)).toEqual([4, 5, 6])
-    expect(n[2]).toMatchObject({ failed: true, when: '没上线' })
+    expect(n[2]).toMatchObject({ failed: true, when: '没换上' })
   })
-  it('正在服务的那一版很旧时也一定在里面', () => {
+  it('正在用的那一版很旧时也一定在里面', () => {
     const n = versionTimeline([d(9, 'failed'), d(8, 'failed'), d(7, 'failed'), d(6, 'failed'), d(2, 'live')], 2)
     expect(n.map((x) => x.seq)).toEqual([2, 8, 9])
     expect(n[0].live).toBe(true)
   })
-  it('读不到版本列表时只画正在服务的那一版；什么都没有时是空的', () => {
-    expect(versionTimeline(null, 4)).toEqual([{ seq: 4, live: true, failed: false, when: '正在服务' }])
+  it('读不到版本列表时只画正在用的那一版；什么都没有时是空的', () => {
+    expect(versionTimeline(null, 4)).toEqual([{ seq: 4, live: true, failed: false, when: '正在用' }])
     expect(versionTimeline(null, 0)).toEqual([])
   })
 })

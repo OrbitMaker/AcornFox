@@ -16,7 +16,8 @@ import (
 // Local cache of the published catalog (SyncConfig.CacheDir):
 //
 //	current               one line "v<serial>": the version in use
-//	v<serial>/            version.txt, index.json, index.json.sig as published
+//	v<serial>/            version.txt, index.json, index.json.sig as published,
+//	                      show.json, show.json.sig and skills/*.md when the catalog has them
 //	.lock                 held by Sync for its whole run
 //
 // A new version is written into a fresh temporary directory, renamed to
@@ -94,11 +95,18 @@ func currentVersionDir(dir string) string {
 	return filepath.Join(dir, name)
 }
 
+// cacheFile is one file of a cache version.
+type cacheFile struct {
+	name string
+	data []byte
+}
+
 // commitCache writes a verified index as version v<serial> and switches
 // current to it. The caller holds the cache lock. If what current points at
 // is already as new (it cannot change under the lock, but check anyway),
-// nothing is switched.
-func commitCache(dir string, serial int64, idx, sig, ver []byte, keys []ed25519.PublicKey) (bool, error) {
+// nothing is switched. extra are more files of the same version (the display
+// content, show.go); they are written before the switch like the rest.
+func commitCache(dir string, serial int64, idx, sig, ver []byte, keys []ed25519.PublicKey, extra ...cacheFile) (bool, error) {
 	if c := loadCache(dir, keys); c != nil && c.Serial >= serial {
 		return false, nil
 	}
@@ -106,11 +114,8 @@ func commitCache(dir string, serial int64, idx, sig, ver []byte, keys []ed25519.
 	if err := os.Mkdir(tmp, 0o755); err != nil {
 		return false, err
 	}
-	for _, f := range []struct {
-		name string
-		data []byte
-	}{{SigFile, sig}, {IndexFile, idx}, {VersionFile, ver}} {
-		if err := writeCacheFile(filepath.Join(tmp, f.name), f.data); err != nil {
+	for _, f := range append([]cacheFile{{SigFile, sig}, {IndexFile, idx}, {VersionFile, ver}}, extra...) {
+		if err := writeCacheFile(filepath.Join(tmp, filepath.FromSlash(f.name)), f.data); err != nil {
 			_ = os.RemoveAll(tmp)
 			return false, err
 		}

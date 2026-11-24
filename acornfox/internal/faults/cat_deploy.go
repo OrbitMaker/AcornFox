@@ -74,7 +74,7 @@ var linkFaults = []Fault{
 		Ask:      "重启后仍不行时", Verify: "命令成功",
 		Related: []string{"SETUP-SVC-01"}},
 	{Code: "local_server_down", Group: "LINK", Stage: "connect", Title: "连不上本机的 acornfox 服务", Level: "P1",
-		Next:     "Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机运行 AcornFox 服务还没发布，请把 AcornFox 装到 Linux 服务器上，再用 `acornfox target add 名字 --ssh 用户@地址` 连接",
+		Next:     "Linux 服务器上执行 `systemctl status acornfox-server` 和 `acornfox doctor` 检查；Mac、Windows 本机的 AcornFox 在虚拟机里：Mac 用 `acornfox mac status`、`acornfox mac doctor` 看，Windows 用 `acornfox windows status`；管理别的服务器则先 `acornfox target add 名字 --ssh 用户@地址` 登记",
 		Symptoms: []string{"code local_server_down"},
 		Causes: []Cause{
 			{Text: "本机的 acornfox-server 没在运行", Check: "systemctl is-active acornfox-server"},
@@ -658,6 +658,20 @@ var domainFaults = []Fault{
 		Steps:    []string{"GET /v1/public-console 看 entry"},
 		Actions:  []Action{{Text: "告诉用户换一种方式进控制台再改", Tier: 0}, {Text: "在服务器上运行 acornfox public-console enable 新域名", Tier: 2}},
 		Ask:      "换公网控制台地址之前", Verify: "换了地址后新地址能打开"},
+	{Code: "PUBCON-05", Group: "DOMAIN", Title: "忘了公网控制台的密码", Level: "P3",
+		Explain:  "公网控制台的密码是开启时生成的一串字，只存一份不可逆的摘要，找不回来，只能重新生成。登录页的“忘了密码”不能直接重新生成：不登录就能重设等于谁都能抢走控制台，所以只能在服务器上做。",
+		Next:     "在服务器上（经 SSH）运行 acornfox public-console enable 公网控制台的域名 --reset-password：生成新密码，只显示这一次，旧密码和旧的登录都立刻失效",
+		Symptoms: []string{"用户说“忘了公网控制台的密码”", "登录页的“忘了密码”点开后的说明"},
+		Causes: []Cause{
+			{Text: "生成的密码没保存", Check: "问用户；命令输出只显示一次，不会再显示"},
+			{Text: "密码被输错或被浏览器自动填错", Check: "让用户在别处输入框里看着打一遍再试"},
+		},
+		Steps:   []string{"acornfox public-console status --json 看域名和开没开", "问用户要不要让现在的登录都退出"},
+		Actions: []Action{{Text: "acornfox public-console enable 域名 --reset-password（旧密码和旧登录立刻失效；用户说“忘了密码”就是同意）", Tier: 2}},
+		Ask:     "用户的原因不是“忘了密码”时先问；新密码只给用户看一次，不要写进对话记录",
+		Verify:  "用新密码能登录公网控制台，旧密码不行",
+		Related: []string{"PUBCON-01", "LAN-CONSOLE-04"},
+		Inject:  "在测试机上开启公网控制台后运行 acornfox public-console enable 域名 --reset-password，再用旧密码登录应当失败"},
 }
 
 var openFaults = []Fault{
@@ -703,6 +717,21 @@ var cliFaults = []Fault{
 			{Text: "用 sudo 改 skills 目录的属主", Tier: 2},
 		},
 		Ask: "要用 sudo 改文件时", Verify: "acornfox skill install --json 的 installed 里有工作台"},
+	{Code: "CLI-UPDATE-01", Group: "CLI", Title: "服务器上的 AcornFox 比这台电脑上的命令行新", Level: "P3",
+		Explain:  "命令行连上服务器时问一下服务器的版本；服务器的版本号比自己高，就提醒更新。每台电脑每天最多提醒一次，问版本本身一小时最多一次，记在配置目录的 update-notice.json 里。只是提醒：命令照常运行。电脑上的命令行和 Skill 不会跟着服务器升级，所以要自己更新。",
+		Next:     "在这台电脑上更新命令行：国内 curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli，海外把地址换成 https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh；再运行 acornfox skill install 更新 AI 工作台里的 Skill",
+		Auto:     "没有；提醒之后命令照常运行",
+		Symptoms: []string{"命令的标准错误里有“提醒：服务器 … 上的 AcornFox 是 … 版，这台电脑上的命令行是 … 版，比服务器旧（CLI-UPDATE-01…）”", "--json 的结果里有 notices 字段，里面一项的 code 是 CLI-UPDATE-01"},
+		Causes: []Cause{
+			{Text: "服务器升级了，电脑上的命令行还是装服务器时的版本", Check: "acornfox --json version 的 version 比服务器上 ssh 用户@服务器 acornfox --json version 的低"},
+			{Text: "同一台服务器被几台电脑管，这一台没更新", Check: "对比各台电脑的 acornfox --json version"},
+		},
+		Steps:   []string{"acornfox --json version", "ssh 用户@服务器 acornfox --json version（服务器的版本）"},
+		Actions: []Action{{Text: "在这台电脑上运行上面的更新命令（换掉电脑上的命令行程序）", Tier: 2}, {Text: "acornfox skill install（更新 Skill 文件）", Tier: 1}, {Text: "不想看到提醒：设环境变量 ACORNFOX_NO_UPDATE_NOTICE=1", Tier: 0}},
+		Ask:     "要更新电脑上的命令行之前（它换掉电脑上的程序）",
+		Verify:  "再运行命令不再出现提醒；acornfox --json version 的版本和服务器的一致",
+		Related: []string{"version_mismatch", "SETUP-SKILL-01"},
+		Inject:  "用版本号编低的命令行连测试机（构建时 -ldflags 把 internal/cli.Version 设成 0.0.1），删掉配置目录里的 update-notice.json 后运行 acornfox status"},
 }
 
 var gatewayFaults = []Fault{

@@ -1,4 +1,4 @@
-// 页面级测试（第二轮）：首页看板、运行环境、设置、应用中心的私有目录。用假的接口（替换 fetch）渲染整个控制台。
+// 页面级测试（第二轮）：首页看板、体检、设置、应用中心的私有目录。用假的接口（替换 fetch）渲染整个控制台。
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
@@ -88,13 +88,14 @@ describe('首页看板', () => {
     location.hash = '#home'
     render(<App />)
     await screen.findByRole('heading', { name: '首页' })
-    expect(screen.getAllByTestId('widget').length).toBe(DEFAULT_LAYOUT.length)
+    expect((await screen.findAllByTestId('widget')).length).toBe(DEFAULT_LAYOUT.length)
     const tabs = await screen.findByRole('tablist', { name: '时间范围' })
     expect(within(tabs).getAllByRole('tab').map((t) => t.textContent)).toEqual(['1 小时', '24 小时'])
     expect(screen.queryByText('7 天')).toBeNull()
-    await screen.findByText('blog 没在运行')
-    await screen.findByText(/磁盘 有问题/)
-    await screen.findByText('new-api 第 1 版上线')
+    // 首页只有图表看板：“需要你处理”不在首页（在铃铛里），最近发生的事是看板里的一张
+    await screen.findByText(/装好了/)
+    expect(screen.queryByText(/blog 停了/)).toBeNull()
+    expect(screen.queryByText('需要你处理')).toBeNull()
     fireEvent.click(within(tabs).getByRole('tab', { name: '24 小时' }))
     await vi.waitFor(() => expect(calls.some((c) => c.url === '/v1/metrics/host/history?range=24h')).toBe(true))
   })
@@ -105,7 +106,7 @@ describe('首页看板', () => {
     render(<App />)
     await screen.findByRole('heading', { name: '首页' })
     expect(screen.queryByRole('tablist', { name: '时间范围' })).toBeNull()
-    expect((await screen.findAllByText('这台服务器没有记录历史')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('这台机器没有记录历史')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: /编辑/ }))
     fireEvent.click(screen.getAllByRole('button', { name: /添加图表/ })[0])
     const sheet = await screen.findByRole('dialog', { name: '添加图表' })
@@ -117,7 +118,7 @@ describe('首页看板', () => {
     location.hash = '#home'
     render(<App />)
     await screen.findByRole('heading', { name: '首页' })
-    fireEvent.click(screen.getByRole('button', { name: /编辑/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /编辑/ }))
     fireEvent.click(screen.getAllByRole('button', { name: /添加图表/ })[0])
     const sheet = await screen.findByRole('dialog', { name: '添加图表' })
     fireEvent.click(within(sheet).getByRole('button', { name: '各应用 CPU' }))
@@ -141,38 +142,40 @@ describe('首页看板', () => {
   })
 })
 
-describe('运行环境', () => {
-  it('每项带故障编号，点“怎么办”看建议；不显示安装步骤', async () => {
-    location.hash = '#runtime'
+// 体检是“设置 › 这台机器”里的一行（#prefs/checkup 直接展开它），不再是单独一页。
+describe('体检', () => {
+  it('一句结论，展开每项一行，要处理的带“怎么办”；故障编号不写在页面上；不显示安装步骤', async () => {
+    location.hash = '#prefs/checkup'
     render(<App />)
-    await screen.findByRole('heading', { name: '运行环境' })
+    await vi.waitFor(() => expect(screen.getByTestId('checkup-conclusion').textContent).toBe('有 2 件事要处理'))
     const rows = await screen.findAllByTestId('runtime-check')
     expect(rows.length).toBe(4)
-    expect(screen.getByText('2 项要处理')).toBeTruthy()
-    expect(screen.getByText('SETUP-DISK-01')).toBeTruthy()
-    expect(screen.getByText('先运行 docker system df 看占用')).toBeTruthy() // 不通过的默认展开
-    expect(screen.getByText('SETUP-PORT-05')).toBeTruthy()
+    expect(screen.getByText('先运行 docker system df 看占用')).toBeTruthy() // 要处理的那一行下面写怎么办
+    expect(screen.queryByText('SETUP-DISK-01')).toBeNull()
+    expect(screen.queryByText('SETUP-PORT-05')).toBeNull()
     expect(screen.getByText('sudo acornfox doctor')).toBeTruthy()
     expect(screen.queryByText(/安装 Docker|WSL|OrbStack/)).toBeNull()
-    expect(screen.getByText(/SETUP-DISK-01 磁盘/)).toBeTruthy() // 发给 AI 的文字
   })
 
-  it('旧服务端没有自检接口时提示用 doctor', async () => {
+  it('旧服务端没有自检接口（404）：说这个版本还不能在页面上体检，命令收在“用命令行”里', async () => {
     delete routes['GET /v1/runtime/checks']
-    location.hash = '#runtime'
+    location.hash = '#prefs/checkup'
     render(<App />)
-    await screen.findByText(/在服务器上运行 sudo acornfox doctor/)
+    await vi.waitFor(() => expect(screen.getByTestId('checkup-conclusion').textContent).toBe('这个版本还不能在页面上体检'))
+    expect(screen.getByText('sudo acornfox doctor')).toBeTruthy()
   })
 
-  it('自检接口出错（带编号）和连不上后台服务分开说，都指向 doctor', async () => {
+  it('自检接口出错和连不上后台程序分开说，都指向 doctor；浏览器的英文原因不显示；编号不写在页面上', async () => {
     routes['GET /v1/runtime/checks'] = () => json(500, { error: { code: 'internal', message: '读应用列表失败' } })
-    location.hash = '#runtime'
+    location.hash = '#prefs/checkup'
     const { unmount } = render(<App />)
-    await screen.findByText('自检没做完：internal 读应用列表失败。可以在服务器上运行 sudo acornfox doctor。')
+    await vi.waitFor(() => expect(screen.getByTestId('checkup-conclusion').textContent).toBe('体检没做完：读应用列表失败'))
+    expect(screen.queryByText(/internal/)).toBeNull()
     unmount()
     routes['GET /v1/runtime/checks'] = () => { throw new TypeError('Failed to fetch') }
     render(<App />)
-    await screen.findByText('连不上后台服务，没能自检。请在服务器上运行 sudo acornfox doctor。')
+    await vi.waitFor(() => expect(screen.getByTestId('checkup-conclusion').textContent).toBe('连不上后台程序，没能体检'))
+    expect(screen.getByText('sudo acornfox doctor')).toBeTruthy()
     expect(screen.queryByText(/Failed to fetch/)).toBeNull()
   })
 })
@@ -220,16 +223,16 @@ describe('设置', () => {
     expect(screen.queryByTestId('summary-domain')).toBeNull()
     expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
     expect(screen.queryByText('acornfox lan-console disable')).toBeNull()
-    fireEvent.click(row('在外面打开控制台'))
-    expect(row('在外面打开控制台').getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(row('从外面打开控制台'))
+    expect(row('从外面打开控制台').getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByText('acornfox public-console enable 你的域名')).toBeTruthy()
     expect(screen.getByText('acornfox open')).toBeTruthy()
-    expect(screen.queryByLabelText('公网控制台的域名')).toBeNull()
-    fireEvent.click(row('局域网里打开控制台'))
-    expect(row('在外面打开控制台').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByLabelText('从外面打开控制台用的域名')).toBeNull()
+    fireEvent.click(row('在家里打开控制台'))
+    expect(row('从外面打开控制台').getAttribute('aria-expanded')).toBe('false')
     expect(screen.queryByText('acornfox open')).toBeNull()
     expect(screen.getByText('acornfox lan-console disable')).toBeTruthy()
-    fireEvent.click(row('局域网里打开控制台'))
+    fireEvent.click(row('在家里打开控制台'))
     expect(screen.queryByText('acornfox lan-console disable')).toBeNull()
     expect(calls.some((c) => c.method !== 'GET')).toBe(false)
   })
@@ -245,7 +248,7 @@ describe('设置', () => {
     location.hash = '#prefs/access'
     render(<App />)
     expect((await screen.findByTestId('summary-lan')).textContent).toBe('已开启 · 192.168.1.10:18802 · 记住了 2 台设备')
-    fireEvent.click(row('局域网里打开控制台'))
+    fireEvent.click(row('在家里打开控制台'))
     expect(await screen.findByText(/从 192\.168\.1\.23 设的/)).toBeTruthy()
     expect(screen.getByText('acornfox lan-console reset-password')).toBeTruthy()
     expect(screen.getByText('acornfox lan-console disable')).toBeTruthy()
@@ -265,13 +268,13 @@ describe('设置', () => {
     location.hash = '#prefs/access'
     const first = render(<App />)
     expect((await screen.findByTestId('summary-lan')).textContent).toBe('已开启 · 192.168.1.10:18802 · 还没设密码')
-    fireEvent.click(row('局域网里打开控制台'))
-    expect(await screen.findByText(/还没设密码：请现在就用局域网里的电脑打开它设一个/)).toBeTruthy()
+    fireEvent.click(row('在家里打开控制台'))
+    expect(await screen.findByText(/还没设密码：请现在就用家里的电脑或手机打开上面的地址，设一个/)).toBeTruthy()
     first.unmount()
     routes['GET /v1/lan-console'] = () => ({ enabled: false, port: 18802 })
     render(<App />)
-    expect((await screen.findByTestId('summary-lan')).textContent).toBe('没开启。局域网里的电脑、手机打不开控制台')
-    fireEvent.click(row('局域网里打开控制台'))
+    expect((await screen.findByTestId('summary-lan')).textContent).toBe('没开启。同一个网络里的电脑、手机打不开控制台')
+    fireEvent.click(row('在家里打开控制台'))
     await screen.findByText('acornfox lan-console enable')
     expect(screen.queryByTestId('lan-devices')).toBeNull()
     expect(screen.queryByText('acornfox lan-console reset-password')).toBeNull()
@@ -285,7 +288,7 @@ describe('设置', () => {
     expect((await screen.findByTestId('summary-domain')).textContent).toBe('apps.example.com · 正常')
     expect(screen.queryByText('域名指过来了')).toBeNull()
     expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
-    fireEvent.click(row('域名'))
+    fireEvent.click(row('这台机器的域名'))
     expect(screen.getByText('应用名.apps.example.com')).toBeTruthy()
     for (const t of ['域名指过来了', '外面能连上', '证书自动申请']) expect(screen.getByText(t)).toBeTruthy()
     expect(screen.queryByRole('button', { name: '重新检查' })).toBeNull()
@@ -295,7 +298,7 @@ describe('设置', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '不用了' }))
     // 服务端要求带上“已确认”，不带会被拒（确认框就是页面上的确认）
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/platform/domain?confirm=true')).toBe(true))
-    await vi.waitFor(() => expect(screen.getByTestId('summary-domain').textContent).toBe('还没有。配一个域名，应用就不用记数字地址了'))
+    await vi.waitFor(() => expect(screen.getByTestId('summary-domain').textContent).toBe('还没有。配一个，应用就不用记数字地址了'))
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
@@ -305,12 +308,12 @@ describe('设置', () => {
     location.hash = '#prefs/access'
     render(<App />)
     await screen.findByTestId('summary-domain')
-    fireEvent.click(row('域名'))
+    fireEvent.click(row('这台机器的域名'))
     fireEvent.click(screen.getByRole('button', { name: '换一个域名' }))
     const dialog = await screen.findByRole('dialog', { name: '换一个域名' })
     const save = within(dialog).getByRole('button', { name: '换成这个' }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
-    fireEvent.change(within(dialog).getByLabelText('平台域名'), { target: { value: ' https://Home.MyCo.cn/ ' } })
+    fireEvent.change(within(dialog).getByLabelText('这台机器的域名'), { target: { value: ' https://Home.MyCo.cn/ ' } })
     expect(within(within(dialog).getByTestId('domain-record')).getByText('*.home')).toBeTruthy()
     fireEvent.click(save)
     // 换掉已有的域名要带“已确认”；第一次设不带（见下面“还没有”那一条）
@@ -324,9 +327,9 @@ describe('设置', () => {
     routes['PUT /v1/platform/domain'] = () => DOMAIN_PROBLEM
     location.hash = '#prefs/access'
     render(<App />)
-    expect((await screen.findByTestId('summary-domain')).textContent).toBe('还没有。配一个域名，应用就不用记数字地址了')
+    expect((await screen.findByTestId('summary-domain')).textContent).toBe('还没有。配一个，应用就不用记数字地址了')
     fireEvent.click(screen.getByRole('button', { name: '配置' }))
-    expect(row('域名').getAttribute('aria-expanded')).toBe('true')
+    expect(row('这台机器的域名').getAttribute('aria-expanded')).toBe('true')
     expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
     expect(screen.getByText('第一步')).toBeTruthy()
     const rec = screen.getByTestId('domain-record')
@@ -334,7 +337,7 @@ describe('设置', () => {
     expect(within(rec).getByText('A')).toBeTruthy()
     expect(within(rec).getByText('203.0.113.10')).toBeTruthy()
     expect(screen.getByText(/以 apps\.example\.com 为例/)).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('平台域名'), { target: { value: 'my.home.example.com' } })
+    fireEvent.change(screen.getByLabelText('这台机器的域名'), { target: { value: 'my.home.example.com' } })
     expect(within(rec).getByText('*.my.home')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await vi.waitFor(() => expect(calls.find((c) => c.method === 'PUT' && c.url === '/v1/platform/domain')?.body).toEqual({ domain: 'my.home.example.com' }))
@@ -343,31 +346,31 @@ describe('设置', () => {
     expect(sum.className).toMatch(/text-danger/)
   })
 
-  it('域名·没生效：展开写现在指向哪、该改成什么、故障编号；“重新检查”调 check，过了变成正常', async () => {
+  it('域名·没生效：展开写现在指向哪、该改成什么（编号不写在页面上）；“重新检查”调 check，过了变成正常', async () => {
     routes['GET /v1/platform/domain'] = () => DOMAIN_PROBLEM
     routes['POST /v1/platform/domain/check'] = () => DOMAIN_OK
     location.hash = '#prefs/access'
     render(<App />)
     expect((await screen.findByTestId('summary-domain')).textContent).toBe('apps.example.com · 还没生效：域名没有指到这台机器')
-    fireEvent.click(row('域名'))
+    fireEvent.click(row('这台机器的域名'))
     expect(screen.getByText('现在指向 198.51.100.7，应该指向 203.0.113.10')).toBeTruthy()
     expect(screen.getByText(/把 \*\.apps 这条记录改成 203\.0\.113\.10/)).toBeTruthy()
-    expect(screen.getByText('PDOMAIN-01')).toBeTruthy()
+    expect(screen.queryByText('PDOMAIN-01')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '重新检查' }))
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/platform/domain/check')).toBe(true))
     await vi.waitFor(() => expect(screen.getByTestId('summary-domain').textContent).toBe('apps.example.com · 正常'))
   })
 
-  it('域名·这台机器用不了（局域网机器）：一句话，展开说明原因和编号，不给输入框', async () => {
+  it('域名·这台机器用不了（局域网机器）：一句话，展开说明原因（编号不写在页面上），不给输入框', async () => {
     routes['GET /v1/platform/domain'] = () => ({ state: 'unset', supported: false, unsupported: { code: 'PDOMAIN-02', text: '这台机器在局域网里，没有公网地址，用不了域名' } })
     location.hash = '#prefs/access'
     render(<App />)
-    expect((await screen.findByTestId('summary-domain')).textContent).toBe('这台机器在局域网里，没有公网地址，用不了域名')
+    expect((await screen.findByTestId('summary-domain')).textContent).toBe('这台机器不在公网上，用不上域名')
     expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
-    fireEvent.click(row('域名'))
-    expect(screen.getByText('PDOMAIN-02')).toBeTruthy()
-    expect(screen.getByText(/证书要从公网验证/)).toBeTruthy()
-    expect(screen.queryByLabelText('平台域名')).toBeNull()
+    fireEvent.click(row('这台机器的域名'))
+    expect(screen.queryByText('PDOMAIN-02')).toBeNull()
+    expect(screen.getByText(/小锁要从公网验证/)).toBeTruthy()
+    expect(screen.queryByLabelText('这台机器的域名')).toBeNull()
   })
 
   it('在外面打开控制台·开启（要再输密码）：确认框三句后果；密码不对留在框里；成功后新密码显示一次', async () => {
@@ -386,12 +389,12 @@ describe('设置', () => {
     render(<App />)
     await screen.findByTestId('summary-pub')
     fireEvent.click(screen.getByRole('button', { name: '开启' }))
-    expect(row('在外面打开控制台').getAttribute('aria-expanded')).toBe('true')
-    expect((screen.getByLabelText('公网控制台的域名') as HTMLInputElement).value).toBe('console.apps.example.com')
-    expect(screen.getByText('已经按上面的域名填好了，也可以换成自己的域名。')).toBeTruthy()
+    expect(row('从外面打开控制台').getAttribute('aria-expanded')).toBe('true')
+    expect((screen.getByLabelText('从外面打开控制台用的域名') as HTMLInputElement).value).toBe('console.apps.example.com')
+    expect(screen.getByText('已经按这台机器的域名填好了，也可以换成自己的域名。')).toBeTruthy()
     expect(screen.getByText('acornfox open')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '开启公网控制台' }))
-    const dialog = await screen.findByRole('dialog', { name: '开启公网控制台？' })
+    fireEvent.click(screen.getByRole('button', { name: '开启' }))
+    const dialog = await screen.findByRole('dialog', { name: '让外面也能打开控制台？' })
     expect(within(dialog).getByText('地址：https://console.apps.example.com')).toBeTruthy()
     expect(within(dialog).getByText('互联网上任何人都能打开登录页，只靠密码挡着。')).toBeTruthy()
     expect(within(dialog).getByText('会生成一个新密码，只显示这一次，请马上记下。')).toBeTruthy()
@@ -400,7 +403,7 @@ describe('设置', () => {
     expect(ok.disabled).toBe(true)
     fireEvent.change(within(dialog).getByLabelText('再输一次现在的控制台密码'), { target: { value: 'wrong' } })
     fireEvent.click(ok)
-    expect((await within(dialog).findByRole('alert')).textContent).toBe('控制台密码不对（PUBCON-01）')
+    expect((await within(dialog).findByRole('alert')).textContent).toBe('控制台密码不对')
     expect(screen.queryByTestId('pub-new-password')).toBeNull()
     fireEvent.change(within(dialog).getByLabelText('再输一次现在的控制台密码'), { target: { value: 'old-pass' } })
     fireEvent.click(ok)
@@ -409,7 +412,7 @@ describe('设置', () => {
     expect(screen.getByText(/只显示这一次，请马上记下来/)).toBeTruthy()
     const posts = calls.filter((c) => c.method === 'POST' && c.url === '/v1/public-console/enable')
     expect(posts.map((c) => c.body)).toEqual([{ domain: 'console.apps.example.com', password: 'wrong' }, { domain: 'console.apps.example.com', password: 'old-pass' }])
-    expect(screen.queryByRole('dialog', { name: '开启公网控制台？' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: '让外面也能打开控制台？' })).toBeNull()
     await vi.waitFor(() => expect(screen.getByTestId('summary-pub').textContent).toBe('已开启 · console.apps.example.com · 要密码登录'))
     fireEvent.click(screen.getByRole('button', { name: '我记下了' }))
     expect(screen.queryByTestId('pub-new-password')).toBeNull()
@@ -422,20 +425,20 @@ describe('设置', () => {
     location.hash = '#prefs/access'
     render(<App />)
     await screen.findByTestId('summary-pub')
-    fireEvent.click(row('在外面打开控制台'))
-    expect(screen.getByText(/在上面“域名”那一行配好域名，这里会自动填上/)).toBeTruthy()
-    const btn = screen.getByRole('button', { name: '开启公网控制台' }) as HTMLButtonElement
+    fireEvent.click(row('从外面打开控制台'))
+    expect(screen.getByText(/在上面“这台机器的域名”那一行配好域名，这里会自动填上/)).toBeTruthy()
+    const btn = screen.getByRole('button', { name: '开启' }) as HTMLButtonElement
     expect(btn.disabled).toBe(true)
-    fireEvent.change(screen.getByLabelText('公网控制台的域名'), { target: { value: 'C.Mine.com' } })
+    fireEvent.change(screen.getByLabelText('从外面打开控制台用的域名'), { target: { value: 'C.Mine.com' } })
     fireEvent.click(btn)
-    const dialog = await screen.findByRole('dialog', { name: '开启公网控制台？' })
+    const dialog = await screen.findByRole('dialog', { name: '让外面也能打开控制台？' })
     expect(within(dialog).queryByLabelText('再输一次现在的控制台密码')).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: '开启' }))
     expect((await screen.findByTestId('pub-new-password')).textContent).toContain('Once-999')
     expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ domain: 'c.mine.com' })
   })
 
-  it('在外面打开控制台·刚开启证书还在申请：弹窗写“正在申请证书”，好了改成“可以打开了”，关掉弹窗后那一行也说一声', async () => {
+  it('在外面打开控制台·刚开启小锁还在准备：弹窗写“正在准备地址前面的小锁”，好了改成“可以打开了”，关掉弹窗后那一行也说一声', async () => {
     certPoll.pending = 5
     let enabled = false
     let ready = false
@@ -448,14 +451,14 @@ describe('设置', () => {
     location.hash = '#prefs/access'
     render(<App />)
     await screen.findByTestId('summary-pub')
-    fireEvent.click(row('在外面打开控制台'))
+    fireEvent.click(row('从外面打开控制台'))
     expect(screen.queryByTestId('pub-cert')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '开启公网控制台' }))
-    fireEvent.click(within(await screen.findByRole('dialog', { name: '开启公网控制台？' })).getByRole('button', { name: '开启' }))
-    const done = await screen.findByRole('dialog', { name: '公网控制台已开启' })
+    fireEvent.click(screen.getByRole('button', { name: '开启' }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: '让外面也能打开控制台？' })).getByRole('button', { name: '开启' }))
+    const done = await screen.findByRole('dialog', { name: '外面也能打开控制台了' })
     await vi.waitFor(() => expect(within(done).getByTestId('pub-cert').getAttribute('data-phase')).toBe('pending'))
-    expect(within(done).getByTestId('pub-cert').textContent).toContain('正在申请证书，通常一两分钟')
-    expect(within(done).getByTestId('pub-cert').textContent).toContain('现在打开，浏览器会报“连接不安全”')
+    expect(within(done).getByTestId('pub-cert').textContent).toContain('正在准备地址前面的小锁，通常一两分钟')
+    expect(within(done).getByTestId('pub-cert').textContent).toContain('现在打开，浏览器会报“不安全”')
     expect(within(done).queryByRole('link', { name: '打开' })).toBeNull()
     // 一直在问
     const asked = () => calls.filter((c) => c.url === '/v1/public-console?check=https').length
@@ -463,37 +466,38 @@ describe('设置', () => {
     await vi.waitFor(() => expect(asked()).toBeGreaterThan(n + 1))
     ready = true
     await vi.waitFor(() => expect(within(done).getByTestId('pub-cert').getAttribute('data-phase')).toBe('ready'))
-    expect(within(done).getByTestId('pub-cert').textContent).toContain('证书好了，可以打开了')
+    expect(within(done).getByTestId('pub-cert').textContent).toContain('好了，地址前面有小锁，浏览器不会报不安全，可以打开了')
     expect((within(done).getByRole('link', { name: '打开' }) as HTMLAnchorElement).getAttribute('href')).toBe('https://c.mine.com')
     // 好了以后不再问
     const m = asked()
     await new Promise((r) => setTimeout(r, 40))
     expect(asked()).toBe(m)
     fireEvent.click(within(done).getByRole('button', { name: '我记下了' }))
-    expect(screen.getByTestId('pub-cert').textContent).toContain('证书好了，可以打开了')
+    expect(screen.getByTestId('pub-cert').textContent).toContain('好了，地址前面有小锁，浏览器不会报不安全，可以打开了')
     certPoll.pending = 3000
   })
 
-  it('在外面打开控制台·证书状态的另外几种：没签下来给原因；服务器确认不了时说明；一直是好的、旧服务端都不多说', async () => {
+  it('在外面打开控制台·小锁状态的另外几种：没准备好给建议；服务器确认不了时说明；一直是好的、旧服务端都不多说', async () => {
     const on = { enabled: true, domain: 'c.mine.com', url: 'https://c.mine.com', enabled_at: '2026-11-16T01:00:00Z', can_toggle: true, needs_password: false }
     routes['GET /v1/public-console'] = () => on
     routes['GET /v1/public-console?check=https'] = () => ({ ...on, https: { code: 'cert_failed', message: '等待后 c.mine.com 的 HTTPS 证书仍未签发', hint: '常见原因：80 端口没有放行。' } })
     location.hash = '#prefs/access'
     const first = render(<App />)
     await screen.findByTestId('summary-pub')
-    fireEvent.click(row('在外面打开控制台'))
+    fireEvent.click(row('从外面打开控制台'))
     await vi.waitFor(() => expect(screen.getByTestId('pub-cert').getAttribute('data-phase')).toBe('failed'))
-    expect(screen.getByTestId('pub-cert').textContent).toContain('证书还没签下来，地址现在打不开。服务器还在自己重试，好了这里会提示。')
+    expect(screen.getByTestId('pub-cert').textContent).toContain('地址前面的小锁还没准备好，现在打不开。这台机器还在自己重试，好了这里会提示。')
     expect(screen.getByTestId('pub-cert').textContent).toContain('常见原因：80 端口没有放行。')
     first.unmount()
 
     routes['GET /v1/public-console?check=https'] = () => ({ ...on, https: { code: 'port_unreachable', message: '连接 c.mine.com 的 443 端口超时' } })
     const second = render(<App />)
     await screen.findByTestId('summary-pub')
-    fireEvent.click(row('在外面打开控制台'))
+    fireEvent.click(row('从外面打开控制台'))
     await vi.waitFor(() => expect(screen.getByTestId('pub-cert').getAttribute('data-phase')).toBe('unknown'))
-    expect(screen.getByTestId('pub-cert').textContent).toContain('这台服务器自己确认不了证书好了没有（连接 c.mine.com 的 443 端口超时）')
+    expect(screen.getByTestId('pub-cert').textContent).toContain('这台机器自己确认不了小锁好了没有')
     expect(screen.getByTestId('pub-cert').textContent).toContain('直接打开地址试试')
+    expect(screen.getByTestId('pub-cert').textContent).not.toContain('443')
     second.unmount()
 
     for (const https of [{ code: 'ok' }, undefined]) {
@@ -501,7 +505,7 @@ describe('设置', () => {
       const before = calls.length
       const r = render(<App />)
       await screen.findByTestId('summary-pub')
-      fireEvent.click(row('在外面打开控制台'))
+      fireEvent.click(row('从外面打开控制台'))
       await vi.waitFor(() => expect(calls.slice(before).some((c) => c.url === '/v1/public-console?check=https')).toBe(true))
       await screen.findByTestId('pub-url')
       await new Promise((res) => setTimeout(res, 20))
@@ -520,12 +524,12 @@ describe('设置', () => {
     render(<App />)
     expect((await screen.findByTestId('summary-pub')).textContent).toBe('已开启 · console.apps.example.com · 要密码登录')
     expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
-    fireEvent.click(row('在外面打开控制台'))
+    fireEvent.click(row('从外面打开控制台'))
     expect(screen.getByTestId('pub-url').textContent).toBe('https://console.apps.example.com')
     expect(screen.getByRole('button', { name: '复制地址' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '关闭公网控制台' }))
-    const dialog = await screen.findByRole('dialog', { name: '关闭公网控制台？' })
-    const off = within(dialog).getByRole('button', { name: '关闭公网控制台' }) as HTMLButtonElement
+    fireEvent.click(screen.getByRole('button', { name: '不让从外面打开' }))
+    const dialog = await screen.findByRole('dialog', { name: '不让从外面打开控制台？' })
+    const off = within(dialog).getByRole('button', { name: '关掉' }) as HTMLButtonElement
     expect(off.disabled).toBe(true)
     expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
     fireEvent.change(within(dialog).getByLabelText('再输一次现在的控制台密码'), { target: { value: 'pw-now' } })
@@ -540,12 +544,12 @@ describe('设置', () => {
     location.hash = '#prefs/access'
     render(<App />)
     await screen.findByTestId('summary-pub')
-    fireEvent.click(row('在外面打开控制台'))
+    fireEvent.click(row('从外面打开控制台'))
     expect(screen.getByTestId('pub-url').textContent).toBe('https://c.mine.com')
-    fireEvent.click(screen.getByRole('button', { name: '关闭公网控制台' }))
-    const dialog = await screen.findByRole('dialog', { name: '关闭公网控制台？' })
+    fireEvent.click(screen.getByRole('button', { name: '不让从外面打开' }))
+    const dialog = await screen.findByRole('dialog', { name: '不让从外面打开控制台？' })
     expect(within(dialog).queryByLabelText('再输一次现在的控制台密码')).toBeNull()
-    fireEvent.click(within(dialog).getByRole('button', { name: '关闭公网控制台' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '关掉' }))
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/public-console')).toBe(true))
     expect(calls.find((c) => c.method === 'DELETE')?.body).toBeUndefined()
   })
@@ -554,31 +558,44 @@ describe('设置', () => {
     routes['GET /v1/public-console'] = () => ({ enabled: false, can_toggle: false, unsupported: { code: 'PDOMAIN-02', text: '这台机器在局域网里，开不了公网控制台' } })
     location.hash = '#prefs/access'
     const r = render(<App />)
-    expect((await screen.findByTestId('summary-pub')).textContent).toBe('这台机器在局域网里，开不了公网控制台')
+    expect((await screen.findByTestId('summary-pub')).textContent).toBe('这台机器不在公网上，开不了')
     expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
-    fireEvent.click(row('在外面打开控制台'))
-    expect(screen.getByText('PDOMAIN-02')).toBeTruthy()
+    fireEvent.click(row('从外面打开控制台'))
+    expect(screen.queryByText('PDOMAIN-02')).toBeNull()
     expect(screen.getByText('acornfox open')).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '开启公网控制台' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
     r.unmount()
 
     routes['GET /v1/public-console'] = () => ({ enabled: false, can_toggle: false, needs_password: false })
     render(<App />)
     await screen.findByTestId('summary-pub')
     expect(screen.queryByRole('button', { name: '开启' })).toBeNull()
-    fireEvent.click(row('在外面打开控制台'))
-    expect(screen.getByText(/这次登录不能在页面上开关公网控制台/)).toBeTruthy()
+    fireEvent.click(row('从外面打开控制台'))
+    expect(screen.getByText(/这次登录不能在页面上开关/)).toBeTruthy()
     expect(screen.getByText('acornfox public-console enable 你的域名')).toBeTruthy()
   })
 
-  it('没有后端支撑的分区（提醒、账号）不显示；升级给当前版本和命令', async () => {
+  it('没有后端支撑的分区（提醒、账号）不显示；升级一行写当前版本，服务端没说线上最新是哪个时不猜，命令只给这台机器该用的那一条', async () => {
     location.hash = '#prefs/update'
     render(<App />)
-    await screen.findByText('0.5.0-dev.2')
+    expect((await screen.findByTestId('upgrade-state')).textContent).toBe('现在是 0.5.0-dev.2')
     const nav = screen.getByRole('navigation', { name: '设置分区' })
     expect(within(nav).queryByText('提醒')).toBeNull()
     expect(within(nav).queryByText('账号')).toBeNull()
-    expect(screen.getAllByText(/get\.sh \| sudo bash -s -- upgrade/, { selector: 'code' }).length).toBe(2)
+    // 体检说这台机器在国内（sources.china），就只给国内那一条
+    await vi.waitFor(() => expect(screen.getAllByText(/get\.sh \| sudo bash -s -- upgrade/, { selector: 'code' }).length).toBe(1))
+    expect(screen.getByText(/gitee\.com.*get\.sh/, { selector: 'code' })).toBeTruthy()
+  })
+
+  it('服务端说线上有更新的版本：升级那一行写“有新版本”；一样就写“已是最新”', async () => {
+    routes['GET /v1/status'] = () => ({ runner: 'ok', docker_version: '27.3.1', version: '0.6.3', latest_version: '0.6.4' })
+    location.hash = '#prefs/machine'
+    const first = render(<App />)
+    expect((await screen.findByTestId('upgrade-state')).textContent).toBe('有新版本 0.6.4，现在是 0.6.3')
+    first.unmount()
+    routes['GET /v1/status'] = () => ({ runner: 'ok', docker_version: '27.3.1', version: '0.6.3', latest_version: '0.6.3' })
+    render(<App />)
+    expect((await screen.findByTestId('upgrade-state')).textContent).toBe('现在是 0.6.3，已是最新')
   })
 
   it('下载源：换源顺序、目录来源（含已断开的）；这一版不显示“连接私有目录”', async () => {
@@ -607,7 +624,7 @@ describe('连接私有目录', () => {
     const onClose = vi.fn()
     render(
       <ToastProvider>
-        <ConsoleProvider session={{ csrf: 'tok', expires_at: '', server: 'home-server' }} install={() => {}}>
+        <ConsoleProvider session={{ csrf: 'tok', expires_at: '', server: 'home-server' }} install={() => {}} logout={async () => {}}>
           <ConnectCatalogDialog open onClose={onClose} />
         </ConsoleProvider>
       </ToastProvider>,
@@ -679,18 +696,27 @@ describe('应用中心的私有目录', () => {
     expect(screen.queryByRole('tablist', { name: '来源' })).toBeNull()
     expect(screen.queryByRole('button', { name: /连接私有目录/ })).toBeNull()
     const card = screen.getAllByTestId('catalog-app').find((c) => c.textContent?.includes('定制版'))!
+    routes['POST /v1/catalog/plan'] = () => ({ can_install: true, say: '', apps: [], problems: [] })
+    routes['POST /v1/catalog/install'] = () => json(202, task({ id: 't-priv', target: 'new-api', catalog: 'cat-demo' }))
     fireEvent.click(within(card).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    await within(dialog).findByText('acornfox install new-api --catalog cat-demo')
-    expect(calls.some((c) => c.url === '/v1/catalog/apps/new-api?catalog=cat-demo')).toBe(true)
+    const go = await within(dialog).findByRole('button', { name: '安装' })
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/v1/catalog/apps/new-api?catalog=cat-demo')).toBe(true))
+    await vi.waitFor(() => expect((go as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(go)
+    // 装的时候带上是哪个目录的，不会装成公共目录里同名的那个
+    await vi.waitFor(() => expect(calls.find((c) => c.method === 'POST' && c.url === '/v1/catalog/install')?.body).toMatchObject({ app: 'new-api', catalog: 'cat-demo' }))
   })
 
   it('列表里有图标就显示真图标', async () => {
     routes['GET /v1/catalog'] = () => ({ ...catalog, apps: catalog.apps.map((a) => ({ ...a, icon: '<svg xmlns="http://www.w3.org/2000/svg"/>', icon_type: 'svg' })) })
     location.hash = '#store'
     const { container } = render(<App />)
-    await screen.findAllByTestId('catalog-app')
-    expect(container.querySelectorAll('[data-testid="catalog-app"] img').length).toBe(2)
+    const cards = await screen.findAllByTestId('catalog-app')
+    // 每张卡片上都是目录给的图标（封面上一个、名字前面一个），不是名称缩写
+    expect(cards.length).toBe(2)
+    expect(cards.every((c) => c.querySelectorAll('img').length >= 1)).toBe(true)
+    expect(container.querySelectorAll('[data-testid="catalog-app"] img').length).toBeGreaterThanOrEqual(2)
   })
 })
 

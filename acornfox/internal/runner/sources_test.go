@@ -373,7 +373,7 @@ func TestPullErrorReport(t *testing.T) {
 		t.Fatalf("tried %v", *tried)
 	}
 	f := classifyPull(context.Background(), err)
-	if f.Code != "pull_timeout" || len(f.Sources) != 4 || !strings.Contains(f.Hint, "--registry-mirror") {
+	if f.Code != "pull_timeout" || len(f.Sources) != 3 || !strings.Contains(f.Hint, "--registry-mirror") {
 		t.Fatalf("failure %+v", f)
 	}
 	for _, want := range []string{"试了 2 个源", "docker.m.daocloud.io 太慢（最近 2 分钟平均 40 KB/s，已下 12 MB/319 MB，镜像层被转到 production.cloudfront.docker.com）",
@@ -387,6 +387,61 @@ func TestPullErrorReport(t *testing.T) {
 	}
 	if !IsPullStalled(err) {
 		t.Error("IsPullStalled must see the stalled source")
+	}
+}
+
+// In mainland China an install never asks Docker Hub: not in the probe, not
+// in the pulls (it is blocked there, and every ask is a connection to a
+// blocked address). When every mirror fails the failure says plainly that it
+// was not asked, and what to do if this machine does reach it.
+func TestPullChinaNeverAsksUpstream(t *testing.T) {
+	d := &Docker{}
+	d.SetRegistry(Registry{China: true, Mirrors: []string{"docker.m.daocloud.io", "docker.1panel.live"}})
+	var probed, pulled []string
+	d.probeHook = func(ctx context.Context, srcs []ImageSource, ref, arch string) map[string]ProbeResult {
+		out := map[string]ProbeResult{}
+		for _, s := range srcs {
+			probed = append(probed, s.Host)
+			out[s.Host] = ProbeResult{Host: s.Host, Status: ProbeUnreachable, Detail: "连不上"}
+		}
+		return out
+	}
+	d.pullHook = func(ctx context.Context, ref string, pw pullWatch) (pullStats, error) {
+		pulled = append(pulled, strings.SplitN(ref, "/", 2)[0])
+		return pullStats{}, errors.New("dial tcp: i/o timeout")
+	}
+	_, _, err := d.pullFallback(context.Background(), pinned, nil)
+	var pe *PullError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err %T %v", err, err)
+	}
+	for _, h := range append(probed, pulled...) {
+		if h == DockerHubRegistry || h == "example" {
+			t.Fatalf("Docker Hub was asked: probed %v pulled %v", probed, pulled)
+		}
+	}
+	f := classifyPull(context.Background(), err)
+	if f.Code != "pull_timeout" || !strings.Contains(f.Message, "国内网络没有去试 "+DockerHubRegistry) ||
+		!strings.Contains(f.Hint, "ACORNFOX_REGISTRY_MIRRORS") || len(f.Sources) != 2 {
+		t.Fatalf("failure %+v", f)
+	}
+
+	// ghcr.io the same.
+	d.registry = Registry{China: true}
+	_, _, err = d.pullFallback(context.Background(), "ghcr.io/org/app@"+testDigest, nil)
+	if !errors.As(err, &pe) || pe.UpstreamSkipped != GHCRRegistry {
+		t.Fatalf("ghcr: %v", err)
+	}
+	if f := classifyPull(context.Background(), err); !strings.Contains(f.Hint, "ACORNFOX_GHCR_MIRRORS") {
+		t.Fatalf("ghcr hint %q", f.Hint)
+	}
+
+	// Outside China Docker Hub is asked (first) and the failure has no such note.
+	d, _ = fakePulls(false, nil, map[string]error{DockerHubRegistry: errPullStalled, "docker.m.daocloud.io": errPullStalled,
+		"docker.1panel.live": errPullStalled, "dockerproxy.net": errPullStalled})
+	_, _, err = d.pullFallback(context.Background(), pinned, nil)
+	if !errors.As(err, &pe) || pe.UpstreamSkipped != "" || strings.Contains(err.Error(), "国内网络没有去试") {
+		t.Fatalf("abroad: %v", err)
 	}
 }
 
@@ -547,8 +602,8 @@ func TestDaemonAndUserMirrors(t *testing.T) {
 	if got[0] != "abc.mirror.aliyuncs.com" || !slices.Equal(got[1:], DefaultRegistryMirrors) {
 		t.Fatalf("user mirror first, then the table: %v", got)
 	}
-	if src := (Registry{China: true, Mirrors: got}).Sources(); src[0].Layer != LayerUser || src[1].Layer != LayerPublic || src[len(src)-1].Layer != LayerUpstream {
-		t.Fatalf("layers %+v", src)
+	if src := (Registry{China: true, Mirrors: got}).Sources(); src[0].Layer != LayerUser || src[1].Layer != LayerPublic || src[len(src)-1].Layer == LayerUpstream {
+		t.Fatalf("layers (Docker Hub itself is not in the China list) %+v", src)
 	}
 	if DaemonMirrorHosts(filepath.Join(t.TempDir(), "none")) != nil {
 		t.Fatal("missing file")
@@ -571,8 +626,8 @@ func TestSourceTable(t *testing.T) {
 		t.Fatalf("tencent %v", got)
 	}
 	g := Registry{China: true}.GHCRSources()
-	if g[0].Host != "ghcr.nju.edu.cn" || g[1].Host != GHCRRegistry {
-		t.Fatalf("ghcr china %+v", g)
+	if len(g) != 1 || g[0].Host != "ghcr.nju.edu.cn" {
+		t.Fatalf("ghcr china (ghcr.io itself is blocked there) %+v", g)
 	}
 	if g := (Registry{}).GHCRSources(); g[0].Host != GHCRRegistry {
 		t.Fatalf("ghcr global %+v", g)

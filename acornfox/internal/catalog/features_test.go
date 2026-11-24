@@ -168,9 +168,21 @@ func TestTableStartsAtBasePlatform(t *testing.T) {
 	if BasePlatform != "0.6.0" || featureSince["manifest:/schema="+strconv.Itoa(ManifestSchema)] != BasePlatform {
 		t.Fatalf("BasePlatform = %s，schema=%d 那一行 %q", BasePlatform, ManifestSchema, featureSince["manifest:/schema="+strconv.Itoa(ManifestSchema)])
 	}
+	// What came after the first release of the format: the rows that say
+	// so are listed here, one by one; any other row is BasePlatform.
+	later := map[string]string{
+		"manifest:/init/*/when=on_reapply": v070,
+		"manifest:/init/*/when=on_change":  v070,
+		"manifest:/init/*/watch":           v070,
+		"manifest:/init/*/watch/*":         v070,
+	}
 	for _, f := range Features() {
-		if f.Since != BasePlatform {
-			t.Errorf("%s 从 %s 起有：第 3 版的表里只能是 %s", f.Key, f.Since, BasePlatform)
+		want := BasePlatform
+		if v, ok := later[f.Key]; ok {
+			want = v
+		}
+		if f.Since != want {
+			t.Errorf("%s 从 %s 起有：表里应该是 %s", f.Key, f.Since, want)
 		}
 	}
 	for _, key := range []string{"manifest:/init/*/exec", "manifest:/provides/*/issue/*/exec/stdin", "manifest:/provides/*/check/*/exec/save/*/stdout=true",
@@ -742,7 +754,7 @@ func TestDeclaredMinPlatform(t *testing.T) {
 // a platform that was released with the old one.
 func TestFormatDefinitionsArePinned(t *testing.T) {
 	pinned := map[string]string{
-		manifestSchemaF:    "609119b4a6d55ee2678e993e2e3e89d41c2830e68f744b6b36878d8826558fcd",
+		manifestSchemaF:    "8c4e43abaf47ac3746d7f88408145173f6d5d19acbb84c3836adda6c7a38bb44",
 		recipeSchemaF:      "d170d37874fc0eccd46aef6f73f6fbb7f074e7f1f1f6ddc4abd09dc2cf3ac853",
 		serviceTypeSchemaF: "2bfba85806d3412569be5ed9600330105d75023d830064483f3f8611d0f0ff41",
 	}

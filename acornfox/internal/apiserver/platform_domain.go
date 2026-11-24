@@ -54,6 +54,27 @@ type platformDomainAnswer struct {
 	platformdomain.View
 	Apps []platformDomainApp  `json:"apps"`
 	Plan *platformdomain.Plan `json:"plan,omitempty"`
+	// Behind: the apps from the app center whose settings are behind now
+	// (their address changed with the platform domain): `acornfox apps
+	// affected` lists them with what differs, `acornfox apps reapply 应用`
+	// applies it, which restarts the app, so the user is asked.
+	Behind []string `json:"apps_behind,omitempty"`
+}
+
+// appsBehind names the app-center apps whose settings are behind.
+func (s *server) appsBehind(ctx context.Context) []string {
+	if s.appCenter == nil {
+		return nil
+	}
+	v, err := s.appCenter.Affected(ctx, "")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, a := range v.Apps {
+		out = append(out, a.App)
+	}
+	return out
 }
 
 // appPlatformDomain is the app view's "platform_domain" (detail only; left
@@ -202,6 +223,12 @@ func (s *server) answerPlatformDomain(ctx context.Context, w http.ResponseWriter
 	writeJSON(w, http.StatusOK, platformDomainAnswer{View: v, Apps: s.platformDomainApps(ctx, plan), Plan: plan})
 }
 
+// answerPlatformDomainBehind is answerPlatformDomain for a change that was
+// just made, with the apps whose settings it left behind.
+func (s *server) answerPlatformDomainBehind(ctx context.Context, w http.ResponseWriter, v platformdomain.View) {
+	writeJSON(w, http.StatusOK, platformDomainAnswer{View: v, Apps: s.platformDomainApps(ctx, nil), Behind: s.appsBehind(ctx)})
+}
+
 func (s *server) getPlatformDomain(w http.ResponseWriter, r *http.Request) {
 	if s.platformDomainOff(w) {
 		return
@@ -270,7 +297,7 @@ func (s *server) putPlatformDomain(w http.ResponseWriter, r *http.Request) {
 		writePlatformDomainError(w, s, err)
 		return
 	}
-	s.answerPlatformDomain(ctx, w, v, nil)
+	s.answerPlatformDomainBehind(ctx, w, v)
 }
 
 func (s *server) deletePlatformDomain(w http.ResponseWriter, r *http.Request) {
@@ -293,5 +320,5 @@ func (s *server) deletePlatformDomain(w http.ResponseWriter, r *http.Request) {
 		writePlatformDomainError(w, s, err)
 		return
 	}
-	s.answerPlatformDomain(ctx, w, v, nil)
+	s.answerPlatformDomainBehind(ctx, w, v)
 }

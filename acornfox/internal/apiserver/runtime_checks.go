@@ -208,11 +208,14 @@ func (s *server) getRuntimeChecks(w http.ResponseWriter, r *http.Request) {
 		}
 		if cs, ok := s.runtimeCatalogSync(); ok {
 			hostcheck.CheckCatalogSync(rep, cs, time.Now())
+			hostcheck.CheckCatalogShow(rep, cs)
+			hostcheck.CheckCatalogSkills(rep, cs)
 		}
 	}
 
 	if s.appCenter != nil {
 		s.runtimeAppServices(ctx, rep, apps, appsErr)
+		s.runtimeAppsBehind(ctx, rep)
 	}
 
 	v.OK, v.Items = rep.OK, rep.Items
@@ -235,6 +238,10 @@ func (s *server) runtimeCatalogSync() (hostcheck.CatalogSync, bool) {
 	if idx, origin, err := cat.Index(); err == nil {
 		cs.Serial, cs.Origin = idx.Serial, origin
 	}
+	_, sh := cat.Show()
+	cs.Show = hostcheck.ShowInUse{State: sh.State, Code: sh.Code, Message: sh.Message, Serial: sh.Serial}
+	_, sk := cat.Skills()
+	cs.Skills = hostcheck.SkillsInUse{State: sk.State, Count: sk.Count, Code: sk.Code, Message: sk.Message}
 	return cs, true
 }
 
@@ -270,4 +277,28 @@ func (s *server) runtimeAppServices(ctx context.Context, rep *checkReport, apps 
 		svcs = append(svcs, in)
 	}
 	hostcheck.CheckAppServices(rep, svcs, list.Unreadable, installed)
+}
+
+// runtimeAppsBehind warns about each app from the app center whose settings
+// are behind what the platform gives it now (APP-VARS-01): `acornfox apps
+// affected` says what differs, `acornfox apps reapply` applies it.
+func (s *server) runtimeAppsBehind(ctx context.Context, rep *checkReport) {
+	v, err := s.appCenter.Affected(ctx, "")
+	if err != nil {
+		return
+	}
+	for _, a := range v.Apps {
+		if a.Blocked != "" || !a.Differs {
+			continue
+		}
+		var names []string
+		for _, x := range a.Vars {
+			names = append(names, x.Name)
+		}
+		restart := ""
+		if a.Restart {
+			restart = "，会重启它"
+		}
+		rep.Warn("APP-VARS-01", "应用 %s 的设置落在后面了（%s 和现在的不一样）：acornfox apps reapply %s --plan 看会改什么%s，用户同意后加 --yes", a.App, strings.Join(names, "、"), a.App, restart)
+	}
 }

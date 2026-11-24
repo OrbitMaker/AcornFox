@@ -104,6 +104,12 @@ type appView struct {
 	Addons            []addonView    `json:"addons,omitempty"`
 	CatalogID         string         `json:"catalog_id,omitempty"`      // installed from the app catalog
 	CatalogVersion    string         `json:"catalog_version,omitempty"` // catalog release.version
+	// CatalogUpdate is the newer version of the app the catalog has and this
+	// machine can install ("" none); Upgrade is the rest of what an upgrade
+	// and a going back to before it need to show (nil for an app that is
+	// not from the app center). See upgrade.go.
+	CatalogUpdate string                  `json:"catalog_update,omitempty"`
+	Upgrade       *appinstall.UpgradeInfo `json:"upgrade,omitempty"`
 	// Catalog the app was installed from: "public" or the private catalog
 	// id, its name, and whether that private catalog was disconnected (the
 	// app keeps running but cannot be installed again or upgraded from it).

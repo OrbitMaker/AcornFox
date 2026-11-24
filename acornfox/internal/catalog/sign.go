@@ -165,10 +165,18 @@ type VerifyResult struct {
 	Apps     int   `json:"apps"`
 	Recipes  int   `json:"recipes"`
 	Packages int   `json:"packages"`
+	// Show is "ok" when the directory has a show.json whose signature,
+	// format and serial all check out, "none" when it has none (a failing
+	// one is an error instead).
+	Show string `json:"show"`
+	// Skills is how many operating manuals the show lists, every one checked:
+	// the file is there with the listed size and sha256 (0 without a show).
+	Skills int `json:"skills"`
 }
 
 // VerifyDir checks a published directory without changing it: signature,
-// version.txt against the signed serial, and every package's sha256 and size.
+// version.txt against the signed serial, every package's sha256 and size, and
+// the display content (show.json, when the directory has one).
 func VerifyDir(dir string, trusted []ed25519.PublicKey) (VerifyResult, error) {
 	read := func(name string) ([]byte, error) {
 		b, err := os.ReadFile(filepath.Join(dir, name))
@@ -212,7 +220,18 @@ func VerifyDir(dir string, trusted []ed25519.PublicKey) (VerifyResult, error) {
 			return VerifyResult{}, newErr(CodeVerifyPackage, nil, a.Package.Path+" 的 sha256 或大小和 index.json 不一致")
 		}
 	}
-	return VerifyResult{Serial: idx.Serial, Apps: len(idx.Apps), Recipes: len(idx.AllRecipes()), Packages: len(idx.Apps)}, nil
+	res := VerifyResult{Serial: idx.Serial, Apps: len(idx.Apps), Recipes: len(idx.AllRecipes()), Packages: len(idx.Apps), Show: ShowNone}
+	if show, has, err := VerifyShowDir(dir, idx.Serial, trusted); err != nil {
+		return VerifyResult{}, err
+	} else if has {
+		res.Show = ShowOK
+		n, err := verifySkillsDir(dir, show)
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		res.Skills = n
+	}
+	return res, nil
 }
 
 func parseSerial(b []byte) (int64, error) {

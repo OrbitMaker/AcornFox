@@ -83,6 +83,36 @@ check "lan_server：云主机不算" "aliyun|192.168.1.20=不是" "$out"
 check "lan_server：公网地址不算" "|203.0.113.10=不是" "$out"
 check "enable_lan_console 用 lan_server" "lan_server || return 0" "$(sed -n '/^enable_lan_console()/,/^}/p' "$INSTALL")"
 
+# ---------- WSL（Windows 里的 Linux，install.sh --wsl） ----------
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --wsl --public-host 192.168.1.9; echo "wsl=$WSL_MODE host=$PUBLIC_HOST"' _ "$INSTALL" 2>&1)
+check "--wsl：记下，--public-host 照常" "wsl=true host=192.168.1.9" "$out"
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args; echo "wsl=$WSL_MODE"' _ "$INSTALL" 2>&1)
+check "不加 --wsl：不是 WSL" "wsl=false" "$out"
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --wsl; for x in "|127.0.0.1" "aliyun|192.168.1.20" "|"; do CLOUD=${x%%|*} PUBLIC_HOST=${x#*|}; if lan_server; then echo "${x}=是"; else echo "${x}=不是"; fi; done' _ "$INSTALL" 2>&1)
+check "WSL：地址是 127.0.0.1 也算局域网机器（默认打开局域网控制台）" "|127.0.0.1=是" "$out"
+check "WSL：识别出云厂商的不算" "aliyun|192.168.1.20=不是" "$out"
+check "WSL：没传地址也算局域网机器" "|=是" "$out"
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --wsl; PUBLIC_HOST=""; log_info() { :; }; detect_public_host; echo "host=$PUBLIC_HOST"' _ "$INSTALL" 2>&1)
+check "WSL 没传 --public-host：用 127.0.0.1，不去读 WSL 内部地址" "host=127.0.0.1" "$out"
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --wsl --public-host 192.168.1.9; log_info() { :; }; detect_public_host; echo "host=$PUBLIC_HOST"' _ "$INSTALL" 2>&1)
+check "WSL 传了 --public-host：用它" "host=192.168.1.9" "$out"
+check "choose_default_exposure：WSL 全新安装是 lan" "DEFAULT_EXPOSURE=lan APPS_EXPOSURE=lan" "$(AFX_INSTALL_LIB=1 AFX_SERVER_UNIT="$T/no-such.service" bash -c 'source "$1"; parse_args --wsl; FRESH_INSTALL=true CLOUD="" PUBLIC_HOST=127.0.0.1 DEFAULT_EXPOSURE_ARG=""; choose_default_exposure >/dev/null 2>&1; echo "DEFAULT_EXPOSURE=${DEFAULT_EXPOSURE} APPS_EXPOSURE=${APPS_EXPOSURE}"' _ "$INSTALL" 2>&1)"
+check "帮助里有 --wsl" "--wsl                  这台机器是 Windows 里的 WSL 发行版" "$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; show_help' _ "$INSTALL" 2>&1)"
+check "WSL 摘要不讲云服务器安全组和 SSH" "Windows 上用" "$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --wsl; show_summary' _ "$INSTALL" 2>&1)"
+
+# ---------- Mac 里的虚拟机（install.sh --mac-vm）：网络上同 WSL，摘要写 Mac 上怎么用 ----------
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --mac-vm --public-host 192.168.1.9; echo "wsl=$WSL_MODE mac=$MAC_VM_MODE host=$PUBLIC_HOST"' _ "$INSTALL" 2>&1)
+check "--mac-vm：按 WSL 的网络规矩处理，另记是 Mac 虚拟机" "wsl=true mac=true host=192.168.1.9" "$out"
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --wsl; echo "wsl=$WSL_MODE mac=$MAC_VM_MODE"' _ "$INSTALL" 2>&1)
+check "--wsl 不是 Mac 虚拟机" "wsl=true mac=false" "$out"
+out=$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --mac-vm; for x in "|127.0.0.1" "aliyun|192.168.1.20"; do CLOUD=${x%%|*} PUBLIC_HOST=${x#*|}; if lan_server; then echo "${x}=是"; else echo "${x}=不是"; fi; done' _ "$INSTALL" 2>&1)
+check "Mac 虚拟机：算局域网机器（默认打开局域网控制台）" "|127.0.0.1=是" "$out"
+check "choose_default_exposure：Mac 虚拟机全新安装是 lan" "DEFAULT_EXPOSURE=lan APPS_EXPOSURE=lan" "$(AFX_INSTALL_LIB=1 AFX_SERVER_UNIT="$T/no-such.service" bash -c 'source "$1"; parse_args --mac-vm; FRESH_INSTALL=true CLOUD="" PUBLIC_HOST=192.168.1.9 DEFAULT_EXPOSURE_ARG=""; choose_default_exposure >/dev/null 2>&1; echo "DEFAULT_EXPOSURE=${DEFAULT_EXPOSURE} APPS_EXPOSURE=${APPS_EXPOSURE}"' _ "$INSTALL" 2>&1)"
+check "帮助里有 --mac-vm" "--mac-vm               这台机器是 Mac 上苹果 container 开的 Debian 虚拟机" "$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; show_help' _ "$INSTALL" 2>&1)"
+check "Mac 虚拟机的摘要讲 Mac 上怎么用" "在 Mac 上用" "$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --mac-vm; show_summary' _ "$INSTALL" 2>&1)"
+check "Mac 虚拟机的摘要不讲 Windows" "http://127.0.0.1:18802/" "$(AFX_INSTALL_LIB=1 bash -c 'source "$1"; parse_args --mac-vm; show_summary' _ "$INSTALL" 2>&1)"
+check "服务文件：--mac-vm 也写 --wsl（只本机的应用监听虚拟机所有网卡）" '${WSL_FLAG:+ --wsl}' "$line"
+
 # ---------- 升级上来的机器不变 ----------
 out=$(grep -c -- '--default-exposure' "$UPGRADE" || true)
 check "upgrade.sh 不写 --default-exposure" "0" "$out"

@@ -15,10 +15,11 @@ AcornFox 是一个开源的单机应用部署工具：在你自己的 Linux 服�
 | --- | --- | --- |
 | Linux 服务器 x86_64 | 服务端 + 命令行 | 正式支持。Ubuntu 22.04、24.04，Debian 12、13 |
 | Linux 服务器 arm64 | 服务端 + 命令行 | 安装脚本允许安装，还没有实测 |
-| Mac（Apple 芯片、Intel） | 只有命令行 | 当客户端，经 SSH 管理 Linux 服务器 |
-| Windows | 不提供 | 用 SSH 登录服务器，在服务器上运行 `acornfox`（AI 工作台也这样做） |
+| Mac（Apple 芯片，macOS 26 起） | 装在这台 Mac 的虚拟机里 + `acornfox` 命令 | 同一个 Linux 程序装进苹果 `container` 开的一台 Debian 虚拟机，Mac 上只有苹果的 container、一个常驻小程序和 `acornfox` 命令，见下面“Mac 电脑本机安装”。需要管理员密码的只有装苹果 container 那一步，由你自己输 |
+| Mac（Intel，或系统低于 macOS 26） | 只有命令行 | 当客户端，经 SSH 管理 Linux 服务器 |
+| Windows 10 22H2 / Windows 11（64 位 Intel、AMD） | 装在这台电脑的 WSL 里 + `acornfox` 命令 | 同一个 Linux 程序装进 WSL 2 里一个叫 AcornFox 的 Debian，Windows 上不放我们的 exe，见下面“Windows 电脑本机安装”。ARM 版 Windows 暂时不支持 |
 
-AcornFox 服务装在 Mac、Windows 电脑本机运行，这一版不提供。详见 [使用手册](docs/user-guide.md)。
+详见 [使用手册](docs/user-guide.md)。
 
 ## 能做什么
 
@@ -75,6 +76,48 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.s
 - 服务器在阿里云、腾讯云、火山引擎上时（不论哪个地域），安装脚本先用这家云的内网软件源（系统软件源和 Docker 安装包），不走公网、不耗流量，连不上再换下一个；在华为云和其他国内服务器上用华为等国内公共镜像站。
 - 装完后按脚本最后的提示，在云厂商控制台的安全组放行入方向 TCP 18810-18899（应用端口）；要绑域名再放行 80 和 443。
 
+#### 1b. 在这台 Windows 电脑上安装（Windows 10 22H2、Windows 11）
+
+Windows 上只用微软自带的 `wsl.exe`、PowerShell、计划任务和 `netsh`：AcornFox 装在 WSL 2 里一个叫 AcornFox 的 Debian 13（和 Linux 服务器上同一个程序），Windows 上多一个转发用的小命令 `acornfox`。在**普通** PowerShell 里（不要“以管理员身份运行”）运行下面一整行：
+
+```powershell
+# 中国大陆（Gitee）
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://gitee.com/VIP13390/AcornFox/raw/main/get.ps1')).TrimStart([char]0xFEFF)))"
+# 其他地区（GitHub）
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.ps1')).TrimStart([char]0xFEFF)))"
+```
+
+- 要先看会做什么：在最后一个 `)` 后面加 ` -Plan`（只检查和说明，什么都不改）。其他参数同理：`-LocalOnly`（应用只在这台电脑上能打开）、`-Image ubuntu`（用 Ubuntu 24.04 代替 Debian）、`-Version v0.7.0`、`-NoGateway`。
+- 需要：64 位 Intel/AMD、CPU 开了虚拟化、系统盘剩 10 GB 以上、能上网。检查不过时脚本在下载之前就停下，打印故障编号（`WIN-OS-01`、`WIN-VIRT-01`、`WIN-POLICY-01`、`WIN-DISK-01`……，`acornfox faults WIN-…` 查处理办法）。
+- 过程中会弹**一次管理员确认**（窗口写 Windows PowerShell、发布者 Microsoft Windows，选“是”）；电脑上还没有 WSL 时要**重启一次电脑**，重启后登录会自动弹出窗口接着装。电脑上已有 WSL 2 就不用重启。
+- 装完自动打开控制台（`http://localhost:18802/`，第一次打开设密码）。在新开的 PowerShell 里运行 `acornfox apps`、`acornfox deploy`、`acornfox install 应用名` 等，和 Linux 服务器上一样；`acornfox skill install` 把 Skill 装进你的 Claude Code、Codex；`acornfox windows status` 看 Windows 这一侧每一项。
+- 局域网里的手机、电脑也能打开你的应用（`http://这台电脑的局域网地址:端口`）：脚本登记一个开机自启的小任务，把 WSL 里“局域网能打开”的端口转到 Windows 上，并加防火墙规则（只在专用网络放行）；只想本机用就加 `-LocalOnly`，以后用 `acornfox windows lan-on` / `lan-off` 切换。
+- 开机自启：登记计划任务，开机和登录时把 WSL 叫起来；`%UserProfile%\.wslconfig` 里加两行让 WSL 一直开着。
+- 升级：同一条命令末尾加 ` -Action upgrade`。卸载：`acornfox windows uninstall`（保留数据）；`acornfox windows uninstall --purge --yes` 连发行版和数据一起删，不可恢复。WSL 功能本身不卸载。
+- 手机、别的电脑要连这台 Windows 的话，Windows 的网络类型要是“专用网络”（家里、办公室），“公用网络”防火墙会挡（`WIN-LAN-03`）。
+
+#### 1c. 在这台 Mac 上安装（苹果芯片、macOS 26 起）
+
+AcornFox 装在苹果 `container`（苹果签名）开的一台 Debian 13 虚拟机里，和 Linux 服务器上是同一个程序、同一个 `install.sh`；Mac 上只多三样东西：苹果的 container、一个常驻小程序（登录后自动运行）、`acornfox` 命令。在“终端”里用普通用户（**不要加 sudo**）运行：
+
+```bash
+# 中国大陆（Gitee）
+curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash
+# 其他地区（GitHub）
+curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash
+```
+
+- 要先看会做什么：`… | bash -s -- install --plan`（只检查和说明，什么都不下载、不改）；`--json` 让标准输出只有最后一行 JSON。其他参数：`--idle 60`（闲置多少分钟停虚拟机）、`--memory 8`（虚拟机内存 GB）、`--no-lan`、`--no-open`、`--china`/`--global`、`--version vX.Y.Z`。
+- 需要：苹果芯片、macOS 26 或更新、磁盘剩 12 GB 以上、能上网。检查不过时在下载之前就停下，打印故障编号（`MAC-OS-01`、`MAC-ARCH-01`、`MAC-DISK-01`，`acornfox faults MAC-…` 查办法）。
+- **管理员密码**：只有这台 Mac 上还没有苹果的 container 时要输一次（装苹果签名的安装包）。输入时屏幕不显示字符，这是正常的。AI 工作台不会代你输；它没有终端时，程序打印出那一行 `sudo installer …` 让你自己在终端里运行，装好再重新运行安装命令（退出码 5，`MAC-ADMIN-01`）。
+- 下载：苹果的 container 安装包约 170 MB、没有默认内核时再加约 676 MB（先走 AcornFox 下载网关，分段多路、能续传、核对 SHA256，不通再用官方地址），Debian 镜像约 100 MB，虚拟机里装 Docker 等再几百 MB。
+- 装完自动打开控制台（`http://127.0.0.1:18802/`，第一次打开设密码）。`acornfox apps`、`acornfox deploy`、`acornfox install 应用名` 等和 Linux 服务器上一样（登记的服务器叫 `local`）；`acornfox skill install` 把 Skill 装进你的 Claude Code、Codex。
+- **内存**：虚拟机的内存上限默认 6 GB（Mac 内存 16 GB 以上）或 4 GB；它用过多少 Mac 上就占多少，只有停掉才还给 macOS。所以常驻小程序在**闲置 30 分钟没人访问**时停虚拟机，有人访问（浏览器、命令行、应用端口）再自动叫起，第一次要等 2～3 秒。虚拟机停着时里面的应用也停着；要一直开着：`acornfox mac set --idle off`。现在就想还内存：`acornfox mac stop`。
+- 局域网里的手机、电脑也能打开你的应用和控制台（`http://这台 Mac 的局域网地址:端口`；设成“只本机”的应用除外）：常驻小程序把虚拟机的端口转到 Mac 自己的地址上；不想要加 `--no-lan`，以后 `acornfox mac set --lan off`。Mac 的局域网地址变了：`acornfox mac set --public-host auto`。
+- 开机自启：常驻小程序是 launchd 的用户级启动项（`~/Library/LaunchAgents/com.acornfox.mac.plist`），登录后自动运行；虚拟机本身不随开机起，有人访问才起。
+- 看状态、检查：`acornfox mac status`、`acornfox mac doctor`（先查 Mac 一侧，再查虚拟机里；每项带故障编号）。升级：同一条命令后面接 `bash -s -- upgrade`。卸载：`acornfox mac uninstall`（保留虚拟机和里面的数据，重装接得上）；`acornfox mac uninstall --purge --yes` 连数据一起删，不可恢复。**苹果的 container 本身不卸**（你可能还在用它）。
+- 限制：虚拟机是 arm64，只有 x86 镜像的应用跑不了；虚拟机不挂 Mac 的家目录（读不到 Mac 上的文件）；macOS 的“本地网络”隐私限制不让我们自己的常驻程序直接连虚拟机，所以它借苹果自带的 `nc` 转发（对你没有影响，不用点任何允许）。
+
 #### 2. 安装客户端 CLI（Linux、Mac 电脑）
 
 ```bash
@@ -84,7 +127,7 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 ```
 
-Windows 电脑本版本没有命令行程序，第 2～4 步改为用 SSH 在服务器上运行（服务器上已经装好了 `acornfox`），见 [使用手册](docs/user-guide.md#windows-电脑经-ssh-在服务器上操作)。
+Mac 电脑想装在本机：用上面的 1c（命令行就是 `acornfox mac install` 装好的那个，不用再装 CLI）；只想管理一台 Linux 服务器时才需要这一步。Windows 电脑：装在本机用上面的 1b（命令行在 WSL 里，Windows 上的 `acornfox` 命令自动转过去）；只想管理一台 Linux 服务器时，第 2～4 步改为用 SSH 在服务器上运行（服务器上已经装好了 `acornfox`），见 [使用手册](docs/user-guide.md#windows-电脑经-ssh-在服务器上操作)。
 
 #### 3. 配置服务器连接
 
@@ -113,7 +156,7 @@ acornfox status
 
 目录里有两种东西：**应用**，一个一个单独装；**配方**（套装），几个应用一起装好并接上。目录里有什么以控制台“应用中心”和 `acornfox catalog list` 为准。
 
-**v0.6.0 起只装新格式的应用清单。** 应用目录已按新格式发布，联网的服务器升级后会自动取到（想马上看到就运行 `acornfox catalog sync`）。以前按旧格式上架的应用，要等按新格式重新上架后才能再装；已经装好的应用不受影响，照常运行。程序自带的目录里没有应用：一次都没同步到新目录的服务器（例如连不上外网），装应用时会说“应用中心现在还没有可以安装的应用，要等应用按新格式重新上架”，能联网后运行 `acornfox catalog sync`（或者等每天的自动同步）就好。
+**v0.6.0 起只装新格式的应用清单。** 应用目录已按新格式发布，联网的服务器升级后会自动取到（想马上看到就运行 `acornfox catalog sync`）。以前按旧格式上架的应用，要等按新格式重新上架后才能再装；已经装好的应用不受影响，照常运行。程序自带的目录里没有应用：一次都没同步到新目录的服务器（例如连不上外网），装应用时会说“应用中心现在还没有可以安装的应用，要等应用按新格式重新上架”，能联网后运行 `acornfox catalog sync`（或者等自动同步，一般几个小时内）就好。
 
 **服务**（v0.6.0 起）：有的应用要用到别的东西，例如要调大模型的应用需要一个“大模型接口”，要发通知的应用需要一个“邮箱（发信）”。应用写明了它需要哪些服务、装好后能提供哪些服务；这台机器上装好的应用提供的服务会自动登记，你自己已有的（例如自己的邮箱、别家的大模型 Key）用 `acornfox services add` 登记。装应用时按服务类型自动接上；必须的服务没有时停下，告诉你缺什么、怎么登记。AcornFox 不会替你装别的应用来提供服务，几个应用一起装靠配方。
 
@@ -237,7 +280,7 @@ AcornFox 由三部分组成：
 安装脚本读云厂商的元数据，判断服务器在哪家云、是不是中国大陆地域，然后配置：
 - 系统软件源（APT）和 Docker 安装包：阿里云、腾讯云、火山引擎的服务器先用所在云的内网源（不论哪个地域，香港、新加坡等境外地域也用），连不上再换下一个
 - 中国大陆服务器（包括华为云）接着对几家国内镜像站（阿里云、清华、中科大、南大、上海交大、华为云、腾讯云）当场测快慢，用能用而且最快的；境外服务器用 Docker 官方源
-- 拉镜像：下载源分层（所在云的内网加速 → 别人公开的国内副本 → Docker Hub、ghcr.io 本身），国内拉之前先实测，不能用的跳过、慢的排后，拉的过程中太慢会换下一个源。`acornfox sources --probe` 看每个源现在怎样
+- 拉镜像：下载源分层（所在云的内网加速 → 别人公开的国内副本 → Docker Hub、ghcr.io 本身），国内拉之前先实测，不能用的跳过、慢的排后，拉的过程中太慢会换下一个源；国内网络不连 Docker Hub、ghcr.io 本身（它们在国内被屏蔽）。`acornfox sources --probe` 看每个源现在怎样
 - 香港、新加坡、东京等境外地域按海外处理：从 GitHub 下载，不配国内公共镜像站和 Docker 镜像加速
 - 入口代理的镜像随发行版的入口包从国内下载源（Gitee）获取，不访问镜像仓库
 - 判断不出是哪家云时，按 IP 归属地判断是否在中国大陆
@@ -276,6 +319,8 @@ curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli
 # 客户端升级（Linux、Mac 电脑；其他地区）
 curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli
 ```
+
+Windows 电脑本机：把安装那一整行末尾加 ` -Action upgrade`（先加 ` -Plan` 看会做什么）。
 
 通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）。
 

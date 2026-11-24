@@ -10,8 +10,6 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -143,6 +141,17 @@ type AppResult struct {
 	// kept) that this task plugs into something else, moved aside until the
 	// task ends: put back on failure, taken back once it has succeeded.
 	Replaced []ReplacedRef `json:"replaced,omitempty"`
+	// Affected (a reapply task): apps that use a service this app provides
+	// whose values this apply changed. They are not changed; their settings
+	// are behind now (acornfox apps affected, apps reapply).
+	Affected []string `json:"affected_apps,omitempty"`
+	// An upgrade or a rollback task: From is the version the app was on
+	// before, Version the one it is on (or goes to); SnapshotID the
+	// pre-upgrade snapshot taken (upgrade) or used (rollback); Notes what
+	// the user is told after it (where the data of the moment was kept).
+	From       string   `json:"from,omitempty"`
+	SnapshotID string   `json:"snapshot_id,omitempty"`
+	Notes      []string `json:"notes,omitempty"`
 }
 
 // FirstLogin is the first-login information of one app.
@@ -183,7 +192,7 @@ const Masked = "******"
 
 // withTiming adds the verdict on v's step times by now (this server's clock).
 func withTiming(v TaskView, now time.Time) TaskView {
-	t := installtiming.Task{ID: v.ID, Status: v.Status, CreatedAt: v.CreatedAt, FinishedAt: v.FinishedAt, KeepVolumes: v.KeepVolumes}
+	t := installtiming.Task{ID: v.ID, Status: v.Status, CreatedAt: v.CreatedAt, FinishedAt: v.FinishedAt, KeepVolumes: v.KeepVolumes, Reapply: v.Kind == KindReapply, Upgrade: v.Kind == KindUpgrade, Rollback: v.Kind == KindRollback}
 	if v.Fault != nil {
 		t.FaultCode, t.FaultMsg = v.Fault.Code, v.Fault.Message
 	}
@@ -240,6 +249,7 @@ func (t *taskRun) snapshot() TaskView {
 		a.Services = append([]string(nil), a.Services...)
 		a.Bindings = append([]BindingRef(nil), a.Bindings...)
 		a.Issuing = append([]IssuingRef(nil), a.Issuing...)
+		a.Notes = append([]string(nil), a.Notes...)
 		v.Apps[i] = a
 	}
 	return v
@@ -816,6 +826,14 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 			t.progress(ctx, p.name, "image", img.NoArtifactReason(e.cfg.Arch)+"，从公共源拉取…", nil)
 		}
 	default:
+		if e.cfg.MirrorProbe != nil && !private {
+			// Measure the gateway and the image sources side by side and
+			// start with the faster one (pickpath.go).
+			if id, msg, err, handled := t.pickSource(ctx, p, cat, art, img, tagID, &notes); handled {
+				return id, msg, err
+			}
+			break
+		}
 		t.progress(ctx, p.name, "image", "向下载网关要下载地址…", nil)
 		id, err := t.fromGateway(ctx, p, cat, art, tagID)
 		if err == nil {
@@ -840,6 +858,14 @@ func (t *taskRun) image(ctx context.Context, p *planned, cat runner.CatalogAPI) 
 		// sources are tried.
 		t.progress(ctx, p.name, "image", "下载网关没成功，改从公共源拉取", nil)
 	}
+	return t.pullPublic(ctx, p, img, tagID, notes)
+}
+
+// pullPublic pulls the image by its digest from the public sources through
+// the runner and returns its ID. notes are the reasons the download gateway
+// was not used (they go into the message).
+func (t *taskRun) pullPublic(ctx context.Context, p *planned, img catalog.Image, tagID string, notes []string) (string, string, error) {
+	e := t.e
 	// The pull does not count toward the task's 60 minutes: it has its own
 	// limit (the runner's, and pullStepLimit for its answer; clock.go).
 	// Meanwhile the step shows the runner's live status of it.
@@ -1048,98 +1074,6 @@ func (t *taskRun) hasGateway(p *planned) bool {
 	return t.e.cfg.Gateway != nil
 }
 
-// fromGateway downloads the image archive art (this machine's architecture's,
-// from ArtifactFor) through the download gateway (W2, purpose app), checks it
-// against the size and sha256 the signed catalog pins for it before anything
-// is loaded, and has the runner load it and tag it acornfox/<app>:<tagID>. The checksum the
-// gateway reports is only compared: when it differs from the catalog's, the
-// file is not even downloaded. Loaded names other than the app's tag are
-// dropped by the runner, so nothing is left behind when a later step fails
-// (cleanup removes the app's tag, hence the image).
-func (t *taskRun) fromGateway(ctx context.Context, p *planned, cat runner.CatalogAPI, art catalog.ArchArtifact, tagID string) (string, error) {
-	e := t.e
-	want := strings.ToLower(art.SHA256)
-	issue := func(ctx context.Context) (gatewayclient.Issued, error) {
-		if p.app.Origin != "" {
-			// A private catalog's image: W2 names the catalog and the app.
-			iss, err := e.cfg.Catalog.cfg.Gateway.IssueApp(ctx, art.File, gatewayclient.AppRef{Catalog: p.app.Origin, App: p.app.Manifest.ID})
-			if err != nil {
-				return iss, privateIssueFault(err, "镜像包 "+art.File)
-			}
-			return iss, nil
-		}
-		iss, err := e.cfg.Gateway.Issue(ctx, art.File, "app")
-		return iss, scrubURL(err)
-	}
-	// offset is the gateway's clock minus this machine's, as the client
-	// learned it; expiry times are turned into this machine's clock with it.
-	offset := func() time.Duration {
-		var g any = e.cfg.Gateway
-		if p.app.Origin != "" {
-			g = e.cfg.Catalog.cfg.Gateway
-		}
-		if c, ok := g.(clockOffsetter); ok {
-			return c.ClockOffset()
-		}
-		return 0
-	}
-	size := art.Size
-	// check compares what the gateway reports with the signed catalog.
-	check := func(iss gatewayclient.Issued) error {
-		if iss.SHA256 != "" && strings.ToLower(iss.SHA256) != want {
-			return fault(CodeImageDigest, nil, "下载网关给的 %s 校验值和目录里的不一致，没有下载", art.File)
-		}
-		if size > 0 && iss.Size > 0 && iss.Size != size {
-			return fault(CodeImageDigest, nil, "下载网关给的 %s 大小和目录里的不一致，没有下载", art.File)
-		}
-		return nil
-	}
-	iss, err := issue(ctx)
-	if err != nil {
-		return "", err
-	}
-	if err := check(iss); err != nil {
-		return "", err
-	}
-	if size <= 0 {
-		size = iss.Size
-	}
-	if e.cfg.UploadDir == "" {
-		return "", errors.New("没有下载目录")
-	}
-	dest := filepath.Join(e.cfg.UploadDir, "catalog-"+t.id+"-"+newID()+".tar")
-	defer os.Remove(dest)
-	src := dlSource{URL: iss.URL, ExpiresAt: localExpiry(iss.ExpiresAt, offset(), time.Now()), Reissue: func(ctx context.Context) (string, time.Time, error) {
-		// The signed address expired or the connection broke: ask the
-		// gateway again and resume from the bytes already here.
-		again, err := issue(ctx)
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		if err := check(again); err != nil {
-			return "", time.Time{}, err
-		}
-		return again.URL, localExpiry(again.ExpiresAt, offset(), time.Now()), nil
-	}}
-	var st dlStatus
-	stop := t.reportDownload(ctx, p.name, size, &st)
-	err = downloadChecked(ctx, e.cfg.HTTP, src, dest, want, size, &st)
-	stop()
-	if err != nil {
-		return "", scrubURL(err)
-	}
-	t.progress(ctx, p.name, "image", fmt.Sprintf("已从下载网关下载 %s，正在导入镜像（大镜像要几十秒）", mbText(size)),
-		&StepProgress{Phase: "load", DoneBytes: size, TotalBytes: size})
-	res, err := cat.LoadImage(ctx, runner.LoadImageRequest{App: p.name, Path: dest, DeploymentID: tagID})
-	if err != nil {
-		return "", fmt.Errorf("导入镜像失败：%w", err)
-	}
-	if res.Image == nil || res.Image.ID == "" {
-		return "", errors.New("导入镜像后没有拿到镜像（运行器版本太旧？）")
-	}
-	return res.Image.ID, nil
-}
-
 // scrubURL drops the address from a *url.Error: a download address issued by
 // the gateway is a temporary signed link and must not reach logs, the task
 // record or the API.
@@ -1156,7 +1090,9 @@ var progressInterval = time.Second
 
 // reportDownload saves the download's progress (done, out of total bytes)
 // to the image step every progressInterval until the returned stop is
-// called. Speed is the average over the last few seconds.
+// called. Speed is the average over the last few seconds. total 0: the size
+// the download reports once it knows it (st.total); nothing is saved before
+// that (the step still says it is asking the gateway for the address).
 func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, st *dlStatus) (stop func()) {
 	quit, finished := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -1167,10 +1103,13 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 			at time.Time
 			n  int64
 		}
-		window := []sample{{time.Now(), 0}}
+		// The bytes already in when the report starts (the gateway's part of
+		// the speed test in pickpath.go) are not part of the first speed.
+		n0 := st.done.Load()
+		window := []sample{{time.Now(), n0}}
 		// lastMove: when a byte last came in (stalled_seconds, which tells a
 		// stuck download from a slow one).
-		lastMove, lastN := time.Now(), int64(0)
+		lastMove, lastN := time.Now(), n0
 		for {
 			select {
 			case <-quit:
@@ -1178,6 +1117,12 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 			case <-ctx.Done():
 				return
 			case now := <-tick.C:
+				total := total
+				if total <= 0 {
+					if total = st.total.Load(); total <= 0 {
+						continue
+					}
+				}
 				n := st.done.Load()
 				if n != lastN {
 					lastMove, lastN = now, n
@@ -1191,11 +1136,20 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 				if dt := now.Sub(first.at).Seconds(); dt > 0 {
 					rate = int64(float64(n-first.n) / dt)
 				}
-				pr := &StepProgress{Phase: "download", DoneBytes: n, TotalBytes: total, BytesPerSec: rate, StalledSeconds: int64(now.Sub(lastMove) / time.Second)}
+				if rate < 0 {
+					rate = 0 // a restart from nothing after a failed checksum
+				}
+				pr := &StepProgress{Phase: "download", DoneBytes: n, TotalBytes: total, BytesPerSec: rate, StalledSeconds: int64(now.Sub(lastMove) / time.Second),
+					Conns: int(st.conns.Load())}
 				if rate > 0 && total > n {
 					pr.ETASeconds = (total - n + rate - 1) / rate
 				}
 				msg := downloadText(pr)
+				if st.phase.Load() == phaseVerify {
+					pr.Phase, pr.StalledSeconds, pr.BytesPerSec, pr.ETASeconds = "verify", 0, 0, 0
+					t.progress(ctx, app, "image", fmt.Sprintf("已从下载网关下完 %s，正在核对校验值（几秒到几十秒）", mbText(n)), pr)
+					continue
+				}
 				if r := st.resumes.Load(); r > 0 {
 					msg += fmt.Sprintf("；中途断开 %d 次，已接着下", r)
 				}
@@ -1207,7 +1161,7 @@ func (t *taskRun) reportDownload(ctx context.Context, app string, total int64, s
 }
 
 // downloadText is the image step's message while downloading, e.g.
-// "从下载网关下载 312 MB / 1.0 GB（38%，25 MB/s，还要约 30 秒）".
+// "从下载网关下载 312 MB / 1.0 GB（38%，25 MB/s，32 路，还要约 30 秒）".
 func downloadText(p *StepProgress) string {
 	s := "从下载网关下载 " + mbText(p.DoneBytes)
 	if p.TotalBytes > 0 {
@@ -1219,6 +1173,9 @@ func downloadText(p *StepProgress) string {
 	}
 	if p.BytesPerSec > 0 {
 		extra = append(extra, mbText(p.BytesPerSec)+"/s")
+	}
+	if p.Conns > 1 {
+		extra = append(extra, fmt.Sprintf("%d 路", p.Conns))
 	}
 	if p.ETASeconds > 0 {
 		extra = append(extra, "还要约 "+etaText(p.ETASeconds))
@@ -1573,7 +1530,12 @@ func (t *taskRun) saveSecrets(ctx context.Context, p *planned, url string) error
 	for k, v := range p.vals {
 		saved[k] = v
 	}
-	// What the services hand the app is in their bindings, not here.
+	// What the services hand the app is in their bindings, not here; only a
+	// fingerprint of each item stays, so that a later change of a service
+	// can be told (reapply.go).
+	if items, ok := p.vals[usesKey].(map[string]map[string]string); ok && len(items) > 0 {
+		saved[usesFPKey] = usesFingerprint(items)
+	}
 	delete(saved, usesKey)
 	delete(saved, usesSecretKey)
 	if p.initStale {

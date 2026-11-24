@@ -108,9 +108,22 @@ type dlSource struct {
 
 // dlStatus is a download's progress, read by the progress reporter.
 type dlStatus struct {
-	done    atomic.Int64 // bytes of the file so far; never goes down
+	done    atomic.Int64 // bytes of the file so far; never goes down (but for a restart from nothing after a failed checksum)
 	resumes atomic.Int32 // retries after a broken or refused try
+	// Segmented download only (segdl.go): the connections open now, and
+	// where the download is (phaseDownload, phaseVerify: the finished file
+	// is being checked against its sha256).
+	conns atomic.Int32
+	phase atomic.Int32
+	// total is the file's size once the caller knows it (the progress
+	// reporter reads it).
+	total atomic.Int64
 }
+
+const (
+	phaseDownload = 0
+	phaseVerify   = 1
+)
 
 // retryable is a failed try that may be tried again.
 type retryable struct {

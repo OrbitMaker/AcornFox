@@ -265,6 +265,10 @@ func reasonText(d state.Deployment) string {
 		what = "重新部署"
 	case state.ReasonRollback:
 		what = "回退"
+	case state.ReasonRestore:
+		what = "恢复备份"
+	case state.ReasonReapply:
+		what = "改设置后重新生效"
 	case state.ReasonAddonAdd:
 		what = "添加 " + addonName
 	case state.ReasonAddonRemove:

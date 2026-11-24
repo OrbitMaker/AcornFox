@@ -19,6 +19,7 @@ type AppCenterAPI interface {
 	Catalog(ctx context.Context) (CatalogList, error)                            // GET  /v1/catalog
 	CatalogApp(ctx context.Context, id string) (CatalogApp, error)               // GET  /v1/catalog/apps/{id}
 	CatalogSync(ctx context.Context) (CatalogSync, error)                        // POST /v1/catalog/sync
+	CatalogSyncIfStale(ctx context.Context) (CatalogSync, error)                 // POST /v1/catalog/sync?if_stale=1
 	Install(ctx context.Context, req InstallRequest) (InstallTask, error)        // POST /v1/catalog/install
 	InstallTask(ctx context.Context, id string) (InstallTask, error)             // GET  /v1/catalog/install/{task}
 	FirstLogin(ctx context.Context, app string, reveal bool) (FirstLogin, error) // GET /v1/apps/{app}/first-login
@@ -37,6 +38,91 @@ type CatalogSync struct {
 	// Private is the private catalogs' part, passed through as the server
 	// sent it.
 	Private json.RawMessage `json:"private,omitempty"`
+	// Show is where the display content stands (nil: an older server).
+	Show *ShowState `json:"show,omitempty"`
+	// Skills is where the operating manuals stand (nil: an older server).
+	Skills *SkillsState `json:"skills,omitempty"`
+	// Ran is only in the answer of the if-stale sync: true when it synced
+	// now, false when the last good sync was recent enough (or too recent an
+	// attempt) and this is the last result.
+	Ran bool `json:"ran,omitempty"`
+}
+
+// ShowState mirrors the server's account of the display content
+// (show.json): state is ok, none or failed; code is the CAT-SHOW-* of a
+// failure; serial is the show in use.
+type ShowState struct {
+	State   string `json:"state"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	Serial  int64  `json:"serial,omitempty"`
+}
+
+// SkillsState mirrors the server's account of the operating manuals: state is
+// ok, none or failed; count is how many are usable; failed lists the ones that
+// are not, each with its CAT-SKILL-* code.
+type SkillsState struct {
+	State   string `json:"state"`
+	Count   int    `json:"count"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	Failed  []struct {
+		Kind    string `json:"kind"`
+		ID      string `json:"id"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"failed,omitempty"`
+}
+
+// ShowItem is the display content of one app or solution as GET /v1/catalog
+// gives it (fields an app or a solution does not have stay empty).
+type ShowItem struct {
+	Name       string   `json:"name"`
+	Tagline    string   `json:"tagline"`
+	Flag       string   `json:"flag"`
+	Color      string   `json:"color"`
+	Cover      string   `json:"cover"`
+	Doc        string   `json:"doc"`
+	Order      int      `json:"order"`
+	Keywords   []string `json:"keywords"`
+	Industries []string `json:"industries"`
+	// Skill: there is an operating manual usable on this server (not its
+	// text: CatalogSkill gives that); nil when not.
+	Skill *SkillInfo `json:"skill,omitempty"`
+}
+
+// SkillInfo says an app or solution has an operating manual: which version it
+// was verified against and when.
+type SkillInfo struct {
+	Version string `json:"version"`
+	Checked string `json:"checked"`
+	Size    int64  `json:"size"`
+}
+
+// SkillAPI is implemented by *Client: the operating manual of an app or a
+// solution (separate interface so existing fakes keep compiling).
+type SkillAPI interface {
+	CatalogSkill(ctx context.Context, kind, id string) (Skill, error) // GET /v1/catalog/skills/{kind}/{id}
+}
+
+// Skill mirrors GET /v1/catalog/skills/{kind}/{id}.
+type Skill struct {
+	ID       string          `json:"id"`
+	Kind     string          `json:"kind"`
+	HasSkill bool            `json:"has_skill"`
+	Version  string          `json:"version"`
+	Checked  string          `json:"checked"`
+	Size     int64           `json:"size"`
+	Text     string          `json:"text"`
+	Code     string          `json:"code,omitempty"`
+	Note     string          `json:"note,omitempty"`
+	Raw      json.RawMessage `json:"-"`
+}
+
+// ShowIndustry is one industry of the display content.
+type ShowIndustry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // PrivateCatalogAPI is implemented by *Client: private catalogs (W10) and
@@ -91,6 +177,9 @@ type AppVars struct {
 		Editable      string `json:"editable"`
 		EditableLabel string `json:"editable_label"`
 		Used          *bool  `json:"used"`
+		// CanEdit and EditHow: acornfox apps set can change it, and how.
+		CanEdit bool   `json:"can_edit"`
+		EditHow string `json:"edit_how"`
 		// ValueNow, Differs, Code, Fix: a platform variable's value now
 		// next to the one given at install time (APP-VARS-01 when they
 		// differ).
@@ -190,6 +279,8 @@ type CatalogList struct {
 		// published again; Note says so to the user.
 		Former bool   `json:"former"`
 		Note   string `json:"note"`
+		// Show is the display content (nil: none for this app).
+		Show *ShowItem `json:"show,omitempty"`
 	} `json:"apps"`
 	Recipes []struct {
 		ID      string `json:"id"`
@@ -203,7 +294,19 @@ type CatalogList struct {
 		NeedsPlatform string    `json:"needs_platform"`
 		Former        bool      `json:"former"`
 		Note          string    `json:"note"`
+		Show          *ShowItem `json:"show,omitempty"`
 	} `json:"recipes"`
+	// Industries, Home and Assist are the display content of the whole
+	// catalog (empty without one).
+	Industries []ShowIndustry `json:"industries"`
+	Home       struct {
+		Solutions []string `json:"solutions"`
+	} `json:"home"`
+	Assist struct {
+		Visible  bool    `json:"visible"`
+		PriceCNY float64 `json:"price_cny"`
+		URL      string  `json:"url,omitempty"`
+	} `json:"assist"`
 	Raw json.RawMessage `json:"-"`
 }
 
@@ -370,6 +473,14 @@ type InstallTask struct {
 		// Tell: what the providers of the services the app was plugged into
 		// wrote for the user, as they are (also in timing.must_tell).
 		Tell []string `json:"tell,omitempty"`
+		// Affected (a reapply task): apps that use a service this app
+		// provides, whose settings are now behind.
+		Affected []string `json:"affected_apps,omitempty"`
+		// An upgrade or rollback task: the version before, the
+		// pre-upgrade snapshot taken or used, what to tell the user.
+		From       string   `json:"from,omitempty"`
+		SnapshotID string   `json:"snapshot_id,omitempty"`
+		Notes      []string `json:"notes,omitempty"`
 		// OpenHint (a succeeded task, an app that only opens on the server):
 		// the same as the app's open_hint in GET /v1/apps.
 		OpenHint *OpenHint `json:"open_hint,omitempty"`
@@ -434,10 +545,27 @@ func (c *Client) CatalogApp(ctx context.Context, id string) (CatalogApp, error) 
 	return v, err
 }
 
+// CatalogSkill calls GET /v1/catalog/skills/{kind}/{id} (kind: app or recipe).
+func (c *Client) CatalogSkill(ctx context.Context, kind, id string) (Skill, error) {
+	var v Skill
+	raw, err := c.getRaw(ctx, http.MethodGet, "/v1/catalog/skills/"+url.PathEscape(kind)+"/"+url.PathEscape(id), nil, &v)
+	v.Raw = raw
+	return v, err
+}
+
 // CatalogSync calls POST /v1/catalog/sync.
 func (c *Client) CatalogSync(ctx context.Context) (CatalogSync, error) {
 	var v CatalogSync
 	_, err := c.doJSON(ctx, http.MethodPost, "/v1/catalog/sync", struct{}{}, &v)
+	return v, err
+}
+
+// CatalogSyncIfStale calls POST /v1/catalog/sync?if_stale=1: the server syncs
+// only when the last good sync is older than 30 minutes (Ran says whether it
+// did); an older server that does not know the query syncs every time.
+func (c *Client) CatalogSyncIfStale(ctx context.Context) (CatalogSync, error) {
+	var v CatalogSync
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/catalog/sync?if_stale=1", struct{}{}, &v)
 	return v, err
 }
 

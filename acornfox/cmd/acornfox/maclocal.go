@@ -36,9 +36,13 @@ func macLocalStop(cmd string, asJSON bool, stdout, stderr io.Writer) (int, bool)
 	if !setup.MacLocalBlocked() || !macLocalCommands[cmd] {
 		return 0, false
 	}
+	if cmd == "doctor" && macVMInstalled() {
+		return 0, false // this Mac has the virtual machine: doctor checks it (macDoctorRun)
+	}
 	if cmd == "doctor" {
 		r := doctorReport{OK: true}
 		r.add(false, setup.MacLocalCode, "%s。%s", setup.MacLocalMessage, setup.MacLocalHint)
+		skillVersionChecks(&r)
 		if asJSON {
 			b, _ := json.Marshal(r)
 			fmt.Fprintln(stdout, string(b))

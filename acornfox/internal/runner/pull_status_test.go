@@ -39,7 +39,7 @@ func TestPullStatusFollowsTheSources(t *testing.T) {
 	}
 	untrack()
 	first, second := <-seen, <-seen
-	if first.Phase != "pull" || first.Source != "docker.m.daocloud.io" || first.SourceIndex != 1 || first.Sources != 4 ||
+	if first.Phase != "pull" || first.Source != "docker.m.daocloud.io" || first.SourceIndex != 1 || first.Sources != 3 ||
 		first.Bytes != 40<<20 || first.Total != 300<<20 || first.Blind || len(first.Earlier) != 0 ||
 		first.LimitSeconds != int(pullMaxTotal/time.Second) {
 		t.Fatalf("first %+v", first)

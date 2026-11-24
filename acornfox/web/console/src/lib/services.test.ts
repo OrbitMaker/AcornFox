@@ -17,8 +17,8 @@ describe('服务的状态和来源', () => {
   it('四种状态', () => {
     expect(serviceStatus(services[0])).toEqual({ text: '可用', tone: 'success' })
     expect(serviceStatus(services[1])).toEqual({ text: '还差：Key', tone: 'warning' })
-    expect(serviceStatus(services[2])).toEqual({ text: '提供它的应用 other-api 停着', tone: 'warning' })
-    expect(serviceStatus(services[3])).toEqual({ text: '提供它的应用 old-api 已删', tone: 'danger' })
+    expect(serviceStatus(services[2])).toEqual({ text: 'other-api 停了，暂时用不了', tone: 'warning' })
+    expect(serviceStatus(services[3])).toEqual({ text: 'old-api 已经删了', tone: 'danger' })
     // 不认识的状态用服务端的说法
     expect(serviceStatus({ ...services[0], status: 'later', status_label: '以后的状态' })).toEqual({ text: '以后的状态', tone: 'muted' })
   })
@@ -28,15 +28,15 @@ describe('服务的状态和来源', () => {
     expect(appServiceStatus({ use: 'db', kind: 'demo_sql', service: 'db1', status: 'not_ready' })).toEqual({ text: '还不能用', tone: 'warning' })
   })
   it('还能不能再接：被独占、接满、还能接几个、不限', () => {
-    expect(slotsText({ ...services[0], dedicated_to: 'app-a', slots_left: 0 })).toEqual({ text: '被应用 app-a 独占，别的应用接不了', full: true })
+    expect(slotsText({ ...services[0], dedicated_to: 'app-a', slots_left: 0 })).toEqual({ text: '只给 app-a 用，别的应用接不了', full: true })
     expect(slotsText({ ...services[0], max_consumers: 1, slots_left: 0 })).toEqual({ text: '已经接满（最多 1 个），别的应用接不了', full: true })
     expect(slotsText({ ...services[0], max_consumers: 3, slots_left: 2 })).toEqual({ text: '还能接 2 个（最多 3 个）', full: false })
     expect(slotsText({ ...services[0], dedicated_to: '', max_consumers: 0, slots_left: null })).toEqual({ text: '', full: false })
     expect(slotsText(services[0])).toEqual({ text: '', full: false })
   })
   it('来源、谁在用、要在应用里做一步的项', () => {
-    expect(sourceText(services[0])).toBe('自己登记的')
-    expect(sourceText(services[1])).toBe('由应用 new-api 提供')
+    expect(sourceText(services[0])).toBe('你自己添加的')
+    expect(sourceText(services[1])).toBe('new-api 提供的')
     expect(usedByText(services[0])).toBe('memos 在用')
     expect(usedByText(services[1])).toBe('还没有应用在用')
     expect(waitingAsk(services[1]).map((v) => v.key)).toEqual(['api_key'])
@@ -69,7 +69,7 @@ describe('按服务类型定义生成的表单', () => {
   it('默认值、控件、选项都照定义', () => {
     expect(newServiceValues(smtp)).toEqual({ host: '', port: '587', username: '', password: '', tls: 'starttls' })
     expect(smtp.fields.map(fieldControl)).toEqual(['text', 'number', 'text', 'password', 'select'])
-    expect(fieldOptions(smtp.fields[4])).toEqual([['starttls', 'starttls'], ['tls', 'tls'], ['none', 'none']])
+    expect(fieldOptions(smtp.fields[4])).toEqual([['starttls', '加密（STARTTLS）'], ['tls', '加密'], ['none', '不加密']])
     // 可以不填、没有默认值的枚举和是否多一个“不填”
     expect(fieldOptions({ key: 'b', label: '开', type: 'bool' })).toEqual([['', '不填'], ['true', '是'], ['false', '否']])
     expect(fieldOptions({ key: 'b', label: '开', type: 'bool', required: true })).toEqual([['true', '是'], ['false', '否']])
@@ -78,7 +78,7 @@ describe('按服务类型定义生成的表单', () => {
     const v = newServiceValues(smtp)
     expect(checkServiceForm(smtp, ' ', v)).toEqual([{ key: 'name', message: '请给这条服务起个名字' }, { key: 'host', message: '请填写服务器地址' }])
     expect(checkServiceForm(smtp, '邮箱', { ...v, host: 'mail.example.com', port: '58x' })).toEqual([{ key: 'port', message: '端口要填整数' }])
-    expect(checkServiceForm(smtp, '邮箱', { ...v, host: 'h', tls: 'ssl' })[0].message).toBe('加密方式只能选 starttls、tls、none')
+    expect(checkServiceForm(smtp, '邮箱', { ...v, host: 'h', tls: 'ssl' })[0].message).toBe('加密方式只能选 加密（STARTTLS）、加密、不加密')
     expect(checkServiceForm(llm, '上游', { base_url: 'api.deepseek.com', api_key: 'k', model: '' })).toEqual([{ key: 'base_url', message: '接口地址要以 http:// 或 https:// 开头' }])
     expect(checkServiceForm(llm, '上游', { base_url: 'https://api.deepseek.com/v1', api_key: 'k', model: '' })).toEqual([])
   })

@@ -91,6 +91,23 @@ export interface AppView {
   services?: AppServiceUse[] | null
   // 详情才有：用旧格式清单装的应用的说明（照常运行、能启停和删除，但不接服务）。有就原样显示成一条提示。
   legacy_note?: string
+  // 从应用中心装的应用，应用中心里有比现在新的版本时是那个版本号（例如 2.48.0），没有新版本时没有这一项。
+  // 应用“更新”页签和概览的版本卡片有它才写“有新版本”，不猜“已是最新”。
+  catalog_update?: string
+  // 应用升级（W9）的现状：服务端有这一项才显示“更新”按钮和“退回到升级前”（见 lib/app-upgrade.ts），没有时页面不提升级。
+  upgrade?: AppUpgrade
+}
+
+// GET /v1/apps/{app} 的 upgrade：能不能升、为什么不能、升级前备份的数据还在不在、能不能退回到升级前。
+export interface AppUpgrade {
+  available?: string // 新版本号（服务端给的是字符串）
+  can_upgrade?: boolean
+  // 不能升的原因（一句话）和故障编号（编号只放进“复制给 AI 工作台”）
+  blocked?: string
+  blocked_code?: string
+  notes?: string[]
+  snapshot?: { id: string; version?: string; created_at?: string; size_mb?: number } | null
+  can_rollback?: boolean
 }
 
 // OpenHint：只本机的应用怎么从用户自己的电脑打开。
@@ -136,7 +153,10 @@ export interface Resources {
 
 export interface Session { csrf: string; expires_at: string; server: string }
 
-export interface ServerStatus { runner?: string; docker_version?: string; apps?: number; version?: string; setup?: { state: string }; edge?: { state: string; message?: string } }
+// on_public、latest_version：服务端还没有给这两项（要服务端配合），没给时页面照没有这回事处理。on_public：这台机器在不在公网上
+// （家里的机器不在，是正常情况）；latest_version：线上最新的版本号（和 version 一样就是“已是最新”）。
+// apps_outdated：有新版本的应用（数量，或应用代号的列表）；服务端没给时不提。
+export interface ServerStatus { runner?: string; docker_version?: string; apps?: number; version?: string; setup?: { state: string }; edge?: { state: string; message?: string }; on_public?: boolean; latest_version?: string; apps_outdated?: number | string[] }
 
 // ---- 首页看板、运行环境、设置 ----
 
@@ -160,9 +180,14 @@ export interface HostPoint { t: string; cpu_percent?: number; memory_used?: numb
 export interface HostHistory { range: string; step_seconds: number; ranges: string[]; since?: string; points: HostPoint[] }
 
 // GET /v1/runtime/checks：和 acornfox doctor 同一套故障编号。
-export interface RuntimeCheck { ok: boolean; level: 'ok' | 'warn' | 'fail' | string; text: string; code?: string }
+// key：服务端还没有给（要服务端配合）：每项检查一个固定的键，“体检”页按它合成说人话的行，没给时每项检查各占一行、用服务端原话，
+//   docker、service、edge（后台程序）、data_dir（保存数据）、disk（磁盘）、sources（下载）、public（在不在公网上）；没有 key 的项单独成一行。
+export interface RuntimeCheck { ok: boolean; level: 'ok' | 'warn' | 'fail' | string; text: string; code?: string; key?: string }
 export interface DownloadSources { china: boolean; region_source: string; docker_hub: string[]; ghcr?: string[]; gateway?: string; download_base?: string }
-export interface RuntimeChecks { os: string; checked_at: string; ok: boolean; items: RuntimeCheck[]; data_dir?: string; docker_version?: string; sources?: DownloadSources }
+// app_disk、keep_versions：服务端还没有给（要服务端配合），没给时体检里不写这两样。app_disk：每个应用占了多少磁盘（应用程序加数据，字节）；
+// keep_versions：每个应用除了正在用的，还留着几个旧版本用来退回上一版。
+export interface AppDiskUse { app: string; bytes: number }
+export interface RuntimeChecks { os: string; checked_at: string; ok: boolean; items: RuntimeCheck[]; data_dir?: string; docker_version?: string; sources?: DownloadSources; app_disk?: AppDiskUse[]; keep_versions?: number }
 
 // GET /v1/setup/faults：故障编号的说明（单一来源在服务端）。
 export interface FaultDef { code: string; title: string; causes: string[]; next: string; needs_user: boolean }
@@ -240,6 +265,28 @@ export interface Use {
 // ProvideView：应用能提供的一种服务。
 export interface ProvideView { kind: string; kind_label?: string }
 
+// ---- 应用和解决方案的展示内容 ----
+// 介绍只有一个字段 doc：一篇 Markdown 文档（认哪些写法见 lib/doc.ts），演示视频、截图、能做什么、装好后做什么都写在这一篇里。
+// 卡片上另外要的只有：主色、一句话、角标、封面图。这些来自经营系统签名发布的展示内容（GET /v1/catalog 里每个应用和配方的 show），
+// 格式见经营系统和单机版的展示内容约定（show.json）；没有 show（旧目录、验签没过、没编辑过）时页面退回清单里的 name 和 summary。
+export interface AppShow {
+  name?: string // 应用中心里显示的名字，空表示用清单里的 name（lib/catalog.ts 的 applyShow 在读到目录时就换好）
+  color?: string // 主色（#rrggbb），封面和图标底色用；空时用灰色
+  tagline?: string // 一句话卖点，比 summary 短
+  flag?: 'hot' | 'new' | 'pick' | string // 热门、新上架、推荐（经营系统里定）
+  cover?: string // 卡片封面图的链接；没有时封面是应用图标放在主色上
+  doc?: string // 介绍：一篇 Markdown 文档
+  order?: number // 同一货架里小的排前面；0 或没有表示没排
+  keywords?: string[] // 搜索用的词，和清单的 keywords 合并
+  // 有一份可用的操作手册（给 AI 工作台看的，页面上不显示它的内容）：对哪个版本验过、哪天验的。没有就不写这一项。
+  skill?: { version: string; checked: string; size?: number }
+  // 只用在解决方案上：属于哪些行业，写行业的 id（行业的名字和顺序在 CatalogView.industries 里）。可以挂几个。
+  industries?: string[]
+}
+
+// 行业：id 是稳定的，name 是给用户看的，顺序由负责人定。
+export interface Industry { id: string; name: string }
+
 export interface CatalogApp {
   id: string
   version: string
@@ -268,6 +315,7 @@ export interface CatalogApp {
   // 服务端只在不用升级（needs_platform 为空）时标它。
   former?: boolean
   note?: string
+  show?: AppShow
 }
 
 export interface CatalogSource { id: string; name: string }
@@ -278,6 +326,9 @@ export interface Recipe {
   summary: string
   keywords?: string[]
   apps: { app: string; reuse_installed?: boolean }[]
+  // 给用户看叫“解决方案”。title 按问题起名；show.doc 是介绍（一篇文档），show.industries 是行业（id）。
+  // 只装一个应用的配方不算解决方案（见 shelf.tsx 的 isSolution）。
+  show?: AppShow
   // 配方里谁接谁：to 这个应用名叫 uses 的需要，接 from 这个应用登记的服务。
   links?: { from: string; to: string; uses: string }[]
   delivery: Delivery
@@ -293,14 +344,23 @@ export interface Recipe {
 // 找专人部署：目录的运营数据里有才显示（现在的目录还没有这一项）。
 export interface ExpertService { title?: string; price_cny?: number; url?: string }
 
+// GET /v1/catalog 的 sync.show：这次同步里展示内容（一句话、封面、介绍）的情况。state：fetched 取到了；none 目录里没有；
+// failed 验签没过或和目录对不上（这次不用它，应用中心退回用清单里的名字和简介，装应用不受影响），code 是故障编号，message 是一句话。
+export interface ShowSyncState { state: 'fetched' | 'none' | 'failed' | string; code?: string; message?: string; serial?: number }
+
 export interface CatalogView {
   serial: number
   origin: string
-  sync: Record<string, unknown>
+  sync: Record<string, unknown> & { show?: ShowSyncState }
   apps: CatalogApp[]
   recipes: Recipe[]
   sources?: CatalogSourceView[]
   expert?: ExpertService
+  // 展示内容里和整个目录有关的几项（没有展示内容时都没有）：
+  industries?: Industry[] // 行业，按排好的顺序
+  home?: { solutions: string[] } // 首页“你想解决什么问题？”按这个顺序摆的解决方案（配方 id）
+  // 找专人部署（经营系统发布的展示内容）：visible 为 true 且 url 是 http/https 才显示按钮；价格只按它显示。url 是空串就不显示按钮。
+  assist?: { visible?: boolean; price_cny?: number; url?: string }
 }
 
 export interface ParamView {
@@ -314,6 +374,8 @@ export interface ParamView {
   required: boolean
   generated: boolean
   editable?: string
+  // hidden：服务端还没有给（要服务端配合），没给时都照常显示。安装时自动生成、用户又不用记的（会话密钥、加密密钥这类），安装弹窗不问、不列（评估 L3）。
+  hidden?: boolean
 }
 
 // PlatformVarView：平台变量（平台按这台机器自动填给应用的时区、下载源等）。
@@ -362,13 +424,25 @@ export interface AppDetail {
   source?: CatalogSource
   // 要先把 AcornFox 升到这个版本才能装（例如 "0.6.0"）；不用升级是空串，旧服务端没有这一项。
   needs_platform?: string
+  show?: AppShow
 }
 
 // needs_platform：原因是“AcornFox 版本不够”时有，值是要升到的版本（例如 "0.6.0"）；别的错误没有这个键。
 export interface Fault { code: string; message: string; hint?: string; diagnosis?: unknown; task_id?: string; needs_platform?: string }
 
 // StepProgress：正在进行的一步能自己量出进度时有（经下载网关下载镜像包：download；下完导入：load）。
-export interface StepProgress { phase: 'download' | 'load' | string; done_bytes: number; total_bytes?: number; bytes_per_sec?: number; eta_seconds?: number }
+// phase：download 经下载网关下载应用程序；load 下完导入；pull 从公共下载源拉（Docker 报多少算多少，blind 为 true 是它这会儿没报进度）。
+export interface StepProgress {
+  phase: 'download' | 'load' | 'pull' | string
+  done_bytes: number
+  total_bytes?: number
+  bytes_per_sec?: number
+  eta_seconds?: number
+  stalled_seconds?: number
+  source?: string
+  blind?: boolean
+  pull_seconds?: number
+}
 export interface StepView { app: string; name: string; label: string; status: string; message?: string; started_at?: string; finished_at?: string; progress?: StepProgress }
 export interface AppResult { app: string; catalog_id: string; version: string; reused: boolean; created: boolean; url?: string; memory_mb?: number; volumes?: string[] }
 export interface LoginField { label: string; value: string; secret?: boolean }

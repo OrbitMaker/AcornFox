@@ -18,25 +18,57 @@ import (
 // platform has the variable it says which entries can be closed, so nobody
 // has to remember to look. The file format is schema/gaps.schema.json.
 //
+// Two kinds of entry share the file and the numbers (GapVariable, the
+// default, and GapManual):
+//
+//	variable  an app's manifest needs a variable or a way of writing the
+//	          platform does not have (app, upstream_key, layer …)
+//	manual    an app's operation manual has a step the platform cannot do
+//	          for the user, so the manual leaves it to the user or works
+//	          around it (apps, where, handling user_step | workaround). The
+//	          manual line starts with 【要用户自己做】 and ends with the entry's
+//	          id: （GAP-0004）. The operations system refuses to publish a
+//	          manual with such a line that has no entry here for its app.
+//
 // gaps.yaml is never published: build packs apps/<id>/ only, and index.json
 // lists apps and recipes only.
 
 // GapsFile is the register's name in the catalog root.
 const GapsFile = "gaps.yaml"
 
-// Gap is one entry of the register.
+// The kinds of entry (Gap.Kind).
+const (
+	GapVariable = "variable"
+	GapManual   = "manual"
+)
+
+// Gap is one entry of the register. Kind is always set after reading (an
+// entry that does not write one is a GapVariable). The fields App,
+// UpstreamKey, Layer and DocURL belong to a variable entry; Apps and Where to
+// a manual one.
 type Gap struct {
-	ID          string `yaml:"id" json:"id"`
-	App         string `yaml:"app" json:"app"`
-	UpstreamKey string `yaml:"upstream_key" json:"upstream_key"`
-	Want        string `yaml:"want" json:"want"`
-	Layer       string `yaml:"layer" json:"layer"`
-	Handling    string `yaml:"handling" json:"handling"`
-	DocURL      string `yaml:"doc_url" json:"doc_url"`
-	Date        string `yaml:"date" json:"date"`
-	Status      string `yaml:"status" json:"status"`
-	DoneIn      string `yaml:"done_in" json:"done_in,omitempty"`
-	Note        string `yaml:"note" json:"note,omitempty"`
+	ID          string   `yaml:"id" json:"id"`
+	Kind        string   `yaml:"kind" json:"kind"`
+	App         string   `yaml:"app" json:"app,omitempty"`
+	Apps        []string `yaml:"apps" json:"apps,omitempty"`
+	UpstreamKey string   `yaml:"upstream_key" json:"upstream_key,omitempty"`
+	Want        string   `yaml:"want" json:"want"`
+	Layer       string   `yaml:"layer" json:"layer,omitempty"`
+	Handling    string   `yaml:"handling" json:"handling"`
+	DocURL      string   `yaml:"doc_url" json:"doc_url,omitempty"`
+	Where       string   `yaml:"where" json:"where,omitempty"`
+	Date        string   `yaml:"date" json:"date"`
+	Status      string   `yaml:"status" json:"status"`
+	DoneIn      string   `yaml:"done_in" json:"done_in,omitempty"`
+	Note        string   `yaml:"note" json:"note,omitempty"`
+}
+
+// AppList is the apps the entry is about: App, or Apps of a manual entry.
+func (g Gap) AppList() []string {
+	if g.Kind == GapManual {
+		return g.Apps
+	}
+	return []string{g.App}
 }
 
 // Kinds of GapNotice.
@@ -60,6 +92,7 @@ type GapsReport struct {
 	File       string         `json:"file"`
 	Gaps       []Gap          `json:"gaps"`
 	ByStatus   map[string]int `json:"by_status"` // open, planned, done
+	ByKind     map[string]int `json:"by_kind"`   // variable, manual
 	Notices    []GapNotice    `json:"notices"`
 	Problems   []Problem      `json:"problems"` // CAT-LINT-19
 }
@@ -72,7 +105,7 @@ type GapsReport struct {
 // are worked out. It only reads.
 func CheckGaps(dir string) (GapsReport, error) {
 	rep := GapsReport{File: GapsFile, Gaps: []Gap{}, ByStatus: map[string]int{"open": 0, "planned": 0, "done": 0},
-		Notices: []GapNotice{}, Problems: []Problem{}}
+		ByKind: map[string]int{GapVariable: 0, GapManual: 0}, Notices: []GapNotice{}, Problems: []Problem{}}
 	add := func(_, level, file, path, format string, args ...any) {
 		rep.Problems = append(rep.Problems, Problem{Code: CodeGaps, Level: level, File: file, Path: path, Message: fmt.Sprintf(format, args...)})
 	}
@@ -115,18 +148,31 @@ func CheckGaps(dir string) (GapsReport, error) {
 	if len(rep.Problems) > 0 {
 		return rep, nil
 	}
+	for i := range file.Gaps {
+		if file.Gaps[i].Kind == "" {
+			file.Gaps[i].Kind = GapVariable
+		}
+	}
 	rep.Gaps = append(rep.Gaps, file.Gaps...)
 	for _, g := range rep.Gaps {
 		rep.ByStatus[g.Status]++
+		rep.ByKind[g.Kind]++
+		apps := g.AppList()
+		who := strings.Join(apps, "、")
 		if name, ok := cutPlatform(strings.TrimSpace(g.Want)); ok && g.Status != "done" {
 			if pv, ok := LookupPlatformVar(name); ok {
-				rep.Notices = append(rep.Notices, GapNotice{g.ID, g.App, GapCanClose,
-					fmt.Sprintf("可以关了：变量已有，请改清单。platform.%s 从 AcornFox %s 起就有；把 %s 的清单里 %s 改成引用它（发过的版本不能改内容，要出新的 release.version），再把这条的 status 改成 done、done_in 写 \"%s\"", name, pv.Since, g.App, g.UpstreamKey, pv.Since)})
+				msg := fmt.Sprintf("可以关了：变量已有，请改清单。platform.%s 从 AcornFox %s 起就有；把 %s 的清单里 %s 改成引用它（发过的版本不能改内容，要出新的 release.version），再把这条的 status 改成 done、done_in 写 \"%s\"", name, pv.Since, g.App, g.UpstreamKey, pv.Since)
+				if g.Kind == GapManual {
+					msg = fmt.Sprintf("可以关了：平台已有 platform.%s（从 AcornFox %s 起），去改 %s 的手册：把带 %s 的那一行（【要用户自己做】开头）改成直接做，再把这条的 status 改成 done、done_in 写 \"%s\"", name, pv.Since, who, g.ID, pv.Since)
+				}
+				rep.Notices = append(rep.Notices, GapNotice{g.ID, who, GapCanClose, msg})
 			}
 		}
-		if _, err := os.Stat(filepath.Join(dir, "apps", g.App, manifestName)); err != nil {
-			rep.Notices = append(rep.Notices, GapNotice{g.ID, g.App, GapAppMissing,
-				fmt.Sprintf("应用 %s 已不在目录里（没有 apps/%s/%s）：确认应用名，或这条不再需要时把 status 改成 done 并在 note 里写明", g.App, g.App, manifestName)})
+		for _, app := range apps {
+			if _, err := os.Stat(filepath.Join(dir, "apps", app, manifestName)); err != nil {
+				rep.Notices = append(rep.Notices, GapNotice{g.ID, app, GapAppMissing,
+					fmt.Sprintf("应用 %s 已不在目录里（没有 apps/%s/%s）：确认应用名，或这条不再需要时把 status 改成 done 并在 note 里写明", app, app, manifestName)})
+			}
 		}
 	}
 	return rep, nil

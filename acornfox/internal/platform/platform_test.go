@@ -6,11 +6,9 @@ import (
 	"errors"
 	"net"
 	"os"
-	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"testing"
-	"unicode/utf16"
 )
 
 // withEnv swaps the package hooks for one test.
@@ -33,9 +31,10 @@ func TestDefaultPaths(t *testing.T) {
 	if p := DefaultPaths(); p.DataDir != "/Users/u/Library/Application Support/AcornFox" || p.APISocket != p.DataDir+"/api.sock" || p.BinDir != p.DataDir+"/bin" {
 		t.Fatalf("darwin = %+v", p)
 	}
-	withEnv(t, "windows", map[string]string{"LOCALAPPDATA": `C:\Users\u\AppData\Local`}, `C:\Users\u`)
-	if p := DefaultPaths(); !strings.HasSuffix(p.DataDir, "AcornFox") || !strings.HasPrefix(p.DataDir, `C:\Users\u\AppData\Local`) {
-		t.Fatalf("windows = %+v", p)
+	// Windows is not a desktop mode: AcornFox runs inside WSL as the Linux build.
+	withEnv(t, "windows", nil, `C:\Users\u`)
+	if DesktopMode() {
+		t.Fatal("windows must not be a desktop mode")
 	}
 	withEnv(t, "darwin", map[string]string{"ACORNFOX_DATA_DIR": "/tmp/af"}, "/Users/u")
 	if p := DefaultPaths(); p.DataDir != "/tmp/af" {
@@ -111,17 +110,6 @@ func TestDarwinDefaultPicksExistingSocket(t *testing.T) {
 	}
 }
 
-func TestWindowsAndLinuxDefaults(t *testing.T) {
-	withEnv(t, "windows", nil, t.TempDir())
-	if ep := ResolveDocker(); ep.Host != "npipe:////./pipe/docker_engine" || ep.Runtime != "Docker Desktop" {
-		t.Fatalf("windows: %+v", ep)
-	}
-	withEnv(t, "linux", nil, t.TempDir())
-	if ep := ResolveDocker(); ep.Host != "unix:///var/run/docker.sock" {
-		t.Fatalf("linux: %+v", ep)
-	}
-}
-
 func TestRuntimeFromInfo(t *testing.T) {
 	cases := []struct{ os, name, want string }{
 		{"Docker Desktop", "docker-desktop", "Docker Desktop"},
@@ -142,26 +130,6 @@ func TestLaunchAgentPlist(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("plist missing %q", want)
 		}
-	}
-}
-
-func TestWindowsTaskXML(t *testing.T) {
-	x := WindowsTaskXML(AutostartEntry{Binary: `C:\Users\u\AppData\Local\AcornFox\bin\acornfox.exe`, Args: []string{"serve", "--background"}}, `PC\u`)
-	for _, want := range []string{"<LogonTrigger>", "<UserId>PC\\u</UserId>", "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", "<Arguments>serve --background</Arguments>", "<RunLevel>LeastPrivilege</RunLevel>", "<RestartOnFailure>"} {
-		if !strings.Contains(x, want) {
-			t.Errorf("task xml missing %q", want)
-		}
-	}
-	b := utf16File("ab\n")
-	if b[0] != 0xFF || b[1] != 0xFE {
-		t.Fatal("missing UTF-16LE byte order mark")
-	}
-	u := make([]uint16, (len(b)-2)/2)
-	for i := range u {
-		u[i] = uint16(b[2+2*i]) | uint16(b[3+2*i])<<8
-	}
-	if string(utf16.Decode(u)) != "ab\r\n" {
-		t.Fatalf("decoded %q", string(utf16.Decode(u)))
 	}
 }
 
@@ -219,27 +187,6 @@ func TestNetworkFile(t *testing.T) {
 	}
 	if _, ok := LinuxInstallChina(filepath.Join(dir, "missing")); ok {
 		t.Fatal("missing file must report !ok")
-	}
-}
-
-// The logon task runs as the user's SID; without one, a WORKGROUP domain is
-// replaced by the computer name (schtasks cannot map WORKGROUP\name).
-func TestWindowsTaskUser(t *testing.T) {
-	old := currentUser
-	t.Cleanup(func() { currentUser = old })
-	currentUser = func() (*osuser.User, error) { return &osuser.User{Uid: "S-1-5-21-1-2-3-1001"}, nil }
-	withEnv(t, "windows", map[string]string{"USERNAME": "codex", "USERDOMAIN": "WORKGROUP"}, t.TempDir())
-	if u, _ := windowsTaskUser(); u != "S-1-5-21-1-2-3-1001" {
-		t.Fatalf("got %q", u)
-	}
-	currentUser = func() (*osuser.User, error) { return nil, errors.New("no user") }
-	withEnv(t, "windows", map[string]string{"USERNAME": "codex", "USERDOMAIN": "WORKGROUP", "COMPUTERNAME": "DEVBOX"}, t.TempDir())
-	if u, _ := windowsTaskUser(); u != `DEVBOX\codex` {
-		t.Fatalf("got %q", u)
-	}
-	withEnv(t, "windows", map[string]string{"USERNAME": "codex", "USERDOMAIN": "CORP"}, t.TempDir())
-	if u, _ := windowsTaskUser(); u != `CORP\codex` {
-		t.Fatalf("got %q", u)
 	}
 }
 

@@ -157,39 +157,6 @@ func TestNothingInstalledUsesBuiltinAndRemembersIt(t *testing.T) {
 	}
 }
 
-func TestNeedAdminThenRebootThenResume(t *testing.T) {
-	stage := 0
-	rt := &fakeRuntime{canBI: true}
-	rt.builtin = func(opts StartOptions, r Reporter) (Detection, error) {
-		switch {
-		case !opts.ConfirmAdmin && stage == 0:
-			return Detection{}, &NeedError{Need: Need{Kind: NeedAdmin, Message: "要管理员"}}
-		case stage == 0:
-			stage = 1
-			return Detection{}, &NeedError{Need: Need{Kind: NeedReboot, Message: "要重启"}}
-		}
-		return Detection{Reachable: true, Host: "tcp://127.0.0.1:23750", Kind: RuntimeBuiltin, Name: "WSL", Version: "27"}, nil
-	}
-	m, _ := newTestManager(t, rt, okChecks)
-	_ = m.Start(StartOptions{})
-	if st := waitState(t, m); st.Need == nil || st.Need.Kind != NeedAdmin {
-		t.Fatalf("want admin, got %+v", st.Need)
-	}
-	_ = m.Start(StartOptions{Runtime: RuntimeBuiltin, ConfirmAdmin: true})
-	if st := waitState(t, m); st.Need == nil || st.Need.Kind != NeedReboot {
-		t.Fatalf("want reboot, got %+v", st.Need)
-	}
-	// After the reboot the server starts again and resumes.
-	m2 := New(Config{DataDir: m.cfg.DataDir, Runtime: rt, Checks: func(context.Context) []Check { return okChecks }})
-	if m2.Status().State != StateNeedsUser {
-		t.Fatalf("loaded state %s", m2.Status().State)
-	}
-	m2.Boot()
-	if st := waitState(t, m2); st.State != StateDone {
-		t.Fatalf("after reboot: %s %+v", st.State, st.Error)
-	}
-}
-
 func TestFailureCarriesFaultAndResumeRetries(t *testing.T) {
 	fail := true
 	rt := &fakeRuntime{canBI: true}
@@ -286,7 +253,7 @@ func TestFaultCatalog(t *testing.T) {
 		seen[f.Code] = true
 	}
 	// Every code the package returns is in the catalog.
-	for _, c := range []string{"SETUP-NET-01", "SETUP-NET-02", "SETUP-SUM-01", "SETUP-RT-02", "SETUP-RT-03", "SETUP-RT-04", "SETUP-WIN-03", "SETUP-WIN-04", "SETUP-EDGE-01", "SETUP-CHK-01", "SETUP-GEN-01", "SETUP-SVC-01", "SETUP-DISK-01", "SETUP-PORT-01", "SETUP-PORT-02", "SETUP-PORT-03", "SETUP-PORT-04", "SETUP-PORT-05", "SETUP-CLOCK-01", "SETUP-MAC-01", "LAN-CONSOLE-01", "LAN-CONSOLE-02", "LAN-CONSOLE-03"} {
+	for _, c := range []string{"SETUP-NET-01", "SETUP-NET-02", "SETUP-SUM-01", "SETUP-RT-02", "SETUP-RT-03", "SETUP-RT-04", "SETUP-EDGE-01", "SETUP-CHK-01", "SETUP-GEN-01", "SETUP-SVC-01", "SETUP-DISK-01", "SETUP-PORT-01", "SETUP-PORT-02", "SETUP-PORT-03", "SETUP-PORT-04", "SETUP-PORT-05", "SETUP-CLOCK-01", "SETUP-MAC-01", "LAN-CONSOLE-01", "LAN-CONSOLE-02", "LAN-CONSOLE-03"} {
 		if !seen[c] {
 			t.Fatalf("missing %s", c)
 		}
@@ -396,37 +363,5 @@ func TestDownloadNoResponseHeadersFallsBack(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("took %s", time.Since(start))
-	}
-}
-
-// "Local only" sticks until the admin step is confirmed again; an admin
-// confirmation is used for one run and never kept for the next boot.
-func TestLocalOnlyAndConfirmAdminLifetime(t *testing.T) {
-	var seen []StartOptions
-	rt := &fakeRuntime{canBI: true}
-	rt.builtin = func(opts StartOptions, r Reporter) (Detection, error) {
-		seen = append(seen, opts)
-		return Detection{Reachable: true, Host: "tcp://x", Kind: RuntimeBuiltin, Name: "b", Version: "1"}, nil
-	}
-	m, _ := newTestManager(t, rt, okChecks)
-	_ = m.Start(StartOptions{Runtime: RuntimeBuiltin, LocalOnly: true})
-	waitState(t, m)
-	_ = m.Resume()
-	waitState(t, m)
-	if !seen[1].LocalOnly {
-		t.Fatal("local-only not kept")
-	}
-	_ = m.Start(StartOptions{Runtime: RuntimeBuiltin, ConfirmAdmin: true})
-	waitState(t, m)
-	if seen[2].LocalOnly || !seen[2].ConfirmAdmin {
-		t.Fatalf("confirm-admin run: %+v", seen[2])
-	}
-	if m.Status().Options.ConfirmAdmin {
-		t.Fatal("confirm-admin kept after the run")
-	}
-	_ = m.Resume()
-	waitState(t, m)
-	if seen[3].ConfirmAdmin {
-		t.Fatal("a later run elevated without asking")
 	}
 }

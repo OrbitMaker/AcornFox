@@ -238,11 +238,68 @@ type File struct {
 type Step struct {
 	// Name says which step failed; it may be empty.
 	Name string `yaml:"name" json:"name"`
-	// When is set on init steps only ("after_healthy").
-	When string   `yaml:"when" json:"when"`
-	HTTP StepHTTP `yaml:"http" json:"http"`
+	// When is set on init steps only: StepAfterHealthy (first install),
+	// StepOnReapply (after every reapply of the settings) or StepOnChange
+	// (after a reapply in which one of Watch changed).
+	When string `yaml:"when" json:"when"`
+	// Watch is, for StepOnChange only, the references (params.<key>,
+	// platform.<name>, uses.<need>.<item>, written without braces) whose
+	// change makes the step run.
+	Watch []string `yaml:"watch" json:"watch,omitempty"`
+	HTTP  StepHTTP `yaml:"http" json:"http"`
 	// Exec is nil for an HTTP step.
 	Exec *StepExec `yaml:"exec" json:"exec,omitempty"`
+}
+
+// When values of an init step (Step.When). An empty When counts as
+// StepAfterHealthy.
+const (
+	StepAfterHealthy = "after_healthy"
+	StepOnReapply    = "on_reapply"
+	StepOnChange     = "on_change"
+)
+
+// Trigger is the step's When with the default filled in.
+func (s Step) Trigger() string {
+	if s.When == "" {
+		return StepAfterHealthy
+	}
+	return s.When
+}
+
+// InitGroup is one group of init steps that run together (one session, so
+// each step may use what an earlier one of the group saved): the steps with
+// the same trigger and, for StepOnChange, the same watch list. Index holds
+// the steps' positions in the manifest's init list.
+type InitGroup struct {
+	When  string
+	Watch []string // sorted; StepOnChange only
+	Index []int
+}
+
+// InitGroups splits an init list into its groups, in the order each group's
+// first step appears. A step keeps its position inside its group.
+func InitGroups(steps []Step) []InitGroup {
+	var out []InitGroup
+	at := map[string]int{}
+	for i, st := range steps {
+		w := append([]string(nil), st.Watch...)
+		sort.Strings(w)
+		key := st.Trigger()
+		if st.Trigger() == StepOnChange {
+			key += "|" + strings.Join(w, ",")
+		} else {
+			w = nil
+		}
+		g, ok := at[key]
+		if !ok {
+			g = len(out)
+			at[key] = g
+			out = append(out, InitGroup{When: st.Trigger(), Watch: w})
+		}
+		out[g].Index = append(out[g].Index, i)
+	}
+	return out
 }
 
 // IsExec reports whether the step runs a command instead of sending a request.

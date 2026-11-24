@@ -19,7 +19,10 @@ type Target struct {
 	Port          int    `json:"port,omitempty"`           // 0 = ssh default
 	Identity      string `json:"identity,omitempty"`       // private key path, optional
 	RemoteCommand string `json:"remote_command,omitempty"` // default "acornfox proxy"
-	URL           string `json:"url,omitempty"`            // direct http://127.0.0.1:port or unix:///run/acornfox/api.sock, bypasses SSH
+	// SSHOptions are extra "-o name=value" options for the ssh command, e.g.
+	// the known_hosts file of the Mac's own virtual machine (acornfox mac).
+	SSHOptions []string `json:"ssh_options,omitempty"`
+	URL        string   `json:"url,omitempty"` // direct http://127.0.0.1:port or unix:///run/acornfox/api.sock, bypasses SSH
 	// Console is the browser console of a local (unix socket) target, e.g.
 	// http://127.0.0.1:18800 on macOS and Windows; empty means that default.
 	Console string `json:"console,omitempty"`
@@ -51,6 +54,9 @@ type Error struct {
 	Status int
 	Diag   Diagnosis
 	TaskID string // app center: the running install task (CAT-INST-04)
+	// Plan is the plan that came with an APP-APPLY-05 refusal (what the
+	// change would do), raw as the server gave it.
+	Plan json.RawMessage
 }
 
 func (e *Error) Error() string { return e.Diag.Stage + "/" + e.Diag.Code + ": " + e.Diag.Message }
@@ -187,6 +193,13 @@ type App struct {
 	// LegacyNote (detail view): said for an app installed with a manifest
 	// of the former format, "" otherwise.
 	LegacyNote string `json:"legacy_note,omitempty"`
+	// An app from the app center: its id and version in the catalog, the
+	// newer version it can be upgraded to ("" none) and what an upgrade and
+	// going back to before it need to show (nil for any other app).
+	CatalogID      string          `json:"catalog_id,omitempty"`
+	CatalogVersion string          `json:"catalog_version,omitempty"`
+	CatalogUpdate  string          `json:"catalog_update,omitempty"`
+	Upgrade        *AppUpgradeInfo `json:"upgrade,omitempty"`
 }
 
 // AppService is one need of an installed app and the service it is plugged
@@ -227,10 +240,16 @@ type OpenHint struct {
 }
 
 type Status struct {
-	APIVersion    int    `json:"api_version"`
+	APIVersion int `json:"api_version"`
+	// Version is the AcornFox version the server runs (x.y.z, maybe with a
+	// suffix); empty from a server that does not report it.
+	Version       string `json:"version,omitempty"`
 	Runner        string `json:"runner"`
 	DockerVersion string `json:"docker_version"`
 	Apps          int    `json:"apps"`
+	// AppsOutdated is how many apps from the app center have a newer
+	// version this machine can install (0 from an older server).
+	AppsOutdated int `json:"apps_outdated,omitempty"`
 	// Features lists capabilities added after api_version 1 (Feature*).
 	Features []string `json:"features,omitempty"`
 }
@@ -255,6 +274,11 @@ type AppSettings struct {
 	Port       *int    `json:"port,omitempty"`
 	HealthPath *string `json:"health_path,omitempty"`
 	Exposure   *string `json:"exposure,omitempty"`
+	// ConfirmRestart and Reapply (only "skip") say how the change of an
+	// exposure follows into an app from the app center whose settings read
+	// its address (see appinstall/reapply.go).
+	ConfirmRestart bool   `json:"confirm_restart,omitempty"`
+	Reapply        string `json:"reapply,omitempty"`
 }
 
 // AppUpdate mirrors PATCH /v1/apps/{app}. AppliedNow is true when new memory /
@@ -264,6 +288,9 @@ type AppUpdate struct {
 	App        App    `json:"app"`
 	AppliedNow bool   `json:"applied_now,omitempty"`
 	ApplyError string `json:"apply_error,omitempty"`
+	// Reapply: the app's own settings followed its new exposure (a task to
+	// wait on, or why not).
+	Reapply *ApplyFollow `json:"reapply,omitempty"`
 }
 
 // Resources mirrors GET/PUT /v1/resources: the server-wide caps and

@@ -240,6 +240,9 @@ func (a *app) renderAppStatus(app client.App) int {
 	if app.LegacyNote != "" {
 		a.out.human("说明：%s", app.LegacyNote)
 	}
+	if app.CatalogUpdate != "" {
+		a.out.human("有新版本：应用中心里是 %s（现在 %s）：acornfox apps upgrade %s --plan 看会怎么升", app.CatalogUpdate, app.CatalogVersion, app.Name)
+	}
 	if app.URL != "" {
 		if app.OpenHint != nil {
 			a.out.human("网址：%s（只在服务器本机能打开）", app.URL)
@@ -325,11 +328,23 @@ func (a *app) cmdApps(ctx context.Context, args []string) int {
 		switch args[0] {
 		case "vars":
 			return a.cmdAppsVars(ctx, args[1:])
+		case "set":
+			return a.cmdAppsSet(ctx, args[1:])
+		case "reapply":
+			return a.cmdAppsReapply(ctx, args[1:])
+		case "affected":
+			return a.cmdAppsAffected(ctx, args[1:])
+		case "outdated":
+			return a.cmdAppsOutdated(ctx, args[1:])
+		case "upgrade":
+			return a.cmdAppsUpgrade(ctx, args[1:])
+		case "rollback":
+			return a.cmdAppsRollback(ctx, args[1:])
 		case "-h", "--help", "help":
 			fmt.Fprintln(a.out.stdout, appsUsage)
 			return exitOK
 		}
-		return a.out.usageError("apps 不接受参数 %s；列出应用用 acornfox apps，看一个应用的变量用 acornfox apps vars 应用", args[0])
+		return a.out.usageError("apps 不接受参数 %s；列出应用用 acornfox apps，看一个应用的变量用 acornfox apps vars 应用，改设置用 acornfox apps set，让应用跟上用 acornfox apps reapply，看谁落后了用 acornfox apps affected，看哪些有新版本用 acornfox apps outdated，升级用 acornfox apps upgrade，退回升级用 acornfox apps rollback", args[0])
 	}
 	// apps does not need an app name, only a target.
 	t, _, err := a.resolveTarget()
@@ -615,6 +630,8 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 		port       = fs.Int("port", -1, "容器端口")
 		healthPath = fs.String("health-path", "\x00", "健康检查路径")
 		expose     = fs.String("expose", "", "暴露方式：local（只本机）、lan（本机和局域网）、public（所有网卡 + 域名）、default（恢复本平台默认）；只在内部网络的应用（数据库这类）不能改")
+		yes        = fs.Bool("yes", false, "改 --expose 会让从应用中心装的应用重启（它的清单里用到了应用地址）：用户同意了才加")
+		noReapply  = fs.Bool("no-reapply", false, "只改访问方式，不让应用里用到的地址跟着变（之后 acornfox apps reapply 应用 再对）")
 	)
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitUsage
@@ -660,6 +677,10 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 		}
 		s.Exposure = &e
 		set = true
+		s.ConfirmRestart = *yes
+		if *noReapply {
+			s.Reapply = "skip"
+		}
 	}
 	if !set {
 		return a.out.usageError("至少提供一个设置：--memory / --cpu / --port / --health-path / --expose")
@@ -677,7 +698,7 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 
 	u, serr := api.UpdateApp(ctx, res.app, s)
 	if serr != nil {
-		return a.out.fail(serr)
+		return a.applyFail(serr)
 	}
 	updated := u.App
 	// Memory / CPU limits are applied to the running container in place;
@@ -699,14 +720,22 @@ func (a *app) cmdApp(ctx context.Context, args []string) int {
 		note = u.ApplyError
 	}
 	if a.out.json {
-		a.out.emitJSON(map[string]any{
+		out := map[string]any{
 			"app": updated.Name, "memory_mb": updated.MemoryMB, "cpu_milli": updated.CPUMilli,
 			"port": updated.Port, "health_path": updated.HealthPath, "applied_now": u.AppliedNow, "note": note,
-		})
-		return exitOK
+		}
+		if u.Reapply != nil {
+			out["reapply"] = u.Reapply
+		}
+		if u.Reapply == nil || u.Reapply.Task == nil {
+			a.out.emitJSON(out)
+			return exitOK
+		}
+		// The app's own settings follow: wait for that task, one answer.
+		return a.followApply(ctx, api, u.Reapply, out)
 	}
 	a.out.human("已更新 %s：内存上限 %d MB，CPU 上限 %.1f 核。%s。", updated.Name, updated.MemoryMB, float64(updated.CPUMilli)/1000, note)
-	return exitOK
+	return a.followApply(ctx, api, u.Reapply, nil)
 }
 
 // cmdStop implements `stop [APP] [--no-wait]`.

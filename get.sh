@@ -9,6 +9,10 @@
 #   海外： curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | sudo bash
 #   升级： … | sudo bash -s -- upgrade
 #   卸载： … | sudo bash -s -- uninstall            （保留数据；连数据一起删加 --purge）
+#   Mac（苹果芯片，macOS 26 起；在“终端”里用普通用户运行，不要加 sudo）： curl -fsSL <get.sh 地址> | bash
+#     在 Mac 上 install、upgrade、uninstall 走 Mac 的路：装进苹果 container 开的一台 Debian 虚拟机，里面是和服务器同一个程序
+#     （交给那个版本自带的 install-mac.sh，再由它运行 acornfox mac …；--plan 试跑、--json、--idle、--memory 等参数原样交给它）。
+#     只想在 Mac 上装命令行管理别处的服务器：见下一行 cli。
 #   只装命令行（Mac 或 Linux 电脑上，不用 sudo）： … | bash -s -- cli
 #   指定版本（含预发布版）： … | sudo bash -s -- --version v0.6.0
 #   其余参数原样交给那个版本的脚本，例如： … | sudo bash -s -- --china --no-lan-console
@@ -34,7 +38,9 @@ BASE="${ACORNFOX_RELEASE_BASE:-}"
 # 从这个版本起，发行版的 SHA256SUMS 覆盖全部文件（含脚本）；更早的版本只覆盖程序文件
 CHECKSUM_SINCE="0.6.0"
 
-say() { echo "[引导] $*"; }
+JSON_MODE=0
+# 加了 --json（Mac 上的 install-mac.sh 认它）时，引导自己的进度话改走标准错误，标准输出只留最后那一行 JSON
+say() { if [ "$JSON_MODE" = 1 ]; then echo "[引导] $*" >&2; else echo "[引导] $*"; fi; }
 fail() {  # fail 退出码 故障编号 说明 [处理办法…]
     local rc="$1" code="$2" msg="$3" line
     shift 3
@@ -54,6 +60,7 @@ while [ $# -gt 0 ]; do
             if [ -z "$VERB" ]; then VERB="$1"; else PASS+=("$1"); fi;;
         --version) [ $# -ge 2 ] || fail 2 INSTALL-GET-04 "--version 后面要跟版本号，例如 --version v0.6.0"; VERSION="$2"; VERSION_GIVEN=1; shift;;
         --version=*) VERSION="${1#*=}"; VERSION_GIVEN=1;;
+        --json) JSON_MODE=1; PASS+=("$1");;
         --china) PREFER=gitee; PASS+=("$1");;
         --global) PREFER=github; PASS+=("$1");;
         -h|--help)
@@ -70,6 +77,12 @@ case "$VERB" in
     cli) SCRIPT=install-cli.sh;;
     uninstall) SCRIPT=uninstall.sh;;
 esac
+# Mac 上的安装、升级、卸载走 install-mac.sh（ACORNFOX_GET_OS 只给测试用：假装是别的系统）
+OS_NAME="${ACORNFOX_GET_OS:-$(uname -s)}"
+MAC=false
+if [ "$OS_NAME" = Darwin ]; then
+    case "$VERB" in install|upgrade|uninstall) SCRIPT=install-mac.sh; MAC=true;; esac
+fi
 if [ -n "$VERSION" ]; then
     case "$VERSION" in v[0-9]*) ;; [0-9]*) VERSION="v$VERSION";; *) fail 2 INSTALL-GET-04 "版本号写成 v0.6.0 这样：$VERSION";; esac
     printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' || fail 2 INSTALL-GET-04 "版本号写成 v0.6.0 或 v0.6.0-rc.1 这样：$VERSION"
@@ -144,7 +157,7 @@ sha256_of() {
 
 pick_order
 if [ -z "$VERSION" ]; then
-    if [ "$VERB" = uninstall ] && [ -x /usr/local/bin/acornfox ]; then
+    if [ "$VERB" = uninstall ] && ! $MAC && [ -x /usr/local/bin/acornfox ]; then
         # 卸载用“现在装着的那个版本”自带的卸载脚本
         cur="$({ /usr/local/bin/acornfox version 2>/dev/null || true; } | awk '{print $2}')"
         if printf '%s' "$cur" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then VERSION="v$cur"; fi
@@ -192,11 +205,16 @@ else
 fi
 
 # ---------- 交给它 ----------
-case "$VERB" in
-    install|upgrade) set -- ${PASS[@]+"${PASS[@]}"} --version "$VERSION";;
-    cli) set -- "$VERSION" ${PASS[@]+"${PASS[@]}"};;
-    uninstall) set -- ${PASS[@]+"${PASS[@]}"};;
-esac
+if $MAC; then
+    # install-mac.sh 的第一个参数是动作；版本一律交给它（卸载时它会优先用已经装着的程序）
+    set -- "$VERB" ${PASS[@]+"${PASS[@]}"} --version "$VERSION"
+else
+    case "$VERB" in
+        install|upgrade) set -- ${PASS[@]+"${PASS[@]}"} --version "$VERSION";;
+        cli) set -- "$VERSION" ${PASS[@]+"${PASS[@]}"};;
+        uninstall) set -- ${PASS[@]+"${PASS[@]}"};;
+    esac
+fi
 say "交给 $VERSION 的 $SCRIPT"
 # 把临时目录留给它用完再删：exec 之后本脚本的退出清理不再执行，所以脚本拷到一个单独的临时文件里再执行
 RUN="$(mktemp "${TMPDIR:-/tmp}/acornfox-${SCRIPT%.sh}.XXXXXX")"

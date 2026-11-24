@@ -1,21 +1,25 @@
-// 从应用视图推出页面上的状态，规则和旧控制台一致：
-// 期望停止 → 已停止；最新部署在进行 → 部署中；最新部署失败 → 部署失败；容器在跑 → 运行中；
-// 容器停了或不在 → 没在运行；读不到 Docker → 状态未知。另外，应用中心正在装的 → 安装中。
+// 从应用视图推出页面上的状态（内部用的 8 种），规则和旧控制台一致：
+// 期望停止 → stopped；最新部署在进行 → deploying；最新部署失败 → failed；容器在跑 → running；
+// 容器停了或不在 → crashed；读不到 Docker → unknown；应用中心正在装的 → installing。
+// 页面上怎么说见下面的 STATUS（样稿第 10 版：正常、停了、要处理，过渡的安装中、更新中）和 lib/display.ts 的 plainStatus。
 import type { AppView, Deployment } from './types'
 
 export type AppStatus = 'running' | 'stopped' | 'deploying' | 'installing' | 'failed' | 'crashed' | 'unknown' | 'empty'
 
 export const PENDING = new Set(['queued', 'building', 'starting', 'checking', 'routing'])
 
-export const STATUS: Record<AppStatus, { text: string; tone: 'success' | 'muted' | 'warning' | 'danger' }> = {
-  running: { text: '运行中', tone: 'success' },
-  stopped: { text: '已停止', tone: 'muted' },
-  deploying: { text: '部署中', tone: 'warning' },
-  installing: { text: '安装中', tone: 'warning' },
-  failed: { text: '部署失败', tone: 'danger' },
-  crashed: { text: '没在运行', tone: 'danger' },
-  unknown: { text: '状态未知', tone: 'muted' },
-  empty: { text: '还没部署', tone: 'muted' },
+// STATUS：页面上的说法（样稿第 10 版按评估 2.1 统一）：给小白只有正常、停了、要处理三种，另有过渡的安装中、更新中。
+// 要区分“新版本没换上、旧版本照常用”时用 lib/display.ts 的 plainStatus（它看得到整个应用）。
+// 颜色（样稿第 11 版）：要处理是琥珀；安装中、更新中是 busy（灰色加转圈）。
+export const STATUS: Record<AppStatus, { text: string; tone: 'success' | 'muted' | 'warning' | 'busy' }> = {
+  running: { text: '正常', tone: 'success' },
+  stopped: { text: '停了', tone: 'muted' },
+  deploying: { text: '更新中', tone: 'busy' },
+  installing: { text: '安装中', tone: 'busy' },
+  failed: { text: '要处理', tone: 'warning' },
+  crashed: { text: '要处理', tone: 'warning' },
+  unknown: { text: '看不到状态', tone: 'muted' },
+  empty: { text: '还没装好', tone: 'muted' },
 }
 
 export function deriveStatus(app: AppView, installing?: Set<string>): AppStatus {

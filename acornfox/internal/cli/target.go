@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"flag"
+	"fmt"
+	"strings"
 
 	"github.com/acornfox/acornfox/internal/client"
 )
@@ -18,6 +20,18 @@ func (a *app) cmdVersion() int {
 	}
 	a.out.human("acornfox 客户端版本 %s，API 版本 %d", Version, client.APIVersion)
 	return exitOK
+}
+
+// multiFlag is a flag that may be given several times.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	if strings.TrimSpace(v) == "" || !strings.Contains(v, "=") {
+		return fmt.Errorf("要写成 名字=值：%q", v)
+	}
+	*m = append(*m, v)
+	return nil
 }
 
 // cmdTarget dispatches the target subcommands.
@@ -50,7 +64,9 @@ func (a *app) cmdTargetAdd(ctx context.Context, args []string) int {
 		port     = fs.Int("port", 0, "SSH 端口（0 为默认）")
 		identity = fs.String("identity", "", "私钥路径（可选）")
 		url      = fs.String("url", "", "直连 URL（开发用，绕过 SSH）")
+		sshOpts  multiFlag
 	)
+	fs.Var(&sshOpts, "ssh-option", "额外的 ssh 选项，写成 名字=值（等同 ssh -o 名字=值），可重复；Mac 本机的虚拟机用它指定自己的 known_hosts")
 	names, err := parseFlags(fs, args)
 	if err != nil {
 		return exitUsage
@@ -74,6 +90,7 @@ func (a *app) cmdTargetAdd(ctx context.Context, args []string) int {
 		Identity:      *identity,
 		RemoteCommand: defaultRemote,
 		URL:           *url,
+		SSHOptions:    []string(sshOpts),
 	}
 	tf.Targets[name] = t
 

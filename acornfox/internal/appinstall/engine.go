@@ -56,6 +56,7 @@ type Store interface {
 	ListApps(ctx context.Context) ([]state.App, error)
 	UpdateApp(ctx context.Context, name string, fn func(*state.App) error) (state.App, error)
 	SetEnv(ctx context.Context, v state.EnvVar) error
+	DeleteEnv(ctx context.Context, app, key string) error
 	ListEnv(ctx context.Context, app string) ([]state.EnvVar, error)
 	AddVolume(ctx context.Context, app, path string, auto bool) (state.Volume, bool, error)
 	ListVolumes(ctx context.Context, app string) ([]state.Volume, error)
@@ -75,6 +76,9 @@ type Store interface {
 	SetCatalogManifest(ctx context.Context, m state.CatalogManifest) error
 	AddCatalogManifest(ctx context.Context, m state.CatalogManifest) (bool, error)
 	GetCatalogManifest(ctx context.Context, app string) (state.CatalogManifest, error)
+	// AddEvent writes a line in an app's history (a new version found, an
+	// upgrade done or put back).
+	AddEvent(ctx context.Context, e state.Event) error
 }
 
 // Runner is what the engine needs from the runner; it must also implement
@@ -136,7 +140,13 @@ type Config struct {
 	DataDir   string  // <data>/secrets/catalog.key
 	UploadDir string  // downloaded image archives (the runner reads them)
 	Gateway   Gateway // nil: large images come from public sources only
-	Version   string  // this AcornFox's version, for min_platform
+	// MirrorProbe measures how fast the image sources (mirrors) bring ref
+	// (repository@digest) for arch; with it, an image that names an archive
+	// goes to whichever is faster, the download gateway or the sources, and
+	// the other is the back-up (pickpath.go). nil: the gateway first, the
+	// sources only when it fails.
+	MirrorProbe func(ctx context.Context, ref, arch string) MirrorSpeed
+	Version     string // this AcornFox's version, for min_platform
 	// PlatformVars is where the platform variables come from; nil is the
 	// standalone implementation filled from Platform (this machine's
 	// settings).
@@ -168,13 +178,16 @@ type Engine struct {
 	cfg Config
 	box *secretBox
 
-	mu      sync.Mutex
-	hooks   Hooks
-	running map[string]string // app name -> task id
-	mine    map[string]bool   // ids of tasks this process started (recover skips them)
-	base    context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu    sync.Mutex
+	hooks Hooks
+	snaps Snapshots // the app backups (the upgrade's snapshot); nil: none
+	// notifyMu guards the file of the versions already told (upgrade.go).
+	notifyMu sync.Mutex
+	running  map[string]string // app name -> task id
+	mine     map[string]bool   // ids of tasks this process started (recover skips them)
+	base     context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 // New builds an engine. Call SetHooks before Start.
@@ -225,6 +238,8 @@ func (e *Engine) Catalog() *Catalog { return e.cfg.Catalog }
 func (e *Engine) Start(ctx context.Context) {
 	e.recover(ctx)
 	if e.cfg.Catalog != nil {
+		// A new version of an installed app is told once after each sync.
+		e.cfg.Catalog.SetAfterSync(e.noteOutdated)
 		go e.cfg.Catalog.Run(ctx)
 		e.BackfillManifests(ctx)
 	}
@@ -1112,7 +1127,11 @@ func (e *Engine) Tasks(ctx context.Context, limit int) ([]TaskView, error) {
 func taskViewOf(t state.InstallTask) TaskView {
 	var v TaskView
 	_ = json.Unmarshal([]byte(t.Data), &v)
-	v.ID, v.Kind, v.Target, v.Status = t.ID, t.Kind, t.Target, t.Status
+	kind := t.Kind
+	if isOpKind(v.Kind) {
+		kind = v.Kind // the table's kind is "app": see StartReapply
+	}
+	v.ID, v.Kind, v.Target, v.Status = t.ID, kind, t.Target, t.Status
 	v.CreatedAt, v.UpdatedAt = t.CreatedAt, t.UpdatedAt
 	if t.Status != state.TaskRunning {
 		u := t.UpdatedAt
@@ -1136,6 +1155,16 @@ func (e *Engine) recover(ctx context.Context) {
 			continue
 		}
 		v := taskViewOf(t)
+		if v.Kind == KindRollback {
+			e.recoverRollback(ctx, t, v)
+			continue
+		}
+		if v.Kind == KindReapply || v.Kind == KindUpgrade {
+			// Not an install: nothing was created; what the apply changed
+			// is put back from its journal.
+			e.recoverReapply(ctx, t, v)
+			continue
+		}
 		tr := &taskRun{e: e, id: t.ID, view: v}
 		// What the task created is in its record (volumes, image tag,
 		// services registered, credentials issued), so this removes

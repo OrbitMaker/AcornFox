@@ -184,3 +184,79 @@ func TestGapsFileStaysOutOfBuild(t *testing.T) {
 		}
 	}
 }
+
+// manualEntry is one manual gap (kind: manual).
+func manualEntry(id string, apps []string, want, status, extra string) string {
+	return "  - id: " + id + "\n    kind: manual\n    apps: [" + strings.Join(apps, ", ") + "]\n    want: " + want +
+		"\n    handling: user_step\n    where: 装好以后怎么用起来\n    date: 2026-11-24\n    status: " + status + "\n" + extra
+}
+
+// A manual gap (the operation manual leaves a step to the user) shares the
+// file and the numbers with the variable gaps; the report says which is which.
+func TestCheckGapsManual(t *testing.T) {
+	dir := copyTree(t)
+	writeGaps(t, dir, gapsHead+
+		gapEntry("GAP-0001", "new-api", "platform.mirror.huggingface", "open", "")+
+		manualEntry("GAP-0002", []string{"new-api", "hermes-agent"}, "平台能替用户在应用里建第一个管理员账号", "open", "")+
+		manualEntry("GAP-0003", []string{"new-api", "open-webui"}, "platform.tz", "planned", "    note: 手册里让用户自己选时区\n")+
+		manualEntry("GAP-0004", []string{"new-api"}, "platform.mirror.npm", "done", "    done_in: \"0.6.0\"\n"))
+	rep, err := CheckGaps(dir)
+	if err != nil || !rep.Registered || len(rep.Problems) != 0 || len(rep.Gaps) != 4 {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	if rep.ByKind[GapVariable] != 1 || rep.ByKind[GapManual] != 3 {
+		t.Fatalf("by_kind %+v", rep.ByKind)
+	}
+	if g := rep.Gaps[0]; g.Kind != GapVariable || len(g.AppList()) != 1 || g.AppList()[0] != "new-api" {
+		t.Fatalf("没写 kind 的算变量缺口：%+v", g)
+	}
+	g := rep.Gaps[1]
+	if g.Kind != GapManual || strings.Join(g.Apps, ",") != "new-api,hermes-agent" || g.Want != "平台能替用户在应用里建第一个管理员账号" ||
+		g.Handling != "user_step" || g.Where != "装好以后怎么用起来" || g.App != "" || g.Layer != "" || g.UpstreamKey != "" || g.DocURL != "" {
+		t.Fatalf("手册缺口读出来：%+v", g)
+	}
+	var got []string
+	for _, n := range rep.Notices {
+		got = append(got, n.ID+":"+n.App+":"+n.Kind)
+		if n.Kind == GapCanClose && n.ID == "GAP-0003" && (!strings.Contains(n.Message, "手册") || !strings.Contains(n.Message, "GAP-0003") || !strings.Contains(n.Message, "【要用户自己做】")) {
+			t.Errorf("手册缺口可以关了的提示要说去改手册：%s", n.Message)
+		}
+	}
+	// GAP-0002: both apps are in the test catalog; GAP-0003: platform.tz exists and open-webui is not there.
+	want := "GAP-0003:new-api、open-webui:can_close,GAP-0003:open-webui:app_missing"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("提示 %v，要 %s", got, want)
+	}
+}
+
+func TestCheckGapsManualSchema(t *testing.T) {
+	ok := manualEntry("GAP-0001", []string{"new-api"}, "平台能替用户建管理员账号", "open", "")
+	if rep, _ := CheckGaps(func() string { d := copyTree(t); writeGaps(t, d, gapsHead+ok); return d }()); len(rep.Problems) != 0 {
+		t.Fatalf("合格的手册缺口被拒：%+v", rep.Problems)
+	}
+	for name, content := range map[string]string{
+		"缺 where":           strings.Replace(ok, "    where: 装好以后怎么用起来\n", "", 1),
+		"缺 apps":            strings.Replace(ok, "    apps: [new-api]\n", "", 1),
+		"apps 是空的":          strings.Replace(ok, "apps: [new-api]", "apps: []", 1),
+		"apps 重复":           strings.Replace(ok, "apps: [new-api]", "apps: [new-api, new-api]", 1),
+		"handling 是变量缺口的取值": strings.Replace(ok, "handling: user_step", "handling: hardcoded", 1),
+		"多了变量缺口的字段":         ok + "    layer: platform\n",
+		"用了 app 不是 apps":    strings.Replace(ok, "    apps: [new-api]\n", "    app: new-api\n", 1),
+		"done 没写版本":         strings.Replace(ok, "status: open", "status: done", 1),
+		"kind 不认识":          strings.Replace(ok, "kind: manual", "kind: other", 1),
+		"编号和变量缺口重复":         ok + gapEntry("GAP-0001", "new-api", "platform.tz", "open", ""),
+	} {
+		dir := copyTree(t)
+		writeGaps(t, dir, gapsHead+content)
+		rep, err := CheckGaps(dir)
+		if err != nil || !rep.Registered || len(rep.Problems) == 0 || len(rep.Gaps) != 0 {
+			t.Errorf("%s：要有问题：%+v %v", name, rep, err)
+		}
+	}
+	// A variable entry that writes kind: variable is still one.
+	dir := copyTree(t)
+	writeGaps(t, dir, gapsHead+strings.Replace(gapEntry("GAP-0001", "new-api", "platform.tz", "open", ""), "    app: new-api\n", "    kind: variable\n    app: new-api\n", 1))
+	if rep, _ := CheckGaps(dir); len(rep.Problems) != 0 || rep.Gaps[0].Kind != GapVariable {
+		t.Fatalf("kind: variable：%+v", rep)
+	}
+}

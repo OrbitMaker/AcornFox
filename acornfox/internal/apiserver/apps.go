@@ -23,6 +23,12 @@ var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 // listApps implements GET /v1/apps.
 func (s *server) listApps(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Someone looks at "my apps": the catalog may be old, bring it up to date
+	// behind the page, so a new version shows at the next look (never holds
+	// this answer; appinstall.Catalog.TouchStale).
+	if s.appCenter != nil {
+		s.appCenter.Catalog().TouchStale()
+	}
 	apps, err := s.store.ListApps(ctx)
 	if err != nil {
 		s.mapStoreError(w, err)
@@ -32,6 +38,7 @@ func (s *server) listApps(w http.ResponseWriter, r *http.Request) {
 	for _, a := range apps {
 		views = append(views, s.buildAppView(ctx, a, false))
 	}
+	s.fillUpgrade(ctx, apps, views, false)
 	writeJSON(w, http.StatusOK, map[string]any{"apps": views})
 }
 
@@ -48,7 +55,9 @@ func (s *server) getApp(w http.ResponseWriter, r *http.Request) {
 		s.mapStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.buildAppView(ctx, app, true))
+	one := []appView{s.buildAppView(ctx, app, true)}
+	s.fillUpgrade(ctx, []state.App{app}, one, true)
+	writeJSON(w, http.StatusOK, one[0])
 }
 
 // buildAppView assembles the view for one app. When detail is true it also
@@ -410,6 +419,12 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleteVolumes := raw == "true"
+	if s.appCenter != nil {
+		if task := s.appCenter.Reapplying(app); task != "" {
+			writeError(w, http.StatusConflict, "app_busy", app+" 正在安装或重新生效（任务 "+task+"），等它结束再删：acornfox install status "+task+" --wait")
+			return
+		}
+	}
 	warnings, err := s.removeAppWarn(ctx, app, deleteVolumes)
 	if err != nil {
 		var opErr *lifecycleError
@@ -516,6 +531,12 @@ type patchAppRequest struct {
 	Port       *int    `json:"port,omitempty"`
 	HealthPath *string `json:"health_path,omitempty"`
 	Exposure   *string `json:"exposure,omitempty"` // local | lan | public; "" resets to the platform default
+	// Changing the exposure of an app from the app center whose settings
+	// read its address restarts it (appinstall/reapply.go): the user must
+	// have agreed (confirm_restart, else APP-APPLY-05 and nothing changes),
+	// or reapply "skip" leaves the app's own settings as they are.
+	ConfirmRestart bool   `json:"confirm_restart,omitempty"`
+	Reapply        string `json:"reapply,omitempty"` // "" | "skip"
 }
 
 // patchApp implements PATCH /v1/apps/{app}: update app settings within bounds.
@@ -576,6 +597,21 @@ func (s *server) patchApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.mapStoreError(w, err)
 		return
+	}
+	if body.Reapply != "" && body.Reapply != "skip" {
+		writeError(w, http.StatusBadRequest, "invalid_reapply", "reapply 只能不写或写 skip")
+		return
+	}
+	// The app's own settings follow its address: said before anything is
+	// changed, and done once it has been.
+	var follow addressChange
+	if body.Exposure != nil && *body.Exposure != cur.Exposure {
+		next := cur
+		next.Exposure = *body.Exposure
+		follow = s.planAddress(ctx, cur, s.where(ctx, next))
+		if follow.refuseUnconfirmed(w, body.ConfirmRestart, body.Reapply == "skip") {
+			return
+		}
 	}
 	live := ""
 	if cur.CurrentDeployment != "" {
@@ -664,6 +700,9 @@ func (s *server) patchApp(w http.ResponseWriter, r *http.Request) {
 			s.log.Warn("apply limits in place", "app", app, "err", err)
 			resp["apply_error"] = "已保存，但没能立即应用到运行中的容器，下次部署时生效：" + err.Error()
 		}
+	}
+	if r := s.followAddress(ctx, app, follow, body.Reapply == "skip"); r != nil {
+		resp["reapply"] = r
 	}
 	resp["app"] = s.buildAppView(ctx, updated, true)
 	if updated.CurrentDeployment != "" {
@@ -771,7 +810,12 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		appCount = len(apps)
 	}
 
+	outdated := 0
+	if s.appCenter != nil {
+		outdated = len(s.appCenter.Outdated(ctx))
+	}
 	body := map[string]any{
+		"apps_outdated":  outdated,
 		"api_version":    apiVersion,
 		"features":       serverFeatures,
 		"runner":         runnerState,
@@ -827,6 +871,10 @@ func (s *server) removeApp(ctx context.Context, app string, deleteVolumes bool) 
 // another app is not taken back any more, and the warnings tell the user
 // where to remove it by hand.
 func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bool) ([]string, error) {
+	// A backup or a restore is working on the app's containers and volumes.
+	if text := s.backupBusyText(app); text != "" {
+		return nil, &lifecycleError{http.StatusConflict, "app_busy", text}
+	}
 	// An app whose services other apps are plugged into stays: they would
 	// lose the service. Every one of them is named.
 	if s.appCenter != nil {
@@ -908,6 +956,9 @@ func (s *server) removeAppWarn(ctx context.Context, app string, deleteVolumes bo
 		return nil, err
 	}
 	warnings := append([]string(nil), legacy...)
+	if note := s.backupsLeftNote(app); note != "" {
+		warnings = append(warnings, note)
+	}
 	// Services: deleted with its data, what the app was handed is taken back
 	// and what it provided goes; with its data kept, both stay for an
 	// install on that data.

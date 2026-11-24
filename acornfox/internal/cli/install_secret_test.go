@@ -39,6 +39,9 @@ func (f *fakeInstallAPI) CatalogApp(_ context.Context, id string) (client.Catalo
 func (f *fakeInstallAPI) CatalogSync(context.Context) (client.CatalogSync, error) {
 	return client.CatalogSync{}, nil
 }
+func (f *fakeInstallAPI) CatalogSyncIfStale(context.Context) (client.CatalogSync, error) {
+	return client.CatalogSync{}, nil
+}
 func (f *fakeInstallAPI) Install(_ context.Context, req client.InstallRequest) (client.InstallTask, error) {
 	f.got = append(f.got, req)
 	return client.InstallTask{ID: "t1", Status: "running"}, nil

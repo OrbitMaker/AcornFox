@@ -8,10 +8,12 @@ import (
 	"os"
 )
 
-// The Linux server + runner pair does not run on Windows; Windows runs the
-// single-process "acornfox serve" instead (installed by "acornfox install").
+// The server + runner pair does not run as a Windows program: on Windows
+// AcornFox is the Linux build inside WSL (install-windows.ps1 installs it; the
+// acornfox command on Windows forwards to it). This Windows build is a
+// command-line client only.
 
-const serverOnly = "acornfox: 该命令只在 Linux 服务器上运行；Windows 上请用 acornfox install（后台运行 acornfox serve）"
+const serverOnly = "acornfox: 该命令只在 Linux 里运行。Windows 上的 AcornFox 装在 WSL 里（用 get.ps1 安装），Windows 上的 acornfox 命令会转给它"
 
 func runServer(_ []string, _ io.Writer, stderr io.Writer) int {
 	fmt.Fprintln(stderr, serverOnly)

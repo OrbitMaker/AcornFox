@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/acornfox/acornfox/internal/catalog"
 )
@@ -149,17 +148,6 @@ func TestVersionAtLeast(t *testing.T) {
 		if versionAtLeast(c.have, c.min) != c.ok {
 			t.Errorf("%s >= %s", c.have, c.min)
 		}
-	}
-}
-
-func TestNextDaily(t *testing.T) {
-	loc := time.FixedZone("x", 8*3600)
-	now := time.Date(2026, 11, 6, 10, 0, 0, 0, loc)
-	if n := nextDaily(now, 11*time.Hour); !n.Equal(time.Date(2026, 11, 6, 11, 0, 0, 0, loc)) {
-		t.Fatalf("today %v", n)
-	}
-	if n := nextDaily(now, 9*time.Hour); !n.Equal(time.Date(2026, 11, 7, 9, 0, 0, 0, loc)) {
-		t.Fatalf("tomorrow %v", n)
 	}
 }
 

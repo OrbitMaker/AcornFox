@@ -60,10 +60,10 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !av.FromCatalog || av.CatalogID != "new-api" || av.Version != "v1.0.0-rc.48" || av.Source.ID != PublicSource ||
-		!av.Manifest.Saved || av.Manifest.Source != state.ManifestFromInstall || av.Manifest.SHA256 != cm.SHA256 || av.CanChange || av.Revealed {
+		!av.Manifest.Saved || av.Manifest.Source != state.ManifestFromInstall || av.Manifest.SHA256 != cm.SHA256 || !av.CanChange || av.Revealed {
 		t.Fatalf("head %+v", av)
 	}
-	if !hasNote(av, "改设置的功能还没有") || !hasNote(av, "--reveal") {
+	if !hasNote(av, "acornfox apps set") || !hasNote(av, "--reveal") {
 		t.Fatalf("notes %v", av.Notes)
 	}
 	rows := varsByName(av)
@@ -94,7 +94,7 @@ func TestInstallSavesManifestAndVars(t *testing.T) {
 	if r := check("params.session_secret", "custom", catalog.ClassGenerated, OriginGenerated, "never", true); !r.Masked || len(r.Value) != len(Masked)+4 {
 		t.Fatalf("session_secret %+v", r)
 	}
-	tz := check("platform.tz", "system", catalog.ClassSystem, OriginPlatformUser, editInstallOnly, false)
+	tz := check("platform.tz", "system", catalog.ClassSystem, OriginPlatformUser, editPerApp, false)
 	if tz.Value != "Asia/Tokyo" || tz.Used == nil || !*tz.Used {
 		t.Fatalf("tz %+v", tz)
 	}

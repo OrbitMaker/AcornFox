@@ -119,11 +119,25 @@ func (c SyncConfig) timeout() time.Duration {
 
 // SyncResult reports what Sync did.
 type SyncResult struct {
-	Updated     bool      `json:"updated"`      // a newer index was written to the cache
-	Serial      int64     `json:"serial"`       // serial in use after Sync
-	LocalSerial int64     `json:"local_serial"` // serial before Sync (0: none)
-	Source      string    `json:"source"`       // source that answered ("" when all failed)
-	Attempts    []Attempt `json:"attempts"`     // sources that failed before the answer
+	Updated     bool   `json:"updated"`      // a newer index was written to the cache
+	Serial      int64  `json:"serial"`       // serial in use after Sync
+	LocalSerial int64  `json:"local_serial"` // serial before Sync (0: none)
+	Source      string `json:"source"`       // source that answered ("" when all failed)
+	// RemoteSerial is the answering source's serial when it was not newer
+	// than the one in use (0 otherwise): an older one usually means the
+	// source is behind the built-in snapshot (a test publish point, a mirror).
+	RemoteSerial int64     `json:"remote_serial,omitempty"`
+	Attempts     []Attempt `json:"attempts"` // sources that failed before the answer
+	// Show is what became of the display content in this run (show.go):
+	// fetched and stored, absent at the source, or failed (the index was
+	// taken all the same). State is empty when nothing could be said (every
+	// source failed, or a newer built-in snapshot is in use).
+	Show ShowState `json:"show"`
+	// Skills is what became of the operating manuals the display content
+	// lists (skill.go): how many are usable here and which could not be
+	// fetched or did not match (CAT-SKILL-*). They never hold the sync back.
+	// State is empty when nothing could be said.
+	Skills SkillsState `json:"skills"`
 }
 
 // Sync fetches version.txt from each source in turn. If it is not newer than
@@ -152,7 +166,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			res.Attempts = append(res.Attempts, Attempt{Source: src, Code: CodeSyncNetwork, Message: err.Error()})
 			break
 		}
-		updated, serial, err := syncOne(ctx, cfg, src, local, keys)
+		out, err := syncOne(ctx, cfg, src, local, keys)
 		if err != nil {
 			e := asError(err, CodeSyncNetwork)
 			if e.Code == CodeSyncCache {
@@ -162,86 +176,182 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			continue
 		}
 		res.Source = src
-		res.Updated = updated
-		if updated {
-			res.Serial = serial
+		res.RemoteSerial = out.remote
+		res.Updated = out.updated
+		res.Show = out.show
+		res.Skills = out.skills
+		if out.updated {
+			res.Serial = out.serial
 		}
 		return res, nil
 	}
 	return res, &Error{Code: CodeSyncAllFailed, Message: "所有来源都失败，继续用手上的目录", Attempts: res.Attempts}
 }
 
-func syncOne(ctx context.Context, cfg SyncConfig, src string, local int64, keys []ed25519.PublicKey) (bool, int64, error) {
+// syncOutcome is what syncOne did at one source.
+type syncOutcome struct {
+	updated bool
+	serial  int64
+	remote  int64 // the source's serial (version.txt)
+	show    ShowState
+	skills  SkillsState
+}
+
+func syncOne(ctx context.Context, cfg SyncConfig, src string, local int64, keys []ed25519.PublicKey) (syncOutcome, error) {
 	verB, err := get(ctx, cfg, src, VersionFile, maxVersionBytes)
 	if err != nil {
-		return false, 0, err
+		return syncOutcome{}, err
 	}
 	remote, err := parseSerial(verB)
 	if err != nil {
-		return false, 0, newErr(CodeSyncResponse, err, "version.txt 不是正整数")
+		return syncOutcome{}, newErr(CodeSyncResponse, err, "version.txt 不是正整数")
 	}
 	if remote <= local {
-		return false, local, nil
+		show := backfillShow(ctx, cfg, src, remote, local, keys)
+		return syncOutcome{serial: local, remote: remote, show: show, skills: backfillSkills(ctx, cfg, src, remote, local, keys)}, nil
 	}
 	idxB, err := get(ctx, cfg, src, IndexFile, maxIndexBytes)
 	if err != nil {
-		return false, 0, err
+		return syncOutcome{}, err
 	}
 	sig, err := get(ctx, cfg, src, SigFile, maxSigBytes)
 	if err != nil {
-		return false, 0, err
+		return syncOutcome{}, err
 	}
 	if err := Verify(idxB, sig, keys); err != nil {
-		return false, 0, newErr(CodeSyncSignature, err, "index.json 的签名验不过，丢弃")
+		return syncOutcome{}, newErr(CodeSyncSignature, err, "index.json 的签名验不过，丢弃")
 	}
 	idx, err := ParseIndex(idxB)
 	if err != nil {
-		return false, 0, newErr(CodeSyncResponse, err, "index.json 格式不对")
+		return syncOutcome{}, newErr(CodeSyncResponse, err, "index.json 格式不对")
 	}
 	if err := CheckCatalog(idx, PublicCatalog); err != nil {
-		return false, 0, err
+		return syncOutcome{}, err
 	}
 	if idx.Serial <= local {
-		return false, 0, newErr(CodeSyncRollback, nil, fmt.Sprintf("签名的目录序号 %d 不比本地的 %d 新", idx.Serial, local))
+		return syncOutcome{}, newErr(CodeSyncRollback, nil, fmt.Sprintf("签名的目录序号 %d 不比本地的 %d 新", idx.Serial, local))
 	}
 	if idx.Serial != remote {
-		return false, 0, newErr(CodeSyncMismatch, nil, fmt.Sprintf("version.txt 是 %d，签名的 index.json 是 %d", remote, idx.Serial))
+		return syncOutcome{}, newErr(CodeSyncMismatch, nil, fmt.Sprintf("version.txt 是 %d，签名的 index.json 是 %d", remote, idx.Serial))
 	}
-	switched, err := commitCache(cfg.CacheDir, idx.Serial, idxB, sig, verB, keys)
+	// The display content comes with the index but never holds it back.
+	showB, showSig, showState := fetchShow(ctx, cfg, src, idx.Serial, keys)
+	var extra []cacheFile
+	var skills SkillsState
+	if showState.State == ShowOK {
+		extra = []cacheFile{{ShowSigFile, showSig}, {ShowFile, showB}}
+		// The manuals the show lists come with it, and never hold it back
+		// either: one that cannot be fetched or does not match is left out
+		// (a later sync fetches it again).
+		if sh, perr := ParseShow(showB); perr == nil {
+			var files []cacheFile
+			files, skills = fetchSkills(ctx, cfg, src, sh.SkillRefs(), nil)
+			extra = append(extra, files...)
+		}
+	}
+	switched, err := commitCache(cfg.CacheDir, idx.Serial, idxB, sig, verB, keys, extra...)
 	if err != nil {
-		return false, 0, newErr(CodeSyncCache, err, "写本地缓存失败，手上的目录没动")
+		return syncOutcome{}, newErr(CodeSyncCache, err, "写本地缓存失败，手上的目录没动")
 	}
 	if !switched {
-		return false, local, nil
+		return syncOutcome{serial: local}, nil
 	}
-	return true, idx.Serial, nil
+	return syncOutcome{updated: true, serial: idx.Serial, show: showState, skills: skills}, nil
+}
+
+// fetchShow gets show.json and show.json.sig from src and checks them
+// against the index serial. A show.json that is not there (404) is
+// ShowNone; any other problem is ShowFailed with its code. Only a ShowOK
+// result returns the bytes to store.
+func fetchShow(ctx context.Context, cfg SyncConfig, src string, idxSerial int64, keys []ed25519.PublicKey) (show, sig []byte, st ShowState) {
+	show, found, err := getOptional(ctx, cfg, src, ShowFile, maxShowBytes)
+	if err != nil {
+		return nil, nil, failedShow(showFetchErr(err))
+	}
+	if !found {
+		return nil, nil, ShowState{State: ShowNone}
+	}
+	sig, found, err = getOptional(ctx, cfg, src, ShowSigFile, maxSigBytes)
+	if err != nil {
+		return nil, nil, failedShow(showFetchErr(err))
+	}
+	if !found {
+		return nil, nil, failedShow(newErr(CodeShowSignature, nil, "来源有 show.json，没有 show.json.sig"))
+	}
+	s, err := ReadShow(show, sig, idxSerial, keys)
+	if err != nil {
+		return nil, nil, failedShow(err)
+	}
+	return show, sig, ShowState{State: ShowOK, Serial: s.Serial}
+}
+
+func showFetchErr(err error) error {
+	e := asError(err, CodeSyncNetwork)
+	return newErr(CodeShowFetch, nil, e.Message)
+}
+
+// backfillShow is what a sync that finds nothing newer does about the display
+// content: when the cache version in use is this very serial and has no show
+// (it was not published yet, or could not be fetched with the index), look
+// again at this source. It never fails the sync. The caller holds the cache
+// lock.
+func backfillShow(ctx context.Context, cfg SyncConfig, src string, remote, local int64, keys []ed25519.PublicKey) ShowState {
+	c := loadCache(cfg.CacheDir, keys)
+	if c == nil || c.Serial != remote || remote != local {
+		return ShowState{} // the built-in snapshot is the newer one: not ours to extend
+	}
+	if hasCachedShow(cfg.CacheDir) {
+		_, st := cacheShow(currentVersionDir(cfg.CacheDir), c, keys)
+		return st
+	}
+	showB, showSig, st := fetchShow(ctx, cfg, src, c.Serial, keys)
+	if st.State == ShowOK {
+		if err := storeShowInCurrent(cfg.CacheDir, c.Serial, showB, showSig); err != nil {
+			return failedShow(newErr(CodeSyncCache, err, "写本地缓存失败"))
+		}
+	}
+	return st
 }
 
 // get downloads base/name, at most limit bytes.
 func get(ctx context.Context, cfg SyncConfig, base, name string, limit int64) ([]byte, error) {
+	b, _, err := fetchFile(ctx, cfg, base, name, limit, false)
+	return b, err
+}
+
+// getOptional is get for a file that may not be there: found is false for
+// HTTP 404 (no error).
+func getOptional(ctx context.Context, cfg SyncConfig, base, name string, limit int64) (b []byte, found bool, err error) {
+	return fetchFile(ctx, cfg, base, name, limit, true)
+}
+
+func fetchFile(ctx context.Context, cfg SyncConfig, base, name string, limit int64, optional bool) ([]byte, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()
 	u := strings.TrimRight(base, "/") + "/" + name
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, newErr(CodeSyncNetwork, err, "来源地址不对："+u)
+		return nil, false, newErr(CodeSyncNetwork, err, "来源地址不对："+u)
 	}
 	resp, err := cfg.client().Do(req)
 	if err != nil {
-		return nil, newErr(CodeSyncNetwork, err, "取 "+name+" 失败")
+		return nil, false, newErr(CodeSyncNetwork, err, "取 "+name+" 失败")
 	}
 	defer resp.Body.Close()
+	if optional && resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, newErr(CodeSyncNetwork, nil, fmt.Sprintf("取 %s 返回 HTTP %d", name, resp.StatusCode))
+		return nil, false, newErr(CodeSyncNetwork, nil, fmt.Sprintf("取 %s 返回 HTTP %d", name, resp.StatusCode))
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, newErr(CodeSyncNetwork, err, "读 "+name+" 中断")
+		return nil, false, newErr(CodeSyncNetwork, err, "读 "+name+" 中断")
 	}
 	if int64(len(b)) > limit {
-		return nil, newErr(CodeSyncResponse, nil, fmt.Sprintf("%s 超过 %d 字节", name, limit))
+		return nil, false, newErr(CodeSyncResponse, nil, fmt.Sprintf("%s 超过 %d 字节", name, limit))
 	}
-	return b, nil
+	return b, true, nil
 }
 
 func asError(err error, fallback string) *Error {
@@ -266,8 +376,9 @@ func ParseIndex(b []byte) (*Index, error) {
 	if err := json.Unmarshal(b, &idx); err != nil {
 		return nil, err
 	}
-	// A signed document of another kind (the operations overlay ops.json
-	// carries "kind") is never an index, whatever else it holds.
+	// A signed document of another kind (the display content show.json, and
+	// the operations overlay ops.json before it, carry "kind") is never an
+	// index, whatever else it holds.
 	var head struct {
 		Kind *string `json:"kind"`
 	}

@@ -23,18 +23,23 @@ type source struct {
 	dir      string
 	override map[string][]byte
 	status   int
-	hits     map[string]int
-	srv      *httptest.Server
+	// pathStatus forces the answer's code for single paths ("show.json": 500).
+	pathStatus map[string]int
+	hits       map[string]int
+	srv        *httptest.Server
 }
 
 func newSource(t *testing.T, dir string) *source {
-	s := &source{dir: dir, override: map[string][]byte{}, hits: map[string]int{}}
+	s := &source{dir: dir, override: map[string][]byte{}, pathStatus: map[string]int{}, hits: map[string]int{}}
 	fsrv := http.FileServer(http.Dir(dir))
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/catalog/")
 		s.mu.Lock()
 		s.hits[p]++
 		status, body, ok := s.status, s.override[p], false
+		if ps, has := s.pathStatus[p]; has && status == 0 {
+			status = ps
+		}
 		if body != nil {
 			ok = true
 		}
@@ -496,5 +501,25 @@ func TestSyncFallsBackToMirror(t *testing.T) {
 	res, err := Sync(context.Background(), cfgFor(filepath.Join(t.TempDir(), "cache"), pub, down, mirror))
 	if err != nil || res.Serial != 7 || res.Source != mirror.url() {
 		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+// A source behind the serial in use answers fine, says nothing new, and its
+// serial comes back so the caller can tell the user the source is behind.
+func TestSyncReportsOlderSourceSerial(t *testing.T) {
+	pub, priv := testKey(t)
+	cache := filepath.Join(t.TempDir(), "cache")
+	newer := newSource(t, publish(t, copyTree(t), 7, priv))
+	if res, err := Sync(context.Background(), cfgFor(cache, pub, newer)); err != nil || res.Serial != 7 {
+		t.Fatalf("first: res=%+v err=%v", res, err)
+	}
+	older := newSource(t, publish(t, copyTree(t), 3, priv))
+	res, err := Sync(context.Background(), cfgFor(cache, pub, older))
+	if err != nil || res.Updated || res.Serial != 7 || res.RemoteSerial != 3 {
+		t.Fatalf("older source: res=%+v err=%v", res, err)
+	}
+	same, err := Sync(context.Background(), cfgFor(cache, pub, newer))
+	if err != nil || same.RemoteSerial != 7 {
+		t.Fatalf("same source: res=%+v err=%v", same, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -19,9 +20,27 @@ import (
 )
 
 // Catalog is the server's copy of the app catalog: the verified cache under
-// <data>/catalog, or the snapshot built into the program. It syncs once when
-// the server starts and then once a day at a random time of day (so machines
-// do not all ask at the same minute), and on POST /v1/catalog/sync.
+// <data>/catalog, or the snapshot built into the program. It syncs
+//
+//   - once when the server starts, then every SyncInterval (6 hours) with a
+//     random jitter of a tenth of it either way, so machines do not all ask
+//     the official site at the same minute;
+//   - in the background when someone opens "my apps" or the app center
+//     (GET /v1/apps, GET /v1/catalog) and the last good sync is older than
+//     StaleAfter (30 minutes): TouchStale, never holds the page;
+//   - when `apps outdated` asks (POST /v1/catalog/sync?if_stale=1: the same
+//     test, but the answer waits for the sync);
+//   - on POST /v1/catalog/sync (always).
+//
+// A failed sync is not tried again at once: the periodic one waits for its
+// next turn like any other, and the "opened a page" ones wait at least
+// RetryGap (5 minutes) after the last attempt, good or not, so a page that
+// polls cannot turn a dead network into a storm of requests.
+//
+// Settings (defaults in the Default* constants; the environment of
+// acornfox-server overrides them, a value that does not parse or is out of
+// range is ignored): ACORNFOX_CATALOG_SYNC_INTERVAL, ACORNFOX_CATALOG_STALE_AFTER,
+// ACORNFOX_CATALOG_RETRY_GAP, all Go durations such as 6h, 30m, 90s.
 //
 // While the program has no trusted public key (catalog.TrustedKeys empty, the
 // state until the release signing key exists) it never contacts a source:
@@ -34,7 +53,58 @@ type Catalog struct {
 
 	pmu sync.Mutex // serializes changes to the private catalogs (private.go)
 
+	// afterSync is called once a sync (daily, at start, or asked for) is
+	// over: the engine looks for new versions of the apps installed.
+	afterSync func(ctx context.Context)
+
 	icons sync.Map // package sha256 -> listIcon (icons.go)
+
+	// Cadence (see the type comment), set by NewCatalog.
+	interval, staleAfter, retryGap time.Duration
+
+	// Guarded by mu: when the last good sync that really contacted a source
+	// ended, when the last attempt of any kind ended, whether a sync started
+	// by TouchStale or SyncIfStale is running, and the context of Run (the
+	// life of the server) the background syncs belong to.
+	lastOK, lastTry time.Time
+	touching        bool
+	runCtx          context.Context
+	// serving: Run (the server's periodic sync) has started. A page only
+	// starts a background sync then; tests and command-line-only uses that
+	// never run the loop get no syncs behind their back.
+	serving bool
+}
+
+// The cadence of the catalog sync and the environment variables that
+// override it.
+const (
+	DefaultSyncInterval = 6 * time.Hour
+	DefaultStaleAfter   = 30 * time.Minute
+	DefaultRetryGap     = 5 * time.Minute
+
+	SyncIntervalEnv = "ACORNFOX_CATALOG_SYNC_INTERVAL"
+	StaleAfterEnv   = "ACORNFOX_CATALOG_STALE_AFTER"
+	RetryGapEnv     = "ACORNFOX_CATALOG_RETRY_GAP"
+
+	// syncJitterDiv: the periodic sync is early or late by up to
+	// interval/syncJitterDiv (6 hours: up to 36 minutes either way).
+	syncJitterDiv = 10
+	// backgroundSyncLimit bounds one sync started by a page or the CLI.
+	backgroundSyncLimit = 3 * time.Minute
+)
+
+// durationSetting reads a duration from the environment, within [min, max];
+// def when it is unset, does not parse or is out of range.
+func durationSetting(env string, def, min, max time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(env))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < min || d > max {
+		return def
+	}
+	return d
 }
 
 // CatalogConfig configures NewCatalog.
@@ -48,6 +118,8 @@ type CatalogConfig struct {
 	// Gateway is the download gateway for private catalogs (W10) and their
 	// packages (W2); nil => no private catalogs (connect is CAT-CONN-02).
 	Gateway CatalogGateway
+	// Cadence; 0 => the environment variable, else the default (see Catalog).
+	SyncInterval, StaleAfter, RetryGap time.Duration
 }
 
 // SyncStatus is the last sync result, shown by GET /v1/catalog.
@@ -63,6 +135,15 @@ type SyncStatus struct {
 	Next     *time.Time        `json:"next,omitempty"` // next scheduled sync
 	// Private is the private catalogs' part of the last sync (nil: never ran).
 	Private *PrivateSyncStatus `json:"private,omitempty"`
+	// Show is where the display content (show.json) stands. After a sync it
+	// is what that sync made of it; GET /v1/catalog fills it with what is in
+	// use now (Catalog.Show). Nil: the server does not say (never synced, or
+	// every source failed).
+	Show *catalog.ShowState `json:"show,omitempty"`
+	// Skills is where the operating manuals of apps and solutions stand
+	// (catalog.SkillsState): after a sync what that sync made of them; GET
+	// /v1/catalog fills it with what is usable now. Nil as for Show.
+	Skills *catalog.SkillsState `json:"skills,omitempty"`
 }
 
 // NewCatalog builds the holder; it does not sync.
@@ -74,7 +155,26 @@ func NewCatalog(cfg CatalogConfig) *Catalog {
 		cfg.Now = time.Now
 	}
 	c := &Catalog{cfg: cfg}
+	c.interval, c.staleAfter, c.retryGap = cfg.SyncInterval, cfg.StaleAfter, cfg.RetryGap
+	if c.interval <= 0 {
+		c.interval = durationSetting(SyncIntervalEnv, DefaultSyncInterval, time.Minute, 7*24*time.Hour)
+	}
+	if c.staleAfter <= 0 {
+		c.staleAfter = durationSetting(StaleAfterEnv, DefaultStaleAfter, time.Second, 7*24*time.Hour)
+	}
+	if c.retryGap <= 0 {
+		c.retryGap = durationSetting(RetryGapEnv, DefaultRetryGap, time.Second, 24*time.Hour)
+	}
+	c.runCtx = context.Background()
 	c.status = c.loadStatus()
+	// What the last run of the server knew counts: a restart does not make
+	// the catalog look unsynced.
+	if c.status.At != nil {
+		c.lastTry = *c.status.At
+		if c.status.OK && !c.status.Skipped {
+			c.lastOK = *c.status.At
+		}
+	}
 	return c
 }
 
@@ -104,6 +204,64 @@ func (c *Catalog) Index() (*catalog.Index, string, error) {
 	return idx, origin, nil
 }
 
+// Show returns the display content of the public catalog in use and where it
+// stands: the verified show of the cache version in use (or the snapshot's),
+// checked on every read like the index. Without one the pages use the
+// manifests' words: the state is none, or failed (with its CAT-SHOW code)
+// when the last sync met a show it could not use. Private catalogs have no
+// display content here.
+func (c *Catalog) Show() (*catalog.Show, catalog.ShowState) {
+	idx, origin, err := catalog.LoadWith(filepath.Join(c.cfg.CacheDir, "index"), c.cfg.Snapshot, c.keys())
+	if err != nil {
+		return nil, catalog.ShowState{State: catalog.ShowNone}
+	}
+	s, st := catalog.LoadShow(filepath.Join(c.cfg.CacheDir, "index"), c.cfg.Snapshot, c.keys(), idx, origin)
+	if s == nil && st.State == catalog.ShowNone {
+		if last := c.Status().Show; last != nil && last.State == catalog.ShowFailed {
+			return nil, *last
+		}
+	}
+	return s, st
+}
+
+// Skills says which operating manuals of the public catalog's apps and
+// solutions are usable on this machine (keyed "app/<id>", "recipe/<id>": the
+// file is in the cache and its size and sha256 are the ones the signed
+// display content lists) and where the manuals stand overall. A listed
+// manual that is not usable is a failure: with the code the last sync gave
+// it, else CAT-SKILL-01 (not fetched yet). Nothing is downloaded.
+func (c *Catalog) Skills() (map[string]catalog.SkillInfo, catalog.SkillsState) {
+	show, _ := c.Show()
+	if show == nil {
+		return map[string]catalog.SkillInfo{}, catalog.SkillsState{State: catalog.SkillsNone}
+	}
+	_, origin, err := c.Index()
+	if err != nil {
+		return map[string]catalog.SkillInfo{}, catalog.SkillsState{State: catalog.SkillsNone}
+	}
+	var last []catalog.SkillFailure
+	if st := c.Status().Skills; st != nil {
+		last = st.Failed
+	}
+	return catalog.VerifySkills(catalog.SkillFS(filepath.Join(c.cfg.CacheDir, "index"), c.cfg.Snapshot, origin), show, last)
+}
+
+// Skill reads the operating manual of the public catalog's app or solution:
+// kind is catalog.SkillKindApp or SkillKindRecipe. nil, nil when the catalog
+// lists none; the error is the CAT-SKILL-* of a listed manual that is not
+// usable here.
+func (c *Catalog) Skill(kind, id string) (*catalog.SkillDoc, error) {
+	show, _ := c.Show()
+	if show == nil {
+		return nil, nil
+	}
+	_, origin, err := c.Index()
+	if err != nil {
+		return nil, nil
+	}
+	return catalog.ReadSkill(catalog.SkillFS(filepath.Join(c.cfg.CacheDir, "index"), c.cfg.Snapshot, origin), show, kind, id)
+}
+
 // Status returns the last sync result.
 func (c *Catalog) Status() SyncStatus {
 	c.mu.Lock()
@@ -130,9 +288,28 @@ func (c *Catalog) Sync(ctx context.Context) SyncStatus {
 	c.mu.Lock()
 	st.Next = c.status.Next
 	c.status = st
+	if st.At != nil {
+		c.lastTry = *st.At
+		if st.OK && !st.Skipped {
+			c.lastOK = *st.At
+		}
+	}
+	hook := c.afterSync
 	c.mu.Unlock()
 	c.saveStatus(st)
+	if hook != nil {
+		hook(ctx)
+	}
 	return st
+}
+
+// SetAfterSync sets what is called after every sync, whatever it found (the
+// index in use may have changed even when the sync failed, e.g. a private
+// catalog's). nil: nothing.
+func (c *Catalog) SetAfterSync(fn func(ctx context.Context)) {
+	c.mu.Lock()
+	c.afterSync = fn
+	c.mu.Unlock()
 }
 
 func (c *Catalog) syncPublic(ctx context.Context) SyncStatus {
@@ -147,6 +324,14 @@ func (c *Catalog) syncPublic(ctx context.Context) SyncStatus {
 		end := c.cfg.Now()
 		st.At = &end
 		st.Updated, st.Source, st.Attempts = res.Updated, res.Source, res.Attempts
+		if res.Show.State != "" {
+			show := res.Show
+			st.Show = &show
+		}
+		if res.Skills.State != "" {
+			sk := res.Skills
+			st.Skills = &sk
+		}
 		switch {
 		case err != nil:
 			st.Code = catalog.CodeOf(err)
@@ -154,6 +339,9 @@ func (c *Catalog) syncPublic(ctx context.Context) SyncStatus {
 		case res.Updated:
 			st.OK = true
 			st.Message = "已更新到新目录"
+		case res.RemoteSerial > 0 && res.RemoteSerial < res.Serial:
+			st.OK = true
+			st.Message = fmt.Sprintf("没换目录：来源 %s 的序号是 %d，比这台机器在用的 %d 还旧（来源落后了，或是测试发布点序号没调大）", res.Source, res.RemoteSerial, res.Serial)
 		default:
 			st.OK = true
 			st.Message = "目录已是最新"
@@ -162,12 +350,20 @@ func (c *Catalog) syncPublic(ctx context.Context) SyncStatus {
 	return st
 }
 
-// Run syncs once now and then daily at a random time of day until ctx ends.
+// Run syncs once now and then every interval (with jitter) until ctx ends.
 func (c *Catalog) Run(ctx context.Context) {
-	offset := randomDuration(24 * time.Hour)
+	c.mu.Lock()
+	c.runCtx = ctx
+	c.serving = true
+	c.mu.Unlock()
 	for {
+		// The periodic sync takes the same right as a page's: no two at once.
+		c.mu.Lock()
+		c.touching = true
+		c.mu.Unlock()
 		c.Sync(ctx)
-		next := nextDaily(c.cfg.Now(), offset)
+		c.releaseStale()
+		next := c.cfg.Now().Add(nextSyncWait(c.interval))
 		c.mu.Lock()
 		c.status.Next = &next
 		c.mu.Unlock()
@@ -181,14 +377,101 @@ func (c *Catalog) Run(ctx context.Context) {
 	}
 }
 
-// nextDaily is the next time after now that is offset past local midnight.
-func nextDaily(now time.Time, offset time.Duration) time.Time {
-	y, m, d := now.Date()
-	t := time.Date(y, m, d, 0, 0, 0, 0, now.Location()).Add(offset)
-	for !t.After(now) {
-		t = t.Add(24 * time.Hour)
+// nextSyncWait is how long the periodic sync waits after one: the interval
+// plus or minus a random part of up to a tenth of it.
+func nextSyncWait(interval time.Duration) time.Duration {
+	j := interval / syncJitterDiv
+	if j <= 0 {
+		return interval
 	}
-	return t
+	return interval - j + randomDuration(2*j)
+}
+
+// StaleAfter is how old the last good sync may be before a page or `apps
+// outdated` starts one.
+func (c *Catalog) StaleAfter() time.Duration { return c.staleAfter }
+
+// Interval is the wait between two periodic syncs (before the jitter).
+func (c *Catalog) Interval() time.Duration { return c.interval }
+
+// claimStale decides whether a sync should start for someone who looked at
+// the catalog just now, and when it should, takes the right to do it (one at
+// a time). It says no without a trusted key (nothing would be contacted),
+// while another such sync runs, when the last good one is younger than
+// StaleAfter, and when the last attempt, good or not, is younger than
+// RetryGap.
+func (c *Catalog) claimStale() bool {
+	if c == nil || len(c.keys()) == 0 {
+		return false
+	}
+	now := c.cfg.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.touching {
+		return false
+	}
+	if !c.lastOK.IsZero() && now.Sub(c.lastOK) < c.staleAfter {
+		return false
+	}
+	if !c.lastTry.IsZero() && now.Sub(c.lastTry) < c.retryGap {
+		return false
+	}
+	c.touching = true
+	return true
+}
+
+func (c *Catalog) releaseStale() {
+	c.mu.Lock()
+	c.touching = false
+	c.mu.Unlock()
+}
+
+// Stale reports whether TouchStale would start a sync now (read-only).
+func (c *Catalog) Stale() bool {
+	if !c.claimStale() {
+		return false
+	}
+	c.releaseStale()
+	return true
+}
+
+// TouchStale starts a sync in the background when the last good one is older
+// than StaleAfter (see claimStale) and says whether it did. It returns at
+// once: whoever opened the page gets the page as it is, and the next look
+// has the news. The sync belongs to the life of the server (Run's context)
+// and ends after three minutes at most.
+func (c *Catalog) TouchStale() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	serving := c.serving
+	c.mu.Unlock()
+	if !serving || !c.claimStale() {
+		return false
+	}
+	c.mu.Lock()
+	base := c.runCtx
+	c.mu.Unlock()
+	go func() {
+		defer c.releaseStale()
+		ctx, cancel := context.WithTimeout(base, backgroundSyncLimit)
+		defer cancel()
+		c.Sync(ctx)
+	}()
+	return true
+}
+
+// SyncIfStale is TouchStale that waits: it syncs now when the last good sync
+// is older than StaleAfter (and the attempt before it is older than
+// RetryGap) and returns the result with ran true; otherwise it returns the
+// last result with ran false.
+func (c *Catalog) SyncIfStale(ctx context.Context) (st SyncStatus, ran bool) {
+	if !c.claimStale() {
+		return c.Status(), false
+	}
+	defer c.releaseStale()
+	return c.Sync(ctx), true
 }
 
 func randomDuration(max time.Duration) time.Duration {

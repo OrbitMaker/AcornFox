@@ -1,4 +1,4 @@
-//go:build !darwin && !windows
+//go:build !darwin
 
 package setup
 
@@ -7,7 +7,8 @@ import (
 	"errors"
 )
 
-// Linux and other systems: no built-in runtime (Linux servers get Docker
+// Linux, Windows and other systems: no built-in runtime (Windows runs the Linux build inside WSL;
+// the Windows build of this binary is a command-line client only) (Linux servers get Docker
 // from install.sh); "acornfox serve" on Linux only detects Docker.
 const builtinSupported = false
 

@@ -424,6 +424,15 @@ func TestSSHArgvConstruction(t *testing.T) {
 		t.Errorf("argv defaults = %v\nwant %v", got, want)
 	}
 
+	// SSHOptions become -o options before the host (the Mac's own virtual machine
+	// uses its own known_hosts that way).
+	got = sshArgs(Target{SSH: "root@127.0.0.1", Port: 18808, SSHOptions: []string{"UserKnownHostsFile=/k/kh", "StrictHostKeyChecking=yes"}})
+	want = []string{"-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-p", "18808",
+		"-o", "UserKnownHostsFile=/k/kh", "-o", "StrictHostKeyChecking=yes", "root@127.0.0.1", "acornfox proxy"}
+	if !equalStrings(got, want) {
+		t.Errorf("argv with options = %v\nwant %v", got, want)
+	}
+
 	// Custom remote command is preserved.
 	got = sshArgs(Target{SSH: "h", RemoteCommand: "custom cmd"})
 	if got[len(got)-1] != "custom cmd" {

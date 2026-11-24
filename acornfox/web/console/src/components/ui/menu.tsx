@@ -1,8 +1,10 @@
 // 下拉菜单：点按钮打开，点外面或按 Esc 关闭，点菜单项后自动关闭。
+// 样稿第 12 版：菜单从靠近按钮的那一角长出来（右对齐的从右上角，左对齐的从左上角），关闭时缩回同一点；
+// 有离场动画（lib/hooks.ts 的 usePresence），关到一半不挡点击。菜单 12 的圆角、4 的内边距，所以菜单项是 8。
 import * as React from 'react'
 import { Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useEscape } from '@/lib/hooks'
+import { useEscape, usePresence } from '@/lib/hooks'
 
 export function Dropdown({ trigger, children, align = 'end', width = 'w-48' }: {
   trigger: (toggle: () => void, open: boolean) => React.ReactNode
@@ -13,6 +15,7 @@ export function Dropdown({ trigger, children, align = 'end', width = 'w-48' }: {
   const [open, setOpen] = React.useState(false)
   const ref = React.useRef<HTMLDivElement>(null)
   useEscape(open, () => setOpen(false))
+  const pop = usePresence(open)
   React.useEffect(() => {
     if (!open) return
     const h = (e: MouseEvent) => {
@@ -24,11 +27,14 @@ export function Dropdown({ trigger, children, align = 'end', width = 'w-48' }: {
   return (
     <div className="relative" ref={ref}>
       {trigger(() => setOpen((o) => !o), open)}
-      {open && (
+      {pop.mounted && (
         <div
+          ref={pop.ref}
+          data-state={pop.state}
           role="menu"
-          className={cn('absolute top-full z-40 mt-1 animate-in overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md', align === 'end' ? 'right-0' : 'left-0', width)}
-          onClick={() => setOpen(false)}
+          className={cn('ov ov-pop absolute top-full z-40 mt-1 overflow-hidden rounded-lg border bg-popover p-1 text-popover-foreground shadow-md', align === 'end' ? 'right-0 [--ov-origin:top_right]' : 'left-0 [--ov-origin:top_left]', width)}
+          // 用捕获阶段：菜单项自己拦了冒泡（免得顺带点到外面的卡片）时，菜单照样会关。
+          onClickCapture={() => setOpen(false)}
         >
           {children}
         </div>
@@ -48,7 +54,7 @@ export function MenuItem({ icon, children, onClick, danger, hint, active, href, 
   external?: boolean
 }) {
   const cls = cn(
-    'flex w-full select-none items-center gap-2 rounded-sm px-2 py-1 text-left text-sm outline-none transition-colors hover:bg-accent focus-visible:bg-accent [&_svg]:size-3.5 [&_svg]:text-muted-foreground',
+    'flex w-full select-none items-center gap-2 rounded-md px-2 py-1 text-left text-sm outline-none transition-colors hover:bg-accent focus-visible:bg-accent [&_svg]:size-icon [&_svg]:text-muted-foreground',
     danger && 'text-danger [&_svg]:text-danger',
     active && 'font-medium',
   )

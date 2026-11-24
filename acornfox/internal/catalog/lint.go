@@ -94,6 +94,7 @@ const (
 	CodeEnvExclusive  = "CAT-LINT-49" // two env entries with the same key whose ifs cannot be shown never to hold at once (each needs an if; the same reference compared == with different words, or == and != with the same word)
 	CodeCommandSecret = "CAT-LINT-50" // container.command refers to a secret value: the start command's arguments are visible to every user of the host and in docker inspect; secrets go in env
 	CodeNotRef        = "CAT-LINT-51" // warning: a {{…}} that is not a reference (no known kind): it is kept as written; fine for an app's own template syntax, a mistake when a reference was meant
+	CodeWatch         = "CAT-LINT-52" // an on_change init step's watch lists something that can never change (a hidden parameter) or is no variable (a reference of another kind)
 )
 
 // Problem is one finding of Lint.
@@ -833,10 +834,16 @@ func checkManifest(dir, rel, sub string, m Manifest, svc *serviceTypeSet, add ad
 	// checkSteps checks one list of steps and returns the keys it saves and
 	// which of them are secret. A step may use what earlier steps of the
 	// same list saved, never its own.
-	checkSteps := func(at string, steps []Step, sc refScope) (map[string]bool, map[string]bool) {
+	checkSteps := func(at string, steps []Step, sc refScope, positions ...int) (map[string]bool, map[string]bool) {
 		saved, savedSecret := map[string]bool{}, map[string]bool{}
 		for i, st := range steps {
-			where := at + "/" + st.Label(i)
+			// positions: where each step stands in the manifest's whole
+			// list (init steps are checked a group at a time).
+			pos := i
+			if len(positions) == len(steps) {
+				pos = positions[i]
+			}
+			where := at + "/" + st.Label(pos)
 			if r := st.HTTP.Retry; r != nil && !st.IsExec() {
 				method := st.HTTP.Method
 				if method == "" {
@@ -891,7 +898,37 @@ func checkManifest(dir, rel, sub string, m Manifest, svc *serviceTypeSet, add ad
 		}
 		return saved, savedSecret
 	}
-	checkSteps("/init", m.Init, refScope{steps: "init"})
+	// The init steps run in groups (InitGroups): the steps of one trigger
+	// (and, for on_change, one watch list) share a session, so what a step
+	// may use that an earlier one saved is looked for in its own group only.
+	for _, g := range InitGroups(m.Init) {
+		steps := make([]Step, len(g.Index))
+		for i, at := range g.Index {
+			steps[i] = m.Init[at]
+		}
+		checkSteps("/init", steps, refScope{steps: "init"}, g.Index...)
+	}
+	for i, st := range m.Init {
+		if st.Trigger() != StepOnChange {
+			continue
+		}
+		at := "/init/" + st.Label(i) + "/watch"
+		for _, ref := range st.Watch {
+			kind, rest, _ := strings.Cut(ref, ".")
+			switch kind {
+			case "params":
+				if p, ok := params[rest]; ok && p.Hidden {
+					add(CodeWatch, LevelError, rel, at, "watch 里的 %s 是平台生成的参数（hidden），装好以后不会变，这一步永远不会跑：去掉它，或者改看别的", ref)
+					continue
+				}
+			case "platform", "uses":
+			default:
+				add(CodeWatch, LevelError, rel, at, "watch 里只能写 params.<名>、platform.<名>、uses.<需要名>.<项>，%s 不是", ref)
+				continue
+			}
+			checkRef(at, ref, refScope{optionalOK: true})
+		}
+	}
 	providedAt := map[string]int{}
 	for i, p := range m.Provides {
 		at := fmt.Sprintf("/provides/%d", i)

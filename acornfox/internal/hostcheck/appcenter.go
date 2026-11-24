@@ -34,8 +34,9 @@ import (
 )
 
 // CatalogSyncStale is how old the last sync may be before doctor warns: the
-// server syncs once a day, so two days without one means it did not run.
-const CatalogSyncStale = 50 * time.Hour
+// server syncs every 6 hours (and when someone looks at the app center), so
+// a day without one means it did not run.
+const CatalogSyncStale = 24 * time.Hour
 
 // CatalogSync is what acornfox-server knows about the app catalog.
 type CatalogSync struct {
@@ -47,6 +48,73 @@ type CatalogSync struct {
 	Source  string // the source that answered
 	Serial  int64  // the public catalog in use
 	Origin  string // cache | snapshot
+	// The display content (show.json) the catalog in use goes with: State is
+	// ok, none or failed ("" = the server does not say, nothing is
+	// reported); Code is the CAT-SHOW-* of a failure.
+	Show ShowInUse
+	// The operating manuals the display content lists (CAT-SKILL-*).
+	Skills SkillsInUse
+}
+
+// ShowInUse is where the display content stands.
+type ShowInUse struct {
+	State   string
+	Code    string
+	Message string
+	Serial  int64
+}
+
+// SkillsInUse is where the operating manuals of apps and solutions stand.
+type SkillsInUse struct {
+	State   string // ok | none | failed ("" = the server does not say)
+	Count   int
+	Code    string // CAT-SKILL-* of the first failure
+	Message string
+}
+
+// CheckCatalogSkills adds one line about the operating manuals (CAT-SKILL-*).
+// Nothing when the server does not report them, and nothing when the catalog
+// lists none. It only warns: apps install without a manual and the AI
+// workbench then follows the general Skill.
+func CheckCatalogSkills(r Reporter, s CatalogSync) {
+	const okCode = "SETUP-SYNC-01"
+	switch s.Skills.State {
+	case "ok":
+		r.Add(true, okCode, "操作手册：%d 份都在用，AI 工作台装应用前可以先取（acornfox catalog skill 应用）", s.Skills.Count)
+	case "failed":
+		code := s.Skills.Code
+		if code == "" {
+			code = "CAT-SKILL-01"
+		}
+		msg := strings.TrimSpace(s.Skills.Message)
+		if !strings.HasPrefix(msg, code) {
+			msg = code + " " + msg
+		}
+		r.Warn(code, "操作手册：没取全（%s），能用的 %d 份；没有手册的应用照通用 Skill 装，不受影响。运行 acornfox faults %s 看怎么办", msg, s.Skills.Count, code)
+	}
+}
+
+// CheckCatalogShow adds one line about the display content of the app
+// catalog (CAT-SHOW-*). Nothing when the server does not report it. It only
+// warns: apps install without it and the pages use the manifests' words.
+func CheckCatalogShow(r Reporter, s CatalogSync) {
+	const okCode = "SETUP-SYNC-01"
+	switch s.Show.State {
+	case "ok":
+		r.Add(true, okCode, "展示内容：在用（序号 %d），应用中心的一句话、角标和介绍来自它", s.Show.Serial)
+	case "none":
+		r.Add(true, okCode, "展示内容：这份目录没带展示内容，应用中心用清单里的名字和一句话")
+	case "failed":
+		code := s.Show.Code
+		if code == "" {
+			code = "CAT-SHOW-03"
+		}
+		msg := strings.TrimSpace(s.Show.Message)
+		if !strings.HasPrefix(msg, code) {
+			msg = code + " " + msg
+		}
+		r.Warn(code, "展示内容：没法用（%s），应用中心退回用清单里的名字和一句话，装应用不受影响。运行 acornfox faults %s 看怎么办", msg, code)
+	}
 }
 
 // CheckCatalogSync adds one line about the app catalog sync.
@@ -65,7 +133,7 @@ func CheckCatalogSync(r Reporter, s CatalogSync, now time.Time) {
 		}
 		r.Warn(code, "应用目录：%s同步失败（%s），继续用%s。运行 acornfox catalog sync --json 看每个来源的结果", agoText(now, *s.At), msg, inUse)
 	case now.Sub(*s.At) > CatalogSyncStale:
-		r.Warn(code, "应用目录：上次同步是 %s，超过两天没同步（后台服务每天同步一次，多半是它停过），在用%s。运行 acornfox catalog sync", agoText(now, *s.At), inUse)
+		r.Warn(code, "应用目录：上次同步是 %s，超过一天没同步（后台服务每 6 小时同步一次，多半是它停过），在用%s。运行 acornfox catalog sync", agoText(now, *s.At), inUse)
 	default:
 		from := ""
 		if s.Source != "" {

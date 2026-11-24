@@ -33,6 +33,16 @@ type rollbackReply struct {
 // rollback implements POST /v1/apps/{app}/rollback: roll back to the newest
 // version that can be rolled back to (the app view's rollback_target_seq).
 func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
+	// A body with "plan" or "confirm" is the rollback to before an upgrade
+	// (upgrade.go); anything else is this one.
+	if body, ok := upgradeRollbackAsked(r); ok {
+		// Only for an app from the app center: the user's own projects keep
+		// the old route as it was (it refuses fields it does not know).
+		if a, err := s.store.GetApp(r.Context(), r.PathValue("app")); err == nil && a.CatalogID != "" {
+			s.runRollback(w, r, body)
+			return
+		}
+	}
 	s.handleRollback(w, r, 0)
 }
 

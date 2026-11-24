@@ -12,11 +12,22 @@ import (
 
 const appsUsage = `用法：acornfox apps
       acornfox apps vars 应用 [--reveal]
+      acornfox apps set 应用 名=值... [--plan] [--yes]
+      acornfox apps reapply 应用 [--plan] [--yes]      acornfox apps reapply --all [--plan] [--yes]
+      acornfox apps affected [--var 变量]
+      acornfox apps outdated
+      acornfox apps upgrade 应用 [--plan] [--yes]      acornfox apps rollback 应用 [--plan] [--yes]
 
 apps            列出服务器上的所有应用：名字、状态、地址。只读
                 --json 里只本机能打开的应用另带 open_hint（怎么从自己电脑打开：ask、ask_yes_command、
                 lan_url_after_expose、command、tunnel_command 等），各项的含义看 acornfox status -h
-apps vars 应用  看一个从应用中心装的应用是用什么设置装的。只读（acornfox apps vars -h 看详情）`
+apps vars 应用  看一个从应用中心装的应用是用什么设置装的。只读（acornfox apps vars -h 看详情）
+apps set 应用   改它的设置并让它生效：重算环境变量和配置文件、重启、失败自动退回（acornfox apps set -h）
+apps reapply    平台变量变了、服务变了、对外方式变了之后，让应用用上现在的值（acornfox apps reapply -h）
+apps affected   看哪些应用的设置落在后面了，换之前看谁用到某个变量。只读（acornfox apps affected -h）
+apps outdated   看哪些应用在应用中心里有新版本、哪些留着升级前的快照。只读（acornfox apps outdated -h）
+apps upgrade    升级一个应用：先留快照、换新版本、失败自动退回；要用户同意（acornfox apps upgrade -h）
+apps rollback   升级后出问题，退回到升级前；升级后的新数据会没有，要用户同意（acornfox apps rollback -h）`
 
 const appsVarsUsage = `用法：acornfox apps vars 应用 [--reveal]
 
@@ -28,20 +39,21 @@ const appsVarsUsage = `用法：acornfox apps vars 应用 [--reveal]
   现在的值   安装时保存的值
   值从哪来   用户填的、配方预填的、清单默认值、平台生成的、平台算的、用户改的（--set platform.名字=值）、
              接上旧数据时恢复的；旧版本装的应用那时不记这个，照实写“装时的值”
-  能不能改   清单写的（不能改、随时能改、重装才能改）；平台变量只能在安装时改
+  能不能改   清单写的（不能改、随时能改、重装才能改）；没写的按能改算（平台生成的密码、密钥除外）；平台变量里能改的
+             （acornfox catalog platform-vars 看）可以只给这个应用改。能改的，那一行下面写改它的命令（edit_how）
   和现在的不一样  平台变量是装的时候算好写进应用的；装好后改了对外方式、绑了域名（或本机设置变了），
-             现在算出来的不一样时，那一行下面写 APP-VARS-01 和现在的值。这一版不会自动改写应用，
-             应用里用的还是装时的值（acornfox faults APP-VARS-01 看怎么办）
+             现在算出来的不一样时，那一行下面写 APP-VARS-01 和现在的值。应用里用的还是装时的值，
+             不会自动改写：用 acornfox apps reapply 应用 让它跟上（acornfox faults APP-VARS-01 看怎么办）
   还会说明保存的清单是安装时存的、后来补存的，还是没存。清单没存的应用只列保存的值，分不出类别，
   自定义变量一律按密码遮住。
-  这一版只能看，不能改：改设置的功能还没有。
+  这条命令只能看；改设置用 acornfox apps set，让应用跟上用 acornfox apps reapply。
 副作用：无，只读。密码和 Key 默认只显示后 4 位（不到 12 个字符的全遮）。
 参数：
   --reveal   显示完整的密码和 Key（会出现在屏幕和 --json 输出里，注意别贴到公开的地方）
 输出（--json）：{"ok":true,"app":…,"from_catalog":true,"catalog_id":…,"version":…,"source":{id,name},
-  "manifest":{saved, source(install|backfill|""), source_label, sha256, saved_at},"revealed":false,"can_change":false,
+  "manifest":{saved, source(install|backfill|""), source_label, sha256, saved_at},"revealed":false,"can_change":true,
   "vars":[{name, layer(system|custom), layer_label, class, class_label, label, value, secret, masked,
-           origin, origin_label, editable, editable_label, used,
+           origin, origin_label, editable, editable_label, can_edit, edit_how, used,
            value_now, differs, code, fix}],"notes":[…]}
   平台变量的行另有 value_now（现在算出来的值；value 是装时的、应用现在用的）；两个不一样、清单又用到它时
   differs 为 true，code 是 APP-VARS-01，fix 是怎么办，notes 里也有一句。
@@ -131,12 +143,15 @@ func (a *app) cmdAppsVars(ctx context.Context, args []string) int {
 		}
 		a.out.human("  %s = %s", head, val)
 		a.out.human("      [%s] %s；%s%s", class, x.OriginLabel, x.EditableLabel, note)
+		if x.CanEdit && x.EditHow != "" {
+			a.out.human("      改它：%s", x.EditHow)
+		}
 		if x.Differs && x.ValueNow != nil {
 			now := *x.ValueNow
 			if now == "" {
 				now = "（空）"
 			}
-			a.out.human("      %s 现在算出来是 %s，和装时的不一样；应用里用的还是装时的值", x.Code, now)
+			a.out.human("      %s 现在算出来是 %s，和装时的不一样；应用里用的还是装时的值（让它跟上：acornfox apps reapply %s）", x.Code, now, v.App)
 		}
 	}
 	if len(v.Vars) == 0 {

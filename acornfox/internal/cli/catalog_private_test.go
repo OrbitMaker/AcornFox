@@ -16,6 +16,10 @@ type fakePrivateAPI struct {
 	*fakeAPI
 	gotCode string
 	err     error
+	// What CatalogSyncIfStale answers (nil: an empty answer) and how many
+	// times it was asked.
+	ifStale      *client.CatalogSync
+	ifStaleCalls int
 }
 
 func (f *fakePrivateAPI) Catalog(context.Context) (client.CatalogList, error) {
@@ -26,6 +30,13 @@ func (f *fakePrivateAPI) CatalogApp(context.Context, string) (client.CatalogApp,
 }
 func (f *fakePrivateAPI) CatalogSync(context.Context) (client.CatalogSync, error) {
 	return client.CatalogSync{}, nil
+}
+func (f *fakePrivateAPI) CatalogSyncIfStale(context.Context) (client.CatalogSync, error) {
+	f.ifStaleCalls++
+	if f.ifStale != nil {
+		return *f.ifStale, nil
+	}
+	return client.CatalogSync{OK: true}, nil
 }
 func (f *fakePrivateAPI) Install(context.Context, client.InstallRequest) (client.InstallTask, error) {
 	return client.InstallTask{}, nil

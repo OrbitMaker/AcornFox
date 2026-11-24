@@ -5,16 +5,17 @@
 //
 //  1. how to reach Docker (DOCKER_HOST, the current docker context, then the
 //     platform default socket or named pipe) — docker.go;
-//  2. how acornfox starts at boot or login (systemd on Linux, a per-user
-//     LaunchAgent on macOS, a logon scheduled task on Windows) — autostart_*.go;
+//  2. how acornfox starts at boot or login (systemd on Linux and inside WSL, a
+//     per-user LaunchAgent on macOS) — autostart.go;
 //  3. where files live (Paths below);
 //  4. what "host metrics" means (Linux reads /proc; macOS and Windows show
 //     the Docker virtual machine as reported by the Docker API) — see
 //     DesktopMode and internal/apiserver/host_dockervm.go.
 //
 // Linux keeps the two-process layout (server + runner under separate
-// accounts, installed by install.sh). macOS and Windows run a single
-// "acornfox serve" process under the logged-in user.
+// accounts, installed by install.sh); Windows runs that same Linux layout
+// inside WSL. macOS runs a single "acornfox serve" process under the
+// logged-in user.
 package platform
 
 import (
@@ -27,8 +28,9 @@ import (
 var GOOS = runtime.GOOS
 
 // DesktopMode reports whether acornfox runs as a single per-user process
-// (macOS, Windows) instead of the Linux server + runner pair.
-func DesktopMode() bool { return GOOS == "darwin" || GOOS == "windows" }
+// (macOS) instead of the Linux server + runner pair. Windows is not a desktop
+// mode: AcornFox runs inside WSL as the Linux pair (install-windows.ps1).
+func DesktopMode() bool { return GOOS == "darwin" }
 
 // Paths are the file locations for this platform.
 type Paths struct {
@@ -48,7 +50,6 @@ var UserHome = os.UserHomeDir
 //
 //	Linux    /var/lib/acornfox, /run/acornfox/api.sock
 //	macOS    ~/Library/Application Support/AcornFox
-//	Windows  %LOCALAPPDATA%\AcornFox
 //
 // ACORNFOX_DATA_DIR overrides the data directory on every platform (tests,
 // several instances on one machine).
@@ -73,24 +74,12 @@ func DefaultPaths() Paths {
 }
 
 func desktopDataDir() string {
-	if GOOS == "windows" {
-		base := Env("LOCALAPPDATA")
-		if base == "" {
-			if home, err := UserHome(); err == nil {
-				base = filepath.Join(home, "AppData", "Local")
-			}
-		}
-		return filepath.Join(base, "AcornFox")
-	}
 	home, _ := UserHome()
 	return filepath.Join(home, "Library", "Application Support", "AcornFox")
 }
 
 // BinaryName is the executable file name on this platform.
 func BinaryName() string {
-	if GOOS == "windows" {
-		return "acornfox.exe"
-	}
 	return "acornfox"
 }
 

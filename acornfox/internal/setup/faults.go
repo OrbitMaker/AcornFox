@@ -35,21 +35,6 @@ var Faults = []FaultDef{
 	{Code: "SETUP-RT-04", Title: "Docker Desktop 没有按时启动",
 		Causes: []string{"Docker Desktop 第一次启动要接受协议或登录", "它正在更新", "WSL 2（Windows）没有装好"},
 		Next:   "看一眼 Docker Desktop 的窗口，处理完它的提示后点“重试”；或者改用 AcornFox 自带的运行环境"},
-	{Code: "SETUP-WIN-01", Title: "需要管理员确认才能打开 WSL 2",
-		Causes: []string{"这台电脑没有开 WSL 2 功能"},
-		Next:   "点“继续”，在 Windows 弹出的管理员确认里选“是”", NeedsUser: true},
-	{Code: "SETUP-WIN-02", Title: "需要重启电脑",
-		Causes: []string{"刚打开 WSL 2 / 虚拟机平台功能，Windows 要重启才生效"},
-		Next:   "保存好手上的工作后重启电脑；重启后 AcornFox 会自动接着装", NeedsUser: true},
-	{Code: "SETUP-WIN-03", Title: "这台电脑不能运行 WSL 2 虚拟机",
-		Causes: []string{"BIOS/UEFI 里关了虚拟化（Intel VT-x / AMD-V）", "这台 Windows 本身是虚拟机且没开嵌套虚拟化", "Windows 版本太旧（需要 Windows 10 2004 以上或 Windows 11）"},
-		Next:   "在 BIOS 里打开虚拟化后重试；虚拟机里运行的话，要在宿主机上为它打开嵌套虚拟化", NeedsUser: true},
-	{Code: "SETUP-WIN-04", Title: "管理员确认被取消或失败",
-		Causes: []string{"在管理员确认里选了“否”", "当前账号不是管理员"},
-		Next:   "点“继续”再试一次，在弹窗里选“是”；不是管理员账号的话，请管理员登录后操作", NeedsUser: true},
-	{Code: "SETUP-WIN-05", Title: "WSL 没有把端口转发到本机",
-		Causes: []string{"WSL 的 localhost 转发被关掉了（%USERPROFILE%\\.wslconfig 里写了 localhostForwarding=false）", "WSL 网络服务出错"},
-		Next:   "把 .wslconfig 里的 localhostForwarding 改回 true 或删掉这一行，运行 wsl --shutdown，再运行 acornfox setup --resume"},
 	{Code: "SETUP-EDGE-01", Title: "网关组件没有准备好",
 		Causes: []string{"入口镜像没准备好（看上一条下载记录；故障编号 EDGE-02）", "端口 18807 或 18810–18859 被别的程序占了", "Docker 里旧的入口容器卡住"},
 		Next:   "点“重试”；端口被占时运行 acornfox doctor 看是哪个端口，关掉占用的程序后再试"},
@@ -102,11 +87,11 @@ var Faults = []FaultDef{
 	{Code: "SETUP-CLOCK-01", Title: "本机时钟不准，或者没开网络对时",
 		Causes: []string{"没开网络对时（timedatectl 里 NTP service 是 inactive）", "开了网络对时但连不上时间服务器（有的云主机屏蔽了外网的时间服务器，要改用云厂商内网的）", "虚拟机暂停过或宿主机休眠后，时钟没追上", "有人手动改过系统时间"},
 		Next:   "先问用户，再运行 sudo timedatectl set-ntp true 打开网络对时，过一两分钟用 timedatectl 看 System clock synchronized 是否为 yes，然后再运行 acornfox doctor；一直同步不上的云主机，按云厂商文档把 chrony 或 systemd-timesyncd 改成内网时间服务器。时钟和下载网关差 300 秒以上时，下载网关会拒绝这台机器（GW-AUTH-01）：应用中心的镜像改从公共源拉，私有目录连不上；AcornFox 会按网关时间自动重试一次，但还是要把时钟校准", NeedsUser: true},
-	// The Mac build of this release is a command-line client only
-	// (maclocal.go): install, serve and setup/doctor against the Mac itself
-	// stop with this code.
-	{Code: MacLocalCode, Title: "Mac 版只有命令行客户端",
-		Causes: []string{"这个版本的 Mac 版只当命令行客户端，用来管理 Linux 服务器上的 AcornFox；在 Mac 本机安装和运行（install、serve，以及对本机的 setup、doctor）还没有开放"},
+	// The Mac build does not install a plain local service (maclocal.go):
+	// install and serve stop with this code; AcornFox on a Mac is the virtual
+	// machine of acornfox mac install (internal/macvm).
+	{Code: MacLocalCode, Title: "Mac 版的 install、serve 不能直接装本机服务",
+		Causes: []string{"acornfox install、serve 是旧的“本机直接装”模式，在 Mac 上已关闭；Mac 本机版是用 get.sh 装进苹果 container 的虚拟机（acornfox mac install）"},
 		Next:   MacLocalMessage + "。" + MacLocalHint, NeedsUser: true},
 	{Code: "SETUP-GEN-01", Title: "准备运行环境时出错",
 		Causes: []string{"见错误信息"},

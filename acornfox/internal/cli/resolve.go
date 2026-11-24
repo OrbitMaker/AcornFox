@@ -99,7 +99,11 @@ func (a *app) dial(ctx context.Context, t client.Target) (client.API, error) {
 	if a.connect == nil {
 		return nil, &client.Error{Diag: client.Diagnosis{Stage: "connect", Code: "server_down", Message: "内部错误：未配置连接器"}}
 	}
-	return a.connect(ctx, t)
+	api, err := a.connect(ctx, t)
+	if err == nil && api != nil {
+		a.checkServerNewer(ctx, t, api)
+	}
+	return api, err
 }
 
 // resolveAppArg resolves the target and app for commands that take an

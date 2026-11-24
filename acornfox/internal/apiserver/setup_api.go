@@ -54,7 +54,7 @@ func (s *server) getSetupEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": evs, "resync": resync, "seq": s.setup.Status().Seq})
 }
 
-// POST /v1/setup/start {"runtime","mirror","confirm_admin"}.
+// POST /v1/setup/start {"runtime","mirror"}.
 func (s *server) postSetupStart(w http.ResponseWriter, r *http.Request) {
 	if s.setup == nil {
 		writeError(w, http.StatusNotFound, "not_found", "这台服务器没有运行环境准备流程")

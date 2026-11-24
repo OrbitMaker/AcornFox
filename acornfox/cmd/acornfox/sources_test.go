@@ -59,14 +59,30 @@ func TestSourcesCommand(t *testing.T) {
 		China     bool                           `json:"china"`
 		DockerHub []struct{ Host, Layer string } `json:"docker_hub"`
 		GHCR      []struct{ Host string }        `json:"ghcr"`
+		Skipped   []string                       `json:"upstream_skipped"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil || !got.OK || !got.China {
 		t.Fatalf("%v %s", err, out.String())
 	}
 	if got.DockerHub[0].Host != "abc.mirror.aliyuncs.com" || got.DockerHub[0].Layer != "user" ||
 		got.DockerHub[1].Host != runner.TencentRegistryMirror || got.DockerHub[1].Layer != "cloud" ||
-		got.DockerHub[len(got.DockerHub)-1].Host != runner.DockerHubRegistry || got.GHCR[0].Host != "ghcr.nju.edu.cn" {
+		got.GHCR[0].Host != "ghcr.nju.edu.cn" {
 		t.Fatalf("order %s", out.String())
+	}
+	// Docker Hub and ghcr.io themselves are blocked in China: not in the
+	// lists, said so in the output.
+	for _, h := range got.DockerHub {
+		if h.Host == runner.DockerHubRegistry {
+			t.Fatalf("Docker Hub listed for China: %s", out.String())
+		}
+	}
+	if len(got.GHCR) != 1 || len(got.Skipped) != 2 || got.Skipped[0] != runner.DockerHubRegistry || got.Skipped[1] != runner.GHCRRegistry {
+		t.Fatalf("upstream_skipped %s", out.String())
+	}
+	out.Reset()
+	if rc := runSources(nil, &out, &errb); rc != 0 || !strings.Contains(out.String(), "不用 "+runner.DockerHubRegistry+" 本身：国内被屏蔽") ||
+		!strings.Contains(out.String(), "ACORNFOX_REGISTRY_MIRRORS") {
+		t.Fatalf("text: %s", out.String())
 	}
 
 	fakeSourcesProbe(t, map[string]runner.ProbeResult{
@@ -124,6 +140,11 @@ func TestDoctorRegistry(t *testing.T) {
 	if !r.OK || len(r.Items) != 2 || !strings.Contains(r.Items[0].Text, "现在先用 dockerproxy.net（别人公开的国内副本，1.9 MB/s）") ||
 		r.Items[1].Code != "SETUP-NET-03" || !strings.Contains(r.Items[1].Text, "docker.1panel.live 拒绝访问（403）（跳过）") {
 		t.Fatalf("%+v", r.Items)
+	}
+	for _, it := range r.Items {
+		if strings.Contains(it.Text, runner.DockerHubRegistry) {
+			t.Fatalf("China: Docker Hub is not probed or reported: %+v", r.Items)
+		}
 	}
 
 	fakeSourcesProbe(t, map[string]runner.ProbeResult{

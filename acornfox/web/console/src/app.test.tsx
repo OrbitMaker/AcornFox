@@ -1,12 +1,13 @@
 // 页面级测试：用假的接口（替换 fetch）把控制台渲染出来，走应用中心的主要路径。
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 import { Tile } from './components/bits'
 import { OpenHintBlock } from './pages/apps/open-hint'
+import { ConsoleProvider } from './state'
 import { ToastProvider } from './components/ui/toast'
 import { FORMER_NOTE, NEEDS, app, catalog, catalogFormer, catalogNeedsUpgrade, hermesDetail, hermesWithModel, newApiDetail, resources, task } from './test/fixtures'
-import type { TaskView } from './lib/types'
+import type { CatalogView, TaskView } from './lib/types'
 
 type Handler = (url: string, init?: RequestInit) => unknown
 let routes: Record<string, Handler>
@@ -44,12 +45,26 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
 })
+
+// stubClipboard：把“复制”接到一个数组上，看复制出去的文字里有什么（故障编号、任务号只放在复制给 AI 工作台的文字里）。
+function stubClipboard(): string[] {
+  const copied: string[] = []
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => { copied.push(t) } } })
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
+  return copied
+}
 
 async function openStore() {
   render(<App />)
   await screen.findByRole('heading', { name: '应用中心' })
   await screen.findAllByTestId('catalog-app')
+  // 占位形状换成真内容时页面会重画一次；等占位都没了、卡片稳定在页面上再往下查（开发机忙时偶发查到半截）
+  await waitFor(() => {
+    expect(screen.queryAllByTestId('skeleton')).toHaveLength(0)
+    expect(screen.getAllByTestId('catalog-app').length).toBeGreaterThan(0)
+  })
 }
 
 describe('应用中心', () => {
@@ -59,18 +74,22 @@ describe('应用中心', () => {
     expect(cards.length).toBe(2)
     expect(within(cards[0]).getByText('Hermes 智能体')).toBeTruthy()
     expect(within(cards[1]).getByText('New API')).toBeTruthy()
-    expect(screen.getByText('Hermes 智能体 + New API')).toBeTruthy()
-    expect(screen.getByText('New API 模型网关')).toBeTruthy()
+    // 解决方案在上：只有几个应用串起来的配方算（只装一个应用的配方和直接装那个应用是一回事，不摆）
+    const sol = screen.getAllByTestId('catalog-recipe')
+    expect(sol.length).toBe(1)
+    expect(within(sol[0]).getByText('Hermes 智能体 + New API')).toBeTruthy()
+    expect(screen.queryByText('New API 模型网关')).toBeNull()
     // 目录没有配“找专人部署”，页面上就没有，也没有价格
     expect(screen.queryByText(/找专人/)).toBeNull()
     expect(screen.queryByText(/¥/)).toBeNull()
   })
 
-  it('目录里只有一个分类时也显示分类标签（全部 + AI）', async () => {
+  it('目录里只有一个分类时也显示货架标签（全部 + AI）', async () => {
     await openStore()
-    const tabs = screen.getByRole('tablist', { name: '分类' })
-    expect(within(tabs).getByRole('tab', { name: '全部' })).toBeTruthy()
-    expect(within(tabs).getByRole('tab', { name: 'AI' })).toBeTruthy()
+    const tabs = screen.getByRole('tablist', { name: '货架' })
+    // 标签后面带这一格里有几个应用
+    expect(within(tabs).getByRole('tab', { name: /^全部/ })).toBeTruthy()
+    expect(within(tabs).getByRole('tab', { name: /^AI/ })).toBeTruthy()
   })
 
   it('详情页不把 javascript: 之类的主页、视频地址做成链接', async () => {
@@ -121,17 +140,22 @@ describe('应用中心', () => {
     expect(container.querySelector('img')!.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
   })
 
-  it('已安装的应用卡片给“已安装 · 管理”，点了进我的应用', async () => {
+  it('已装好的应用卡片标“已装好”，按钮是“去管理”，点了进我的应用', async () => {
     routes['GET /v1/catalog'] = () => ({ ...catalog, apps: catalog.apps.map((a) => (a.id === 'new-api' ? { ...a, installed: ['new-api'] } : a)) })
     routes['GET /v1/apps/new-api'] = () => app({ name: 'new-api' })
     await openStore()
-    fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '已安装 · 管理' }))
+    const card = screen.getAllByTestId('catalog-app')[1]
+    expect(within(card).getByText('已装好')).toBeTruthy()
+    // 这个应用在“我的应用”里还没读到地址时，主按钮就是“去管理”；没有“安装”按钮
+    expect(within(card).getByRole('link', { name: '去管理' }).getAttribute('href')).toBe('#app-new-api')
+    expect(within(card).queryByRole('button', { name: '安装' })).toBeNull()
+    fireEvent.click(card)
     expect(location.hash).toBe('#app-new-api')
   })
 
   it('搜不到时提示', async () => {
     await openStore()
-    fireEvent.change(screen.getByLabelText('搜索应用'), { target: { value: '不存在的东西' } })
+    fireEvent.change(screen.getByLabelText('找应用'), { target: { value: '不存在的东西' } })
     expect(screen.getByText(/没找到/)).toBeTruthy()
   })
 
@@ -153,10 +177,13 @@ describe('应用中心', () => {
     const card = screen.getAllByTestId('catalog-app')[1]
     fireEvent.click(within(card).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    await within(dialog).findByText('acornfox install new-api')
-    expect(within(dialog).getByTestId('mem-check').textContent).toContain('要 512 MB · 剩 5 GB')
+    await within(dialog).findByTestId('mem-check')
+    // 弹窗里不放命令行（命令在应用页的“技术信息”里）；够不够内存只说一句，具体数字在悬停提示里
+    expect(within(dialog).queryByText(/acornfox install/)).toBeNull()
+    expect(within(dialog).getByTestId('mem-check').textContent).toContain('这台机器装得下')
+    expect(within(dialog).getByTitle('要 512 MB · 剩 5 GB')).toBeTruthy()
     fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
-    await within(dialog).findByText('下载镜像')
+    await within(dialog).findByText('下载应用')
     const post = calls.find((c) => c.method === 'POST' && c.url === '/v1/catalog/install')!
     expect(post.body).toEqual({ app: 'new-api' })
     expect(post.csrf).toBe('tok')
@@ -170,7 +197,7 @@ describe('应用中心', () => {
     // 只本机（127.0.0.1）：不给打不开的链接，给在自己电脑上运行的 acornfox open
     expect(within(dialog).queryByRole('link', { name: /打开/ })).toBeNull()
     expect(within(dialog).getByTestId('open-hint').textContent).toContain('acornfox open new-api')
-    expect(within(dialog).getByText(/127.0.0.1:18810（只本机）/)).toBeTruthy()
+    expect(within(dialog).getByText(/127.0.0.1:18810（只这台机器）/)).toBeTruthy()
   })
 
   it('装好后只本机：服务器在局域网时确认后一键改成局域网，给局域网地址', async () => {
@@ -194,11 +221,10 @@ describe('应用中心', () => {
     expect(box.textContent).not.toContain('http://192.168.1.20:18811')
     expect(within(box).getByTestId('open-ssh').textContent).toContain('ssh -N -L 18811:127.0.0.1:18811 用户@服务器地址')
     expect(within(box).getByTestId('open-ssh').textContent).toContain('http://127.0.0.1:18811')
-    fireEvent.click(within(box).getByRole('button', { name: '让局域网里的电脑能打开' }))
+    fireEvent.click(within(box).getByRole('button', { name: '让家里的电脑、手机也能打开' }))
     expect(calls.some((c) => c.method === 'PATCH')).toBe(false) // 先确认
-    expect(within(box).getByText(/要用它自己的账号密码登录/)).toBeTruthy()
-    expect(within(box).getByText(/所有网卡上开放端口 18811/)).toBeTruthy()
-    fireEvent.click(within(box).getByRole('button', { name: '确认改成局域网' }))
+    expect(within(box).getByText(/要用它自己的密码登录/)).toBeTruthy()
+    fireEvent.click(within(box).getByRole('button', { name: '好，改' }))
     const done = await within(box).findByTestId('open-lan-done')
     expect(within(done).getByRole('link').getAttribute('href')).toBe('http://192.168.1.20:18811')
     expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: 'lan' })
@@ -225,19 +251,20 @@ describe('应用中心', () => {
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
     const box = await within(dialog).findByTestId('open-hint', undefined, { timeout: 3000 })
-    expect(within(dialog).getByTestId('first-login-url').textContent).toContain('http://127.0.0.1:18810（只本机）')
-    fireEvent.click(await within(box).findByRole('button', { name: '让局域网里的电脑能打开' }))
-    expect(within(box).getByText(/所有网卡上开放端口 18810/)).toBeTruthy()
-    fireEvent.click(within(box).getByRole('button', { name: '确认改成局域网' }))
+    expect(within(dialog).getByTestId('first-login-url').textContent).toContain('http://127.0.0.1:18810（只这台机器）')
+    fireEvent.click(await within(box).findByRole('button', { name: '让家里的电脑、手机也能打开' }))
+    expect(within(box).getByText(/要用它自己的密码登录/)).toBeTruthy()
+    fireEvent.click(within(box).getByRole('button', { name: '好，改' }))
     const open = await within(dialog).findByRole('link', { name: /^打开/ }, { timeout: 3000 })
     expect(open.getAttribute('href')).toBe('http://192.168.1.20:18810')
     expect(within(dialog).queryByText(/只在服务器本机能打开/)).toBeNull()
     // 接口不再给 open_hint，说明块不消失，原位显示完成态
     const done = within(dialog).getByTestId('open-lan-done')
-    expect(done.textContent).toContain('已改成局域网，同一局域网的电脑用这个地址打开')
+    expect(done.textContent).toContain('已改好，家里的电脑、手机用这个地址打开')
     expect(within(done).getByRole('link').getAttribute('href')).toBe('http://192.168.1.20:18810')
-    expect(within(dialog).getByTestId('open-hint').textContent).toContain('acornfox app set --app new-api --expose local')
-    expect(within(dialog).queryByRole('button', { name: '让局域网里的电脑能打开' })).toBeNull()
+    // 完成态里不再写命令，只留新地址
+    expect(within(dialog).getByTestId('open-hint').textContent).not.toContain('acornfox')
+    expect(within(dialog).queryByRole('button', { name: '让家里的电脑、手机也能打开' })).toBeNull()
     // 首次登录的地址跟着变，不再写只本机
     const login = within(dialog).getByTestId('first-login-url')
     expect(login.textContent).toContain('http://192.168.1.20:18810')
@@ -261,15 +288,17 @@ describe('应用中心', () => {
     await openStore()
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    const box = await within(dialog).findByTestId('platform-vars')
-    expect(box.hasAttribute('open')).toBe(false)
-    expect(within(box).getByText('平台自动填的 2 项（一般不用改）')).toBeTruthy()
+    // 平台自动填的收在默认收起的“技术设置”里，弹窗里不放命令行
+    const tech = await within(dialog).findByTestId('install-tech')
+    expect(tech.hasAttribute('open')).toBe(false)
+    const box = within(dialog).getByTestId('platform-vars')
+    expect(within(box).getByText('平台自动填的')).toBeTruthy()
     expect(within(box).getByText('cn')).toBeTruthy() // 不能改的只显示
     fireEvent.change(within(box).getByLabelText('时区'), { target: { value: 'Asia/Tokyo' } })
-    await within(dialog).findByText('acornfox install new-api --set platform.tz=Asia/Tokyo')
     expect(within(box).getByText('平台填的是 Asia/Shanghai')).toBeTruthy()
+    expect(within(dialog).queryByText(/acornfox install/)).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
-    await within(dialog).findByText('下载镜像')
+    await within(dialog).findByText('下载应用')
     const post = calls.find((c) => c.method === 'POST' && c.url === '/v1/catalog/install')!
     expect(post.body).toEqual({ app: 'new-api', platform: { tz: 'Asia/Tokyo' } })
   })
@@ -293,11 +322,11 @@ describe('应用中心', () => {
     await within(dialog).findByText(/从下载网关下载 312 MB/)
     const bar = within(dialog).getByTestId('step-progress')
     expect(bar.getAttribute('aria-valuenow')).toBe('29')
-    await within(dialog).findByText(/正在导入镜像/, undefined, { timeout: 3000 })
+    await within(dialog).findByText(/正在导入应用程序/, undefined, { timeout: 3000 })
     expect(within(dialog).getByTestId('step-progress').getAttribute('aria-valuenow')).toBeNull()
   })
 
-  it('以前同名应用的数据还在（CAT-INST-24）：点“接上旧数据重装”并确认后才带 reuse_data 重新提交', async () => {
+  it('以前同名应用的数据还在（CAT-INST-24）：点“接上以前留下的数据重装”并确认后才带 reuse_data 重新提交', async () => {
     let posts = 0
     routes['POST /v1/catalog/install'] = () => {
       posts++
@@ -310,16 +339,19 @@ describe('应用中心', () => {
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
-    await within(dialog).findByText(/CAT-INST-24/)
-    fireEvent.click(within(dialog).getByRole('button', { name: '接上旧数据重装' }))
+    await within(dialog).findByText(/还留着以前叫 new-api 的应用的数据卷/)
+    // 故障编号不写在页面上
+    expect(within(dialog).queryByText(/CAT-INST-24/)).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: '接上以前留下的数据重装' }))
     expect(posts).toBe(1) // 只是展开确认
     fireEvent.click(within(dialog).getByRole('button', { name: '确认接上' }))
-    await within(dialog).findByText('下载镜像')
+    await within(dialog).findByText('下载应用')
     const sent = calls.filter((c) => c.method === 'POST' && c.url === '/v1/catalog/install').map((c) => c.body)
     expect(sent).toEqual([{ app: 'new-api' }, { app: 'new-api', reuse_data: true }])
   })
 
-  it('安装失败：显示故障编号、建议和“复制诊断给 AI”', async () => {
+  it('安装失败：页面上写原因和建议，故障编号和任务号只在“复制给 AI 工作台”复制出去的文字里', async () => {
+    const copied = stubClipboard()
     routes['POST /v1/catalog/install'] = () => json(202, task())
     routes['GET /v1/catalog/install/t123'] = () => task({
       status: 'failed',
@@ -330,9 +362,13 @@ describe('应用中心', () => {
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
-    await within(dialog).findByText(/CAT-INST-12/)
+    await within(dialog).findByText('镜像从所有来源都没拿到')
+    expect(within(dialog).queryByText(/CAT-INST-12/)).toBeNull()
     expect(within(dialog).getByText(/建议：国内网络确认已配镜像加速/)).toBeTruthy()
-    expect(within(dialog).getByRole('button', { name: /复制诊断给 AI/ })).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: /复制给 AI 工作台/ }))
+    await vi.waitFor(() => expect(copied.length).toBe(1))
+    expect(copied[0]).toContain('CAT-INST-12')
+    expect(copied[0]).toContain('t123')
   })
 
   it('需要大模型接口的应用：弹窗里没有大模型来源的选择，也不提示先装别的应用；请求和命令都只有应用名', async () => {
@@ -340,7 +376,7 @@ describe('应用中心', () => {
     await openStore()
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[0]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    await within(dialog).findByText('acornfox install hermes-agent')
+    await within(dialog).findByTestId('mem-check')
     expect(within(dialog).queryByRole('tab')).toBeNull()
     expect(within(dialog).queryByText(/平台 Key|自己的 Key|先装|模型名|--llm/)).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
@@ -356,7 +392,8 @@ describe('应用中心', () => {
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
     await within(dialog).findByTestId('task-lost')
-    expect(within(dialog).getByText(/找不到这个安装任务/)).toBeTruthy()
+    expect(within(dialog).getByText(/找不到这次安装的进度了/)).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: '去我的应用' })).toBeTruthy()
     const n = polls
     await new Promise((r) => setTimeout(r, 2500))
     expect(polls).toBe(n)
@@ -369,7 +406,109 @@ describe('应用中心', () => {
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: '安装' }))
-    await within(dialog).findByText('任务 tbusy')
+    // 接上那个任务的进度（不显示任务号）：按它的步骤显示
+    await within(dialog).findByText('下载应用')
+    expect(within(dialog).queryByText(/tbusy/)).toBeNull()
+    expect(calls.some((c) => c.url === '/v1/catalog/install/tbusy')).toBe(true)
+  })
+})
+
+// 经营系统签名发布的展示内容（show.json）并进 GET /v1/catalog：每个应用和配方多一个 show，顶层多 industries、home。
+// 格式见 LW1 接口约定；没有展示内容时页面退回清单里的名字和简介（上面的用例用的 catalog 就没有 show）。
+describe('应用中心的展示内容', () => {
+  const pair = (id: string, over: Partial<CatalogView['recipes'][number]> = {}) => ({
+    id, title: '解决方案 ' + id, summary: '清单里的简介 ' + id, apps: [{ app: 'new-api' }, { app: 'memos' }],
+    delivery: { tier: 'auto', minutes: 2, memory_mb: 768 }, command: 'acornfox install --recipe ' + id, ...over,
+  })
+  const shown: CatalogView = {
+    ...catalog,
+    industries: [{ id: 'office', name: '通用办公' }, { id: 'retail', name: '电商零售' }],
+    // 首页按这个顺序摆（取前三个）
+    home: { solutions: ['pair-c', 'pair-a', 'pair-b'] },
+    apps: catalog.apps.map((a) => (a.id === 'hermes-agent'
+      ? { ...a, show: { name: '智能小助手', tagline: '管家式的 AI 助手', flag: 'hot', color: '#3b5bdb', keywords: ['小秘书'], order: 2 } }
+      : { ...a, show: { order: 1 } })),
+    recipes: [
+      ...catalog.recipes,
+      pair('pair-a', { show: { name: '开网店', tagline: '一句话讲清楚', industries: ['retail', 'office'] } }),
+      pair('pair-b', { show: { industries: ['office'] } }),
+      pair('pair-c', { show: { industries: ['ghost'] } }),
+    ],
+  }
+
+  it('应用卡片：用展示内容里的名字、一句话、角标；同一格里按 order 排；搜索认展示内容里的词', async () => {
+    routes['GET /v1/catalog'] = () => shown
+    await openStore()
+    const cards = screen.getAllByTestId('catalog-app')
+    // New API 的 order 是 1，排在 order 为 2 的 Hermes 前面
+    expect(within(cards[0]).getByText('New API')).toBeTruthy()
+    expect(within(cards[1]).getByText('智能小助手')).toBeTruthy()
+    expect(within(cards[1]).getByText('管家式的 AI 助手')).toBeTruthy()
+    expect(within(cards[1]).getByText('热门')).toBeTruthy()
+    expect(within(cards[1]).queryByText('Hermes 智能体')).toBeNull()
+    fireEvent.change(screen.getByLabelText('找应用'), { target: { value: '小秘书' } })
+    const found = screen.getAllByTestId('catalog-app')
+    expect(found.length).toBe(1)
+    expect(within(found[0]).getByText('智能小助手')).toBeTruthy()
+  })
+
+  it('解决方案在上：首页按 home.solutions 的顺序摆前三个，行业按 id 换成名字，认不得的行业不显示；其余进“全部解决方案”', async () => {
+    routes['GET /v1/catalog'] = () => shown
+    await openStore()
+    const sol = screen.getByTestId('store-solutions')
+    const cards = within(sol).getAllByTestId('catalog-recipe')
+    expect(cards.length).toBe(3)
+    expect(within(cards[0]).getByText('解决方案 pair-c')).toBeTruthy()
+    expect(within(cards[1]).getByText('开网店')).toBeTruthy() // 展示内容里的名字
+    expect(within(cards[1]).getByText('一句话讲清楚')).toBeTruthy()
+    expect(within(cards[2]).getByText('解决方案 pair-b')).toBeTruthy()
+    // 行业：id 换成名字，按目录里的顺序没有的（ghost）不写出来
+    expect(within(cards[1]).getByTestId('solution-industries').textContent).toBe('电商零售通用办公')
+    expect(within(cards[0]).queryByTestId('solution-industries')).toBeNull()
+    expect(sol.textContent).not.toContain('ghost')
+    // 第四个（Hermes + New API）不在首页，进“全部解决方案”
+    expect(within(sol).queryByText('Hermes 智能体 + New API')).toBeNull()
+    expect(within(sol).getByRole('link', { name: /全部解决方案 4 个/ }).getAttribute('href')).toBe('#solutions')
+    // 搜索认行业名
+    fireEvent.change(screen.getByLabelText('找应用'), { target: { value: '电商零售' } })
+    expect(within(screen.getByTestId('store-solutions')).getAllByTestId('catalog-recipe').length).toBe(1)
+  })
+
+  it('全部解决方案：行业筛选读目录顶层 industries 的名字和顺序，只列有解决方案的行业', async () => {
+    routes['GET /v1/catalog'] = () => shown
+    location.hash = '#solutions'
+    render(<App />)
+    const tabs = await screen.findByTestId('solution-industry-tabs')
+    expect(within(tabs).getAllByRole('tab').map((t) => t.textContent)).toEqual(['全部4', '通用办公2', '电商零售1'])
+    expect(screen.getAllByTestId('catalog-recipe').length).toBe(4)
+    fireEvent.click(within(tabs).getByRole('tab', { name: /^电商零售/ }))
+    const list = screen.getAllByTestId('catalog-recipe')
+    expect(list.length).toBe(1)
+    expect(within(list[0]).getByText('开网店')).toBeTruthy()
+  })
+
+  it('目录没有行业这一项（没有展示内容）：不显示行业这一排，也不把行业 id 写出来', async () => {
+    routes['GET /v1/catalog'] = () => ({ ...catalog, recipes: [...catalog.recipes, pair('pair-a', { show: { industries: ['office'] } })] })
+    location.hash = '#solutions'
+    render(<App />)
+    await screen.findAllByTestId('catalog-recipe')
+    expect(screen.queryByTestId('solution-industry-tabs')).toBeNull()
+    expect(screen.queryByText('office')).toBeNull()
+    // 名字和简介退回清单里的
+    expect(screen.getByText('解决方案 pair-a')).toBeTruthy()
+  })
+
+  it('没有视频的介绍文档不画播放键；图的链接是空的不显示占位画面', async () => {
+    const doc = '## 它能帮你做什么\n\n帮你收发消息。\n\n[演示](https://www.bilibili.com/video/)\n\n![截图]()\n'
+    routes['GET /v1/catalog'] = () => ({ ...shown, apps: shown.apps.map((a) => (a.id === 'new-api' ? { ...a, show: { ...a.show, doc } } : a)) })
+    routes['GET /v1/catalog/apps/new-api'] = () => ({ ...newApiDetail, show: { doc } })
+    location.hash = '#item-new-api'
+    render(<App />)
+    await screen.findByRole('heading', { name: 'New API' })
+    const article = await screen.findByTestId('store-doc')
+    expect(within(article).getByText('帮你收发消息。')).toBeTruthy()
+    expect(within(article).queryByTestId('doc-video')).toBeNull()
+    expect(article.querySelector('figure')).toBeNull()
   })
 })
 
@@ -390,24 +529,30 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     expect(location.hash).toBe('#prefs/update')
   })
 
-  it('配方卡片：自己或其中的应用要升级时“开始”不可点并说明；别的配方不受影响', async () => {
-    routes['GET /v1/catalog'] = () => catalogNeedsUpgrade
+  it('解决方案卡片：自己或其中的应用要升级时“一起装好”不可点并说明；别的解决方案不受影响', async () => {
+    // 再加一个不用 Hermes 的解决方案（两个应用串起来），看它不受影响
+    routes['GET /v1/catalog'] = () => ({
+      ...catalogNeedsUpgrade,
+      recipes: [...catalogNeedsUpgrade.recipes, { id: 'pair', title: '两个一起用', summary: '', apps: [{ app: 'new-api' }, { app: 'memos' }], delivery: { tier: 'auto', minutes: 2, memory_mb: 768 }, command: 'acornfox install --recipe pair' }],
+    })
     await openStore()
     const cards = screen.getAllByTestId('catalog-recipe')
-    expect(cards.length).toBe(3)
-    for (const c of cards.slice(0, 2)) {
-      expect(within(c).getByText(SENTENCE)).toBeTruthy()
-      expect((within(c).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true)
-      expect(within(c).getByRole('button', { name: '怎么升级' })).toBeTruthy()
-    }
-    expect(within(cards[2]).queryByTestId('needs-platform')).toBeNull()
-    expect((within(cards[2]).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(false)
+    // 只装一个应用的配方不摆，所以只有两张
+    expect(cards.length).toBe(2)
+    const [needy, ok] = cards
+    expect(within(needy).getByText('Hermes 智能体 + New API')).toBeTruthy()
+    expect(within(needy).getByText(SENTENCE)).toBeTruthy()
+    expect((within(needy).getByRole('button', { name: '一起装好' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(needy).getByRole('button', { name: '怎么升级' })).toBeTruthy()
+    expect(within(ok).getByText('两个一起用')).toBeTruthy()
+    expect(within(ok).queryByTestId('needs-platform')).toBeNull()
+    expect((within(ok).getByRole('button', { name: '一起装好' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('旧服务端没有这个字段时，卡片和详情都没有提示，按钮能点', async () => {
     await openStore()
     expect(screen.queryByTestId('needs-platform')).toBeNull()
-    for (const b of screen.getAllByRole('button', { name: /^(安装|开始)$/ })) expect((b as HTMLButtonElement).disabled).toBe(false)
+    for (const b of screen.getAllByRole('button', { name: /^(安装|一起装好)$/ })) expect((b as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('详情页：安装按钮不可点，说明要升到哪个版本、现在是哪个版本，给国内和海外两条升级命令', async () => {
@@ -417,14 +562,16 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     location.hash = '#item-hermes-agent'
     render(<App />)
     await screen.findByRole('heading', { name: 'Hermes 智能体' })
-    const note = screen.getByTestId('needs-platform')
+    // 下面“再逛逛”的卡片上也有升级提示，这里只看右边安装栏那一张
+    const buy = screen.getByTestId('item-buy')
+    const note = within(buy).getByTestId('needs-platform')
     expect(within(note).getByText(SENTENCE)).toBeTruthy()
     await within(note).findByText('0.5.1')
     const lines = upgradeLines(note).map((x) => x.textContent || '')
     expect(lines.length).toBe(2)
     expect(lines[0]).toContain('gitee.com/VIP13390/AcornFox/raw/main/get.sh')
     expect(lines[1]).toContain('github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh')
-    expect((screen.getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(buy).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('详情页：不用升级的应用没有提示，安装能点', async () => {
@@ -433,8 +580,9 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     location.hash = '#item-new-api'
     render(<App />)
     await screen.findByRole('heading', { name: 'New API' })
-    expect(screen.queryByTestId('needs-platform')).toBeNull()
-    expect((screen.getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(false)
+    const buy = screen.getByTestId('item-buy')
+    expect(within(buy).queryByTestId('needs-platform')).toBeNull()
+    expect((within(buy).getByRole('button', { name: '安装' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('安装弹窗：列表是旧的、详情说要升级时，弹窗里说明并给升级命令，不能提交', async () => {
@@ -450,17 +598,18 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
   })
 
-  it('配方的弹窗：配方要升级时不能提交', async () => {
-    // 从命令面板这类入口也能打开配方的弹窗，所以弹窗自己也要拦。
-    routes['GET /v1/catalog'] = () => ({ ...catalog, recipes: catalog.recipes.map((r) => (r.id === 'new-api' ? { ...r, needs_platform: NEEDS } : r)) })
+  it('解决方案的弹窗：列表是旧的、其中一个应用的详情说要升级时，弹窗里说明并给升级命令，不能提交', async () => {
+    // 弹窗自己也要拦：列表上没标要升级，点开后读到的应用详情说要升级
+    routes['GET /v1/catalog/apps/hermes-agent'] = () => ({ ...hermesDetail, needs_platform: NEEDS })
     await openStore()
-    fireEvent.keyDown(window, { key: 'k', metaKey: true })
-    const palette = await screen.findByRole('dialog')
-    fireEvent.click(within(palette).getByText('New API 模型网关'))
-    await screen.findByRole('heading', { name: 'New API 模型网关' })
-    const dialog = screen.getByRole('dialog')
+    fireEvent.click(within(screen.getByTestId('catalog-recipe')).getByRole('button', { name: '一起装好' }))
+    const dialog = await screen.findByRole('dialog')
     expect(await within(dialog).findByText(SENTENCE)).toBeTruthy()
-    expect((within(dialog).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(upgradeLines(dialog).length).toBe(2)
+    const submit = within(dialog).getByRole('button', { name: '开始安装' }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+    fireEvent.click(submit)
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
   })
 
   // 下面几条的说明和建议照服务端的原文写。CAT-INST-29 的建议两种情况共用一句，里面有“升级”两个字，页面不能按字猜。
@@ -482,7 +631,7 @@ describe('要先升级 AcornFox 才能装的应用', () => {
   it('提交后被拒绝（CAT-INST-08，带 needs_platform）：服务端的说明原样显示，下面说要先升级到哪个版本并给升级命令', async () => {
     routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-08', message: MSG08, hint: HINT08, needs_platform: NEEDS } })
     const dialog = await submitNewApi()
-    await within(dialog).findByText('CAT-INST-08 · ' + MSG08)
+    await within(dialog).findByText(MSG08)
     expect(within(dialog).getByText(HINT08)).toBeTruthy()
     expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
     expect(upgradeLines(dialog).length).toBe(2)
@@ -491,7 +640,7 @@ describe('要先升级 AcornFox 才能装的应用', () => {
   it('提交后被拒绝（CAT-INST-29，带 needs_platform）：说明原样显示，下面说要先升级并给升级命令', async () => {
     routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-29', message: MSG29_UPGRADE, hint: HINT29, needs_platform: NEEDS } })
     const dialog = await submitNewApi()
-    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_UPGRADE)
+    await within(dialog).findByText(MSG29_UPGRADE)
     expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
     expect(upgradeLines(dialog).length).toBe(2)
   })
@@ -500,7 +649,7 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     // 建议里有“升级”两个字（两种情况共用一句），不能因此给升级命令。
     routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-29', message: MSG29_BROKEN, hint: HINT29 } })
     const dialog = await submitNewApi()
-    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_BROKEN)
+    await within(dialog).findByText(MSG29_BROKEN)
     expect(within(dialog).getByText(HINT29)).toBeTruthy()
     expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
     expect(upgradeLines(dialog).length).toBe(0)
@@ -509,7 +658,7 @@ describe('要先升级 AcornFox 才能装的应用', () => {
   it('没带 needs_platform 的 CAT-INST-08 也只原样显示说明（只认这个字段，不按编号猜）', async () => {
     routes['POST /v1/catalog/install'] = () => json(409, { error: { code: 'CAT-INST-08', message: MSG08, hint: HINT08 } })
     const dialog = await submitNewApi()
-    await within(dialog).findByText('CAT-INST-08 · ' + MSG08)
+    await within(dialog).findByText(MSG08)
     expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
     expect(upgradeLines(dialog).length).toBe(0)
   })
@@ -524,9 +673,9 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     routes['POST /v1/catalog/install'] = () => json(202, task())
     routes['GET /v1/catalog/install/t123'] = () => fail29(MSG29_UPGRADE, NEEDS)
     const dialog = await submitNewApi()
-    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_UPGRADE)
+    expect((await within(dialog).findAllByText(MSG29_UPGRADE)).length).toBeGreaterThan(0) // 失败的那一步和下面的说明各写一遍
     expect(within(dialog).getByText('建议：' + HINT29)).toBeTruthy()
-    expect(within(dialog).getByText(/已经清理，升级后再装。/)).toBeTruthy()
+    expect(within(dialog).getByText(/已经清理掉，升级后再装。/)).toBeTruthy()
     expect(within(within(dialog).getByTestId('upgrade-first')).getByText(FIRST)).toBeTruthy()
     expect(upgradeLines(dialog).length).toBe(2)
   })
@@ -535,9 +684,9 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     routes['POST /v1/catalog/install'] = () => json(202, task())
     routes['GET /v1/catalog/install/t123'] = () => fail29(MSG29_BROKEN)
     const dialog = await submitNewApi()
-    await within(dialog).findByText('CAT-INST-29 · ' + MSG29_BROKEN)
+    expect((await within(dialog).findAllByText(MSG29_BROKEN)).length).toBeGreaterThan(0)
     expect(within(dialog).getByText('建议：' + HINT29)).toBeTruthy()
-    expect(within(dialog).getByText(/已经清理，可以直接重装。/)).toBeTruthy()
+    expect(within(dialog).getByText(/已经清理掉，可以直接重装。/)).toBeTruthy()
     expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
     expect(upgradeLines(dialog).length).toBe(0)
   })
@@ -579,7 +728,10 @@ describe('要先升级 AcornFox 才能装的应用', () => {
     render(<App />)
     await screen.findByRole('heading', { name: 'Hermes 智能体' })
     const page = screen.getByTestId('item-limited')
-    expect(within(page).getByRole('button', { name: '已安装 · 管理' })).toBeTruthy()
+    // 已经装好的：主按钮是“去管理”，不是“安装”
+    fireEvent.click(within(page).getByRole('button', { name: '去管理' }))
+    expect(location.hash).toBe('#app-hermes-agent')
+    expect(within(page).queryByRole('button', { name: '安装' })).toBeNull()
     expect(within(page).getByText(/已经装好的照常运行，不受影响。/)).toBeTruthy()
     expect(within(page).queryByTestId('needs-platform')).toBeNull()
     expect(upgradeLines(page).length).toBe(2)
@@ -616,20 +768,36 @@ describe('要先升级 AcornFox 才能装的应用', () => {
 })
 
 describe('我的应用', () => {
-  it('来自应用中心的应用显示目录版本；表格视图显示内存和 CPU', async () => {
+  // 应用少于 8 个时只有卡片、没有筛选和视图切换；表格给应用多的人看
+  const fillers = Array.from({ length: 6 }, (_, i) => app({ name: 'extra' + i, desired: 'stopped' }))
+
+  it('卡片：应用中心的应用写“来自应用中心”，状态写“正常”“停了”；应用多时表格视图显示版本、内存和 CPU', async () => {
+    try { localStorage.removeItem('afx-apps-view') } catch { /* 前一个测试切到了表格视图 */ }
     routes['GET /v1/apps'] = () => ({ apps: [app({ name: 'new-api', catalog_id: 'new-api', catalog_version: 'v1.0.0-rc.48' }), app({ name: 'web', desired: 'stopped' })] })
-    routes['GET /v1/metrics/apps/new-api'] = () => ({ app: 'new-api', available: true, observed_state: 'running', cpu_percent: 3.2, memory_usage_mb: 120, memory_limit_mb: 512 })
     location.hash = '#apps'
+    const r = render(<App />)
+    const cards = await screen.findAllByTestId('my-app')
+    expect(within(cards[0]).getByText('来自应用中心')).toBeTruthy()
+    expect(within(cards[0]).getByText('New API')).toBeTruthy() // 用应用中心里的名字
+    expect(within(cards[0]).getByText('正常')).toBeTruthy()
+    expect(within(cards[1]).getByText('自己部署的项目')).toBeTruthy()
+    expect(within(cards[1]).getByText('停了')).toBeTruthy()
+    // 少于 8 个：没有筛选和视图切换
+    expect(screen.queryByRole('tab', { name: '表格' })).toBeNull()
+    r.unmount()
+
+    routes['GET /v1/apps'] = () => ({ apps: [app({ name: 'new-api', catalog_id: 'new-api', catalog_version: 'v1.0.0-rc.48' }), app({ name: 'web', desired: 'stopped' }), ...fillers] })
+    routes['GET /v1/metrics/apps/new-api'] = () => ({ app: 'new-api', available: true, observed_state: 'running', cpu_percent: 3.2, memory_usage_mb: 120, memory_limit_mb: 512 })
     render(<App />)
     await screen.findAllByTestId('my-app')
-    expect(screen.getByText('来自应用中心 · v1.0.0-rc.48')).toBeTruthy()
-    expect(screen.getByText('已停止')).toBeTruthy()
-    fireEvent.click(screen.getByRole('tab', { name: '表格' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '表格' }))
     await screen.findByText('120 MB / 512 MB')
     expect(screen.getByText('3.2%')).toBeTruthy()
+    expect(screen.getByText('v1.0.0-rc.48')).toBeTruthy()
+    try { localStorage.removeItem('afx-apps-view') } catch { /* 还原 */ }
   })
 
-  it('只本机的应用标“只本机”；Linux 服务器上不给打不开的“打开”', async () => {
+  it('只本机的应用给“怎么打开”；Linux 服务器上不给打不开的“打开”', async () => {
     routes['GET /v1/apps'] = () => ({ apps: [
       app({ name: 'new-api', url: 'http://127.0.0.1:18810', local_only: true, open_hint: { has_login: true, can_lan: false, recommend: 'tunnel', command: 'acornfox open new-api' } }),
       app({ name: 'blog', exposure: 'public', url: 'http://203.0.113.7:18811' }),
@@ -640,10 +808,11 @@ describe('我的应用', () => {
     const cards = await screen.findAllByTestId('my-app')
     const local = cards.find((c) => c.textContent?.includes('new-api'))!
     const pub = cards.find((c) => c.textContent?.includes('blog'))!
-    expect(within(local).getByText('只本机')).toBeTruthy()
-    expect(within(local).queryByRole('link', { name: /打开/ })).toBeNull()
-    expect(within(pub).queryByText('只本机')).toBeNull()
-    expect(within(pub).getByRole('link', { name: /打开/ }).getAttribute('href')).toBe('http://203.0.113.7:18811')
+    // 卡片上不写“只本机”，只本机的给“怎么打开”（去详情看），不给打不开的“打开”
+    expect(within(local).getByRole('link', { name: '怎么打开' }).getAttribute('href')).toBe('#app-new-api')
+    expect(within(local).queryByRole('link', { name: /^打开/ })).toBeNull()
+    expect(within(pub).queryByRole('link', { name: '怎么打开' })).toBeNull()
+    expect(within(pub).getByRole('link', { name: /^打开/ }).getAttribute('href')).toBe('http://203.0.113.7:18811')
   })
 
   it('应用详情：只本机的给怎么打开（公网服务器只有 acornfox open）', async () => {
@@ -655,7 +824,7 @@ describe('我的应用', () => {
     render(<App />)
     const box = await screen.findByTestId('open-hint')
     expect(within(box).getByText('acornfox open hermes-agent')).toBeTruthy()
-    expect(within(box).queryByRole('button', { name: '让局域网里的电脑能打开' })).toBeNull()
+    expect(within(box).queryByRole('button', { name: '让家里的电脑、手机也能打开' })).toBeNull()
     expect(screen.queryByRole('link', { name: /打开/ })).toBeNull()
     expect(screen.getByRole('button', { name: '怎么打开' })).toBeTruthy()
   })
@@ -673,7 +842,7 @@ describe('我的应用', () => {
     expect(screen.queryByTestId('legacy-note')).toBeNull()
   })
 
-  it('我的应用：命令行部署的应用在列表里显示当前是第几版（列表接口没有完整的 live，只有 live_seq）', async () => {
+  it('我的应用：命令行部署的应用在表格里显示当前是第几版（列表接口没有完整的 live，只有 live_seq）；卡片上不写版本', async () => {
     const d = (id: string, seq: number, status: string) => ({ id, app: 'x', seq, source_kind: 'upload', source_ref: 'x', status, created_at: '2026-11-08T01:00:00Z' })
     routes['GET /v1/apps'] = () => ({ apps: [
       app({ name: 'hello', exposure: 'public', url: 'http://203.0.113.7:18820', live: undefined, live_seq: 7, current_deployment: 'd7', latest: d('d7', 7, 'live') }),
@@ -682,23 +851,26 @@ describe('我的应用', () => {
       app({ name: 'fresh', exposure: 'public', live: undefined, current_deployment: '', observed_state: 'missing', latest: d('d1', 1, 'queued') }),
       app({ name: 'broken', exposure: 'public', live: undefined, current_deployment: '', observed_state: 'missing', latest: d('d1', 1, 'failed') }),
       app({ name: 'blank', exposure: 'public', live: undefined, current_deployment: '', observed_state: 'missing' }),
+      app({ name: 'extra0', exposure: 'public' }), app({ name: 'extra1', exposure: 'public' }),
     ] })
     try { localStorage.removeItem('afx-apps-view') } catch { /* 前一个测试切到了表格视图 */ }
     location.hash = '#apps'
     render(<App />)
     const cards = await screen.findAllByTestId('my-app')
-    const card = (n: string) => cards.find((c) => within(c).queryByText(n, { selector: '.text-sm' }))!
-    expect(within(card('hello')).getByText('第 7 版')).toBeTruthy()
-    expect(within(card('hello')).getByText('运行中')).toBeTruthy()
-    expect(within(card('hello')).queryByText('还没部署')).toBeNull()
-    expect(within(card('shop')).getByText('第 3 版')).toBeTruthy()
-    expect(within(card('older')).getByText('第 2 版')).toBeTruthy()
-    expect(within(card('fresh')).getByText('第 1 版部署中')).toBeTruthy()
-    expect(within(card('broken')).getByText('还没有上线的版本')).toBeTruthy()
-    expect(within(card('blank')).getAllByText('还没部署').length).toBeGreaterThan(0)
+    expect(cards.some((c) => /第 \d+ 版/.test(c.textContent || ''))).toBe(false)
+    fireEvent.click(await screen.findByRole('tab', { name: '表格' }))
+    const row = (n: string) => screen.getAllByRole('row').find((r) => within(r).queryByRole('link', { name: n }))!
+    expect(within(row('hello')).getByText('第 7 版')).toBeTruthy()
+    expect(within(row('hello')).getByText('正常')).toBeTruthy()
+    expect(within(row('shop')).getByText('第 3 版')).toBeTruthy()
+    expect(within(row('older')).getByText('第 2 版')).toBeTruthy()
+    expect(within(row('fresh')).getByText('第 1 版更新中')).toBeTruthy()
+    expect(within(row('broken')).getByText('还没有装好的版本')).toBeTruthy()
+    expect(within(row('blank')).getAllByText('还没装好').length).toBeGreaterThan(0)
+    try { localStorage.removeItem('afx-apps-view') } catch { /* 还原 */ }
   })
 
-  it('应用详情：在概览里改成局域网后说明块显示完成态；登录信息从说明下面挪进出现的访问卡片', async () => {
+  it('应用详情：在“谁能打开”卡片里改成局域网后，卡片换成地址和三档；第一次登录那一行一直在卡片里，只有一处', async () => {
     const hint = { lan_address: '192.168.1.20', lan_url_after_expose: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
     let exposure = 'local'
     routes['GET /v1/apps/new-api'] = () => exposure === 'local'
@@ -709,20 +881,22 @@ describe('我的应用', () => {
     location.hash = '#app-new-api'
     render(<App />)
     const box = await screen.findByTestId('open-hint')
-    // 只本机、要按说明打开：没有访问卡片，登录那一行单独放在说明下面
+    // 只本机、要按说明打开：卡片里是说明，没有地址和三档，登录那一行放在说明下面
+    const card = screen.getByTestId('ov-access')
+    expect(within(card).getByTestId('open-hint')).toBe(box)
+    expect(within(card).queryByRole('group', { name: /谁能打开/ })).toBeNull()
     const alone = await screen.findByTestId('ov-login')
     expect(within(alone).getByText('admin')).toBeTruthy()
-    expect(screen.queryByTestId('ov-access')).toBeNull()
-    fireEvent.click(within(box).getByRole('button', { name: '让局域网里的电脑能打开' }))
-    fireEvent.click(within(box).getByRole('button', { name: '确认改成局域网' }))
-    const done = await screen.findByTestId('open-lan-done')
-    const access = await screen.findByTestId('ov-access')
-    expect(access.textContent).toContain('192.168.1.20:18810')
+    fireEvent.click(within(box).getByRole('button', { name: '让家里的电脑、手机也能打开' }))
+    fireEvent.click(within(box).getByRole('button', { name: '好，改' }))
+    // 改好后应用的信息刷新，卡片换成地址和三档（局域网亮着）
+    await vi.waitFor(() => expect(screen.getByTestId('ov-access').textContent).toContain('192.168.1.20:18810'))
+    expect(screen.queryByTestId('open-hint')).toBeNull()
+    expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: 'lan' })
+    const access = screen.getByTestId('ov-access')
+    expect(within(access).getByRole('button', { name: '局域网' }).getAttribute('aria-pressed')).toBe('true')
     expect(within(access).getByTestId('first-login').textContent).toContain('admin')
-    expect(screen.queryByTestId('ov-login')).toBeNull()
     expect(screen.getAllByTestId('first-login').length).toBe(1)
-    expect(within(done).getByRole('link').getAttribute('href')).toBe('http://192.168.1.20:18810')
-    expect(screen.getByTestId('open-hint').textContent).toContain('“设置 → 谁能打开”里点“只本机”')
     expect(screen.queryByText(/只在服务器本机能打开/)).toBeNull()
   })
 
@@ -731,10 +905,16 @@ describe('我的应用', () => {
     const hint = { lan_address: '192.168.1.20', lan_url: 'http://192.168.1.20:18810', has_login: true, can_lan: true, recommend: 'lan', command: 'acornfox open new-api' }
     routes['PATCH /v1/apps/new-api'] = () => ({ app: app({ name: 'new-api', exposure: 'lan' }) })
     const onChanged = vi.fn()
-    const ui = (h?: typeof hint, openURL?: string) => <ToastProvider><OpenHintBlock name="new-api" hint={h} openURL={openURL} onChanged={onChanged} /></ToastProvider>
+    const ui = (h?: typeof hint, openURL?: string) => (
+      <ToastProvider>
+        <ConsoleProvider session={{ csrf: 'tok', expires_at: '', server: 'home-server' }} install={() => {}} logout={async () => {}}>
+          <OpenHintBlock name="new-api" hint={h} openURL={openURL} onChanged={onChanged} />
+        </ConsoleProvider>
+      </ToastProvider>
+    )
     const r = render(ui(hint))
-    fireEvent.click(screen.getByRole('button', { name: '让局域网里的电脑能打开' }))
-    fireEvent.click(screen.getByRole('button', { name: '确认改成局域网' }))
+    fireEvent.click(screen.getByRole('button', { name: '让家里的电脑、手机也能打开' }))
+    fireEvent.click(screen.getByRole('button', { name: '好，改' }))
     const done = await screen.findByTestId('open-lan-done')
     expect(onChanged).toHaveBeenCalled()
     // 列表刷新前：用说明里的局域网地址
@@ -745,57 +925,34 @@ describe('我的应用', () => {
     // 又改回只本机：回到说明
     r.rerender(ui(hint))
     expect(screen.queryByTestId('open-lan-done')).toBeNull()
-    expect(screen.getByRole('button', { name: '让局域网里的电脑能打开' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '让家里的电脑、手机也能打开' })).toBeTruthy()
     // 从来不是只本机的应用：什么都不显示
     r.rerender(ui(undefined))
     expect(screen.queryByTestId('open-hint')).toBeNull()
   })
 
-  it('设置 → 谁能打开（从旧的 #…/advanced 进来就展开它）：服务端给了平台默认时可以勾“跟随默认”，保存发 exposure 空值；默认是公网时先确认', async () => {
+  it('从旧的 #…/advanced 进来：展开设置里的“域名”那一行；三档只在概览卡片里，设置里没有，也没有“跟随默认”', async () => {
     routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'public', exposure_is_default: true, default_exposure: 'public' })
-    routes['PATCH /v1/apps/web'] = () => ({ app: app({ name: 'web', exposure: 'local' }) })
     location.hash = '#app-web/advanced'
-    const r = render(<App />)
+    render(<App />)
     const set = await screen.findByTestId('app-settings')
-    expect(within(set).getByRole('button', { name: /谁能打开/ }).getAttribute('aria-expanded')).toBe('true')
-    expect(within(set).getByTestId('summary-access').textContent).toBe('公网（跟随默认） · 没有绑定域名')
-    expect((within(set).getByLabelText('跟随默认（现在是公网）') as HTMLInputElement).checked).toBe(true)
-    const group = within(set).getByRole('group', { name: '访问方式' })
-    fireEvent.click(within(group).getByRole('button', { name: '只本机' }))
-    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: 'local' }))
-    r.unmount()
-
-    calls = []
-    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local', exposure_is_default: false, default_exposure: 'public' })
-    render(<App />)
-    const box = (await screen.findByLabelText('跟随默认（现在是公网）')) as HTMLInputElement
-    expect(box.checked).toBe(false)
-    expect(screen.getByText(/acornfox app set --app web --expose default/)).toBeTruthy()
-    fireEvent.click(box)
-    const dialog = await screen.findByRole('dialog')
-    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
-    fireEvent.click(within(dialog).getByRole('button', { name: '改成公网' }))
-    await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ exposure: '' }))
-  })
-
-  it('设置 → 谁能打开：服务端没给平台默认（旧版本）时只有三档，没有“跟随默认”', async () => {
-    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local' })
-    location.hash = '#app-web/settings/access'
-    render(<App />)
-    const group = await screen.findByRole('group', { name: '访问方式' })
-    expect(within(group).getAllByRole('button').map((o) => o.textContent)).toEqual(['只本机', '局域网', '公网'])
+    expect(within(set).getByRole('button', { name: /^域名/ }).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.queryByLabelText(/跟随默认/)).toBeNull()
     expect(screen.queryByTestId('exposure-default')).toBeNull()
+    expect(screen.queryByRole('group', { name: /谁能打开/ })).toBeNull()
   })
 
-  it('概览的访问卡片：三档能点，局域网直接改；改成公网要先确认；经 AFX 云的应用在设置里只显示、不能改', async () => {
+  it('概览的“谁能打开”卡片：三档能点，局域网直接改；改成公网要先确认；点亮着的那一档什么都不做', async () => {
     routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'local', url: 'http://192.168.1.20:18810' })
     routes['PATCH /v1/apps/web'] = () => app({ name: 'web', exposure: 'public' })
     location.hash = '#app-web'
     const r = render(<App />)
     const card = await screen.findByTestId('ov-access')
+    const group = within(card).getByRole('group', { name: /谁能打开/ })
+    expect(within(group).getAllByRole('button').map((o) => o.textContent)).toEqual(['只本机', '局域网', '公网'])
     fireEvent.click(within(card).getByRole('button', { name: '公网' }))
     const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText(/所有网卡都能打开/)).toBeTruthy()
+    expect(within(dialog).getByText(/互联网上任何人都能打开它的登录页/)).toBeTruthy()
     expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
     fireEvent.click(within(dialog).getByRole('button', { name: '改成公网' }))
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'PATCH' && (c.body as { exposure: string }).exposure === 'public')).toBe(true))
@@ -810,22 +967,25 @@ describe('我的应用', () => {
     expect((within(card).getByRole('button', { name: '只本机' }) as HTMLButtonElement).disabled).toBe(true)
     r.unmount()
 
-    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'afx_cloud' })
-    location.hash = '#app-web/settings/access'
+    // 经 AFX 云这类不是三档之一的：卡片只给地址，不显示三档，设置里也改不了
+    routes['GET /v1/apps/web'] = () => app({ name: 'web', exposure: 'afx_cloud', url: 'http://10.0.0.5:18810' })
+    location.hash = '#app-web'
     render(<App />)
-    const ro = await screen.findByTestId('exposure-readonly')
-    expect(within(ro).getByText('经 AFX 云')).toBeTruthy()
-    expect(screen.queryByRole('group', { name: '访问方式' })).toBeNull()
+    await screen.findByTestId('ov-access')
+    expect(screen.queryByRole('group', { name: /谁能打开/ })).toBeNull()
   })
 
-  it('外壳里没有 AFX 云和旧版入口', async () => {
+  it('外壳里没有 AFX 云和旧版入口，也没有账号菜单', async () => {
     location.hash = '#apps'
     render(<App />)
     await screen.findByRole('heading', { name: '我的应用' })
     expect(screen.queryAllByText(/AFX 云/).length).toBe(0)
     expect(screen.queryByText('搬到云上')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '账号菜单' }))
+    expect(screen.queryByRole('button', { name: '账号菜单' })).toBeNull()
     expect(screen.queryByText('切回旧版')).toBeNull()
+    // 左侧菜单只有四项
+    const nav = screen.getByRole('navigation', { name: '主菜单' })
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent?.replace(/\d+$/, '').trim())).toEqual(['首页', '我的应用', '应用中心', '设置'])
   })
 
   it('会话过期时提示重新执行 acornfox open', async () => {
@@ -859,24 +1019,26 @@ describe('旧格式的清单和空目录', () => {
     routes['GET /v1/catalog'] = () => ({ ...catalogFormer, apps: catalogFormer.apps.map((a) => (a.id === 'hermes-agent' ? { ...a, installed: ['hermes-agent'] } : a)) })
     await openStore()
     const hermes = screen.getAllByTestId('catalog-app')[0]
-    expect(within(hermes).getByRole('button', { name: '已安装 · 管理' })).toBeTruthy()
+    expect(within(hermes).getByText('已装好')).toBeTruthy()
+    expect(within(hermes).getByRole('link', { name: '去管理' })).toBeTruthy()
     expect(within(hermes).queryByTestId('former-note')).toBeNull()
   })
 
-  it('配方卡片：配方里有旧格式的应用时原样显示那句话，“开始”不可点；别的配方不受影响', async () => {
-    routes['GET /v1/catalog'] = () => catalogFormer
+  it('解决方案卡片：解决方案里有旧格式的应用时原样显示那句话，“一起装好”不可点；别的解决方案不受影响', async () => {
+    routes['GET /v1/catalog'] = () => ({
+      ...catalogFormer,
+      recipes: [...catalogFormer.recipes, { id: 'pair', title: '两个一起用', summary: '', apps: [{ app: 'new-api' }, { app: 'memos' }], delivery: { tier: 'auto', minutes: 2, memory_mb: 768 }, command: 'acornfox install --recipe pair' }],
+    })
     await openStore()
     const cards = screen.getAllByTestId('catalog-recipe')
-    // 配方卡片上第一行是标题（应用名的标签里也可能有同样的字）
-    const byTitle = (t: string) => cards.find((c) => c.querySelector('.font-medium')?.textContent === t)!
-    for (const t of ['Hermes 智能体', 'Hermes 智能体 + New API']) {
-      const c = byTitle(t)
-      expect(within(c).getByTestId('former-note').textContent).toBe(FORMER_NOTE)
-      expect((within(c).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true)
-    }
-    const ok = byTitle('New API 模型网关')
+    // 只装一个应用的配方不摆
+    expect(cards.length).toBe(2)
+    const [bad, ok] = cards
+    expect(within(bad).getByText('Hermes 智能体 + New API')).toBeTruthy()
+    expect(within(bad).getByTestId('former-note').textContent).toBe(FORMER_NOTE)
+    expect((within(bad).getByRole('button', { name: '一起装好' }) as HTMLButtonElement).disabled).toBe(true)
     expect(within(ok).queryByTestId('former-note')).toBeNull()
-    expect((within(ok).getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((within(ok).getByRole('button', { name: '一起装好' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('详情页：409 CAT-INST-36 时用列表里的基本信息，服务端的话原样显示，安装不可点，不给升级命令和安装命令', async () => {
@@ -927,9 +1089,9 @@ describe('旧格式的清单和空目录', () => {
     await openStore()
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[1]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    await within(dialog).findByText('acornfox install new-api')
+    await within(dialog).findByTestId('mem-check')
     fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
-    await within(dialog).findByText('CAT-INST-36 · ' + MSG36)
+    await within(dialog).findByText(MSG36)
     expect(within(dialog).queryByTestId('upgrade-first')).toBeNull()
     expect(upgradeLines(dialog).length).toBe(0)
   })
@@ -941,19 +1103,19 @@ describe('旧格式的清单和空目录', () => {
     const empty = await screen.findByTestId('store-empty')
     expect(empty.getAttribute('data-searching')).toBe('false')
     expect(within(empty).getByText('还没有可以安装的应用')).toBeTruthy()
-    expect(within(empty).getByText('应用按新格式上架后会出现在这里')).toBeTruthy()
     expect(screen.queryByText(/没找到/)).toBeNull()
     // 空目录里搜东西：仍说没找到
-    fireEvent.change(screen.getByLabelText('搜索应用'), { target: { value: 'abc' } })
+    fireEvent.change(screen.getByLabelText('找应用'), { target: { value: 'abc' } })
     expect(screen.getByTestId('store-empty').getAttribute('data-searching')).toBe('true')
-    expect(screen.getByText('没找到“abc”')).toBeTruthy()
+    expect(screen.getByText(/没找到“abc”/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: '看全部应用' })).toBeTruthy()
     expect(screen.queryByText('还没有可以安装的应用')).toBeNull()
   })
 
   it('有应用时搜不到：仍是原来的“没找到”说法', async () => {
     await openStore()
-    fireEvent.change(screen.getByLabelText('搜索应用'), { target: { value: '不存在的东西' } })
-    expect(screen.getByText('没找到“不存在的东西”')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('找应用'), { target: { value: '不存在的东西' } })
+    expect(screen.getByText(/没找到“不存在的东西”/)).toBeTruthy()
     expect(screen.queryByText('还没有可以安装的应用')).toBeNull()
   })
 })
@@ -965,7 +1127,7 @@ describe('应用自己的必填设置项（例如模型名）', () => {
     await openStore()
     fireEvent.click(within(screen.getAllByTestId('catalog-app')[0]).getByRole('button', { name: '安装' }))
     const dialog = await screen.findByRole('dialog')
-    await within(dialog).findByText('acornfox install hermes-agent')
+    await within(dialog).findByTestId('mem-check')
     // 必填的放在外面，不收进“更多设置”；有星号和提示
     const input = within(dialog).getByLabelText('模型名 *') as HTMLInputElement
     expect(input.closest('details')).toBeNull()
@@ -974,7 +1136,7 @@ describe('应用自己的必填设置项（例如模型名）', () => {
     expect(await within(dialog).findByText('请填写模型名')).toBeTruthy()
     expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/catalog/install')).toBe(false)
     fireEvent.change(input, { target: { value: 'qwen-plus' } })
-    expect(within(dialog).getByText('acornfox install hermes-agent --set model=qwen-plus')).toBeTruthy()
+    expect(within(dialog).queryByText(/acornfox install/)).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: '安装' }))
     await vi.waitFor(() => expect(calls.filter((c) => c.method === 'POST' && c.url === '/v1/catalog/install').map((c) => c.body)).toEqual([{ app: 'hermes-agent', params: { model: 'qwen-plus' } }]))
   })
@@ -1011,7 +1173,7 @@ describe('应用详情：名片、四个页签、设置', () => {
     render(<App />)
     const h1 = await screen.findByRole('heading', { name: 'web' })
     const head = h1.closest('.mb-4') as HTMLElement
-    expect(within(head).getByTestId('app-status-line').textContent).toBe('运行正常· 已连续运行 3 天')
+    expect(within(head).getByTestId('app-status-line').textContent).toBe('正常· 已连续运行 3 天')
     expect(head.textContent).not.toContain('192.168.1.20')
     expect(head.textContent).not.toContain('第 1 版')
     expect(within(head).getByRole('link', { name: /打开/ }).getAttribute('href')).toBe('http://192.168.1.20:18810')
@@ -1020,7 +1182,8 @@ describe('应用详情：名片、四个页签、设置', () => {
     expect(within(head).queryByRole('button', { name: '重启' })).toBeNull()
     fireEvent.click(within(head).getByRole('button', { name: '更多操作' }))
     const menu = within(head).getByRole('menu')
-    expect(within(menu).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['重启', '停止'])
+    // 菜单里的几项：停止、重启、日志、版本（自己部署的项目叫“版本”）、删除
+    expect(within(menu).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['停止', '重启', '日志', '版本', '删除'])
     fireEvent.click(within(menu).getByRole('menuitem', { name: '停止' }))
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/apps/web/stop')).toBe(true))
     const tabs = screen.getByRole('tablist', { name: '应用详情' })
@@ -1030,13 +1193,14 @@ describe('应用详情：名片、四个页签、设置', () => {
     expect(await screen.findByTestId('app-settings')).toBeTruthy()
   })
 
-  it('名片：停着的应用写“已停止”，“更多”里只有启动', async () => {
+  it('名片：停着的应用写“停了”，“更多”里只有启动', async () => {
     routes['GET /v1/apps/web'] = () => web({ desired: 'stopped', observed_state: 'stopped', observed: { name: 'c', state: 'exited', running: false, restart_count: 0, host_port: 0 } })
     location.hash = '#app-web'
     render(<App />)
-    expect((await screen.findByTestId('app-status-line')).textContent).toBe('已停止')
+    expect((await screen.findByTestId('app-status-line')).textContent).toBe('停了')
     fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['启动'])
+    // 停着的：只有启动，没有停止和重启
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['启动', '日志', '版本', '删除'])
   })
 
   it('概览：访问卡片在最上面，三张卡片在下面；概览里不再有单独的首次登录卡片', async () => {
@@ -1063,27 +1227,27 @@ describe('应用详情：名片、四个页签、设置', () => {
     render(<App />)
     const set = await screen.findByTestId('app-settings')
     const sum = (k: string) => within(set).getByTestId('summary-' + k).textContent
-    expect(sum('access')).toBe('局域网 · 域名 demo.example.com')
+    expect(sum('access')).toBe('demo.example.com')
     expect(sum('limits')).toBe('内存 640 MB · CPU 2 核')
-    expect(sum('data')).toBe('1 个数据卷 · 接着 PostgreSQL')
-    expect(sum('more')).toBe('环境变量 1 个 · 端口和健康检查 · 命令行')
+    expect(sum('data')).toBe('存在这台机器上，删应用时默认留着 · 附加服务 PostgreSQL')
+    expect(sum('more')).toBe('环境变量 1 个 · 端口和健康检查')
     expect(within(set).getByText('删除应用')).toBeTruthy()
-    expect(within(set).getByText('默认保留数据卷')).toBeTruthy()
+    expect(within(set).getByText('默认留着数据')).toBeTruthy()
     const row = (n: RegExp) => within(set).getByRole('button', { name: n })
     expect(set.querySelectorAll('[aria-expanded="true"]').length).toBe(0)
-    fireEvent.click(row(/资源上限/))
-    expect(row(/资源上限/).getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByLabelText('内存上限')).toBeTruthy()
+    fireEvent.click(row(/最多能用多少内存/))
+    expect(row(/最多能用多少内存/).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByLabelText('最多用的内存')).toBeTruthy()
     fireEvent.click(row(/^数据/))
-    expect(row(/资源上限/).getAttribute('aria-expanded')).toBe('false')
-    expect(screen.queryByLabelText('内存上限')).toBeNull()
+    expect(row(/最多能用多少内存/).getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByLabelText('最多用的内存')).toBeNull()
     expect(screen.getByText('af-web-data')).toBeTruthy()
     fireEvent.click(row(/^数据/))
     expect(set.querySelectorAll('[aria-expanded="true"]').length).toBe(0)
   })
 
-  it('以前的标签地址：#…/config、/data、/resources 跳到设置并展开更多、数据、资源上限', async () => {
-    const cases: [string, RegExp, string][] = [['config', /^更多/, '容器端口'], ['data', /^数据/, '附加服务'], ['resources', /资源上限/, '内存上限']]
+  it('以前的标签地址：#…/config、/data、/resources 跳到设置并展开开发者设置、数据、最多能用多少内存', async () => {
+    const cases: [string, RegExp, string][] = [['config', /^开发者设置/, '程序端口'], ['data', /^数据/, '附加服务'], ['resources', /最多能用多少内存/, '最多用的内存']]
     for (const [old, name, label] of cases) {
       location.hash = '#app-web/' + old
       const r = render(<App />)
@@ -1096,33 +1260,34 @@ describe('应用详情：名片、四个页签、设置', () => {
     }
   })
 
-  it('设置 → 谁能打开：添加、删除域名', async () => {
+  it('设置 → 域名：添加、删掉域名', async () => {
     routes['GET /v1/apps/web'] = () => web({ domains: [{ app: 'web', name: 'old.example.com', status: 'pending', created_at: '' }] })
     routes['POST /v1/apps/web/domains'] = () => ({})
     routes['DELETE /v1/apps/web/domains/old.example.com'] = () => ({})
     location.hash = '#app-web/settings/access'
     render(<App />)
     const doms = await screen.findByTestId('domains')
-    expect(within(doms).getByText('等待证书')).toBeTruthy()
+    expect(within(doms).getByText('正在生效')).toBeTruthy()
     fireEvent.change(within(doms).getByLabelText('新域名'), { target: { value: ' New.Example.com ' } })
-    fireEvent.click(within(doms).getByRole('button', { name: '添加域名' }))
+    fireEvent.click(within(doms).getByRole('button', { name: '添加' }))
     await vi.waitFor(() => expect(calls.find((c) => c.method === 'POST' && c.url === '/v1/apps/web/domains')?.body).toEqual({ name: 'new.example.com' }))
-    const rm = within(doms).getByRole('button', { name: '删除域名 old.example.com' }) as HTMLButtonElement
+    const rm = within(doms).getByRole('button', { name: '删掉域名 old.example.com' }) as HTMLButtonElement
     await vi.waitFor(() => expect(rm.disabled).toBe(false))
     fireEvent.click(rm)
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web/domains/old.example.com')).toBe(true))
   })
 
-  it('设置 → 谁能打开：平台给的域名一行——生效、没生效、没有平台域名时不显示；两个都有时写明用自己的', async () => {
+  it('设置 → 域名：自动给的域名一行——生效、没生效、没有平台域名时不显示；两个都有时写明用自己的', async () => {
     routes['GET /v1/apps/web'] = () => web({ exposure: 'public', url: 'https://web.apps.example.com', platform_domain: { host: 'web.apps.example.com', active: true, note: '' } })
     location.hash = '#app-web/settings/access'
     let r = render(<App />)
     let row = await screen.findByTestId('platform-domain')
-    expect(within(row).getByText('平台给的')).toBeTruthy()
+    expect(within(row).getByText('自动给的')).toBeTruthy()
     expect(within(row).getByText('web.apps.example.com')).toBeTruthy()
     expect(within(row).getByText('已生效')).toBeTruthy()
-    expect(screen.getByTestId('summary-access').textContent).toBe('公网 · web.apps.example.com')
-    expect(screen.getByTestId('domain-precedence').textContent).toBe('两个都有时用自己的域名。')
+    expect(screen.getByTestId('summary-access').textContent).toBe('web.apps.example.com（自动给的）')
+    // 只有自动给的、自己一个都没加：不写“两个都有”
+    expect(screen.queryByTestId('domain-precedence')).toBeNull()
     expect(within(screen.getByTestId('own-domains')).getByText('没有')).toBeTruthy()
     r.unmount()
 
@@ -1131,14 +1296,14 @@ describe('应用详情：名片、四个页签、设置', () => {
     row = await screen.findByTestId('platform-domain')
     expect(within(row).getByText('没生效')).toBeTruthy()
     expect(within(row).getByText('改成公网后自动生效')).toBeTruthy()
-    expect(screen.getByTestId('summary-access').textContent).toBe('局域网 · 没有绑定域名')
+    expect(screen.getByTestId('summary-access').textContent).toBe('没有，用地址打开')
     r.unmount()
 
     routes['GET /v1/apps/web'] = () => web({ exposure: 'public', url: 'https://mine.example.com', platform_domain: { host: 'web.apps.example.com', active: true, note: '' }, domains: [{ app: 'web', name: 'mine.example.com', status: 'ready', created_at: '' }] })
     r = render(<App />)
     await screen.findByTestId('platform-domain')
-    expect(screen.getByTestId('domain-precedence').textContent).toBe('两个都有，现在用自己的域名。')
-    expect(screen.getByTestId('summary-access').textContent).toBe('公网 · 域名 mine.example.com')
+    expect(screen.getByTestId('domain-precedence').textContent).toBe('两个都有，现在用你自己的。')
+    expect(screen.getByTestId('summary-access').textContent).toBe('mine.example.com')
     r.unmount()
 
     routes['GET /v1/apps/web'] = () => web()
@@ -1148,16 +1313,16 @@ describe('应用详情：名片、四个页签、设置', () => {
     expect(screen.queryByTestId('domain-precedence')).toBeNull()
   })
 
-  it('概览的访问卡片：平台给的域名生效时地址是 https、没有端口，下面写这个域名', async () => {
+  it('概览的“谁能打开”卡片：平台给的域名生效时地址是这个域名、没有端口，下面写局域网也能用的地址', async () => {
     routes['GET /v1/apps/web'] = () => web({ exposure: 'public', url: 'https://web.apps.example.com', lan_url: 'http://192.168.1.20:18810', platform_domain: { host: 'web.apps.example.com', active: true, note: '' } })
     location.hash = '#app-web'
     render(<App />)
     const card = await screen.findByTestId('ov-access')
     expect(within(card).getByTitle('https://web.apps.example.com').textContent).toBe('web.apps.example.com')
-    expect(within(card).getByTestId('ov-access-scheme').textContent).toBe('https · 域名 web.apps.example.com')
+    expect(within(card).getByText(/同一个网络里也能用 192\.168\.1\.20:18810/)).toBeTruthy()
   })
 
-  it('设置 → 更多：改环境变量后保存并重新部署；改端口要合法；有常用命令', async () => {
+  it('设置 → 开发者设置：改环境变量后保存并重装一遍；改端口要合法；有常用命令', async () => {
     routes['PUT /v1/apps/web/env/TZ'] = () => ({})
     routes['POST /v1/apps/web/redeploy'] = () => ({})
     routes['PATCH /v1/apps/web'] = () => ({})
@@ -1165,25 +1330,25 @@ describe('应用详情：名片、四个页签、设置', () => {
     render(<App />)
     const tz = await screen.findByLabelText('变量 TZ 的值')
     fireEvent.change(tz, { target: { value: 'Asia/Shanghai' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存并重新部署' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存并重装一遍' }))
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/apps/web/redeploy')).toBe(true))
     expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ value: 'Asia/Shanghai', secret: false })
-    fireEvent.change(screen.getByLabelText('容器端口'), { target: { value: '70000' } })
+    fireEvent.change(screen.getByLabelText('程序端口'), { target: { value: '70000' } })
     fireEvent.click(within(screen.getByRole('region', { name: '运行设置' })).getByRole('button', { name: '保存' }))
-    await screen.findByText('端口不对')
+    await screen.findByText(/端口不对/)
     expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
-    fireEvent.change(screen.getByLabelText('容器端口'), { target: { value: '8080' } })
+    fireEvent.change(screen.getByLabelText('程序端口'), { target: { value: '8080' } })
     fireEvent.click(within(screen.getByRole('region', { name: '运行设置' })).getByRole('button', { name: '保存' }))
     await vi.waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ port: 8080, health_path: '/' }))
     expect(screen.getByText('acornfox status web')).toBeTruthy()
     expect(screen.getByText('acornfox logs web -f')).toBeTruthy()
   })
 
-  it('设置 → 资源上限：改内存上限后保存发 PATCH；不再显示“现在”的用量', async () => {
+  it('设置 → 最多能用多少内存：改内存上限后保存发 PATCH；不再显示“现在”的用量', async () => {
     routes['PATCH /v1/apps/web'] = () => ({ applied_now: true })
     location.hash = '#app-web/settings/limits'
     render(<App />)
-    const mem = (await screen.findByLabelText('内存上限')) as HTMLSelectElement
+    const mem = (await screen.findByLabelText('最多用的内存')) as HTMLSelectElement
     expect(screen.queryByText('每 5 秒更新')).toBeNull()
     const save = within(screen.getByTestId('app-settings')).getByRole('button', { name: '保存' }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
@@ -1203,13 +1368,13 @@ describe('应用详情：名片、四个页签、设置', () => {
     await vi.waitFor(() => expect(off.disabled).toBe(false))
     fireEvent.click(off)
     const dialog = await screen.findByRole('dialog')
-    fireEvent.click(within(dialog).getByLabelText('同时删除数据（不可恢复）'))
+    fireEvent.click(within(dialog).getByLabelText('数据也删掉（找不回来）'))
     // 弹窗右上角的 × 也叫“关闭”，点的是底下那个文字按钮
     fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' }).find((b) => b.textContent === '关闭')!)
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web/addons/postgres?volumes=true')).toBe(true))
   })
 
-  it('设置 → 删除应用：默认保留数据卷；不保留要输入应用名才能删', async () => {
+  it('设置 → 删除应用：默认留着数据；不留要输入应用名才能删', async () => {
     routes['DELETE /v1/apps/web'] = () => ({})
     location.hash = '#app-web/settings/delete'
     const r = render(<App />)
@@ -1227,10 +1392,10 @@ describe('应用详情：名片、四个页签、设置', () => {
     render(<App />)
     fireEvent.click(within(await screen.findByTestId('app-settings')).getByRole('button', { name: '删除' }))
     dialog = await screen.findByRole('dialog')
-    fireEvent.click(within(dialog).getByLabelText(/保留数据卷/))
+    fireEvent.click(within(dialog).getByLabelText(/留着它的数据/))
     const del = within(dialog).getByRole('button', { name: '删除' }) as HTMLButtonElement
     expect(del.disabled).toBe(true)
-    fireEvent.change(within(dialog).getByLabelText(/确认连数据一起删除/), { target: { value: 'web' } })
+    fireEvent.change(within(dialog).getByLabelText(/输入.*确认/), { target: { value: 'web' } })
     expect(del.disabled).toBe(false)
     fireEvent.click(del)
     await vi.waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/apps/web?volumes=true')).toBe(true))

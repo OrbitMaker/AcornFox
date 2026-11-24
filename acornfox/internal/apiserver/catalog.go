@@ -14,9 +14,17 @@ import (
 // App center: browse the catalog and install from it (internal/appinstall).
 //
 //	GET  /v1/catalog                     apps and recipes of the public and the connected
-//	                                     private catalogs (each with its source), serial, last sync
+//	                                     private catalogs (each with its source), serial, last sync;
+//	                                     like GET /v1/apps it starts a background sync when the last good
+//	                                     one is older than 30 minutes (appinstall.Catalog.TouchStale)
 //	GET  /v1/catalog/apps/{id}           detail and install form (no hidden params); ?catalog=public|cat-…
-//	POST /v1/catalog/sync                sync now (public, then private catalogs)
+//	GET  /v1/catalog/skills/{kind}/{id}  the operating manual of an app or a solution (kind app, recipe or
+//	                                     solution): {id, kind, has_skill, version, checked, size, text, code, note};
+//	                                     no manual is has_skill false with a note (200), an unknown id CAT-INST-01 (404).
+//	                                     The list and the detail only say whether there is one ("skill" in "show")
+//	POST /v1/catalog/sync                sync now (public, then private catalogs); with ?if_stale=1 only when the
+//	                                     last good sync is older than 30 minutes (and the last attempt older than
+//	                                     5 minutes): the answer is the sync status plus "ran" (did it sync now)
 //	POST /v1/catalog/connect             connect a private catalog with a code {"code"} (W10)
 //	GET  /v1/catalog/sources             public and private catalogs: serial, last sync, disconnected
 //	GET  /v1/catalog/platform-vars       platform variables apps can use, with this machine's values
@@ -46,6 +54,7 @@ import (
 func (s *server) registerCatalog(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/catalog", s.catalogList)
 	mux.HandleFunc("GET /v1/catalog/apps/{id}", s.catalogApp)
+	mux.HandleFunc("GET /v1/catalog/skills/{kind}/{id}", s.catalogSkill)
 	mux.HandleFunc("POST /v1/catalog/sync", s.catalogSync)
 	mux.HandleFunc("POST /v1/catalog/connect", s.catalogConnect)
 	mux.HandleFunc("GET /v1/catalog/sources", s.catalogSources)
@@ -56,6 +65,8 @@ func (s *server) registerCatalog(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/catalog/install/{task}", s.catalogTask)
 	mux.HandleFunc("GET /v1/apps/{app}/first-login", s.appFirstLogin)
 	mux.HandleFunc("GET /v1/apps/{app}/vars", s.appVars)
+	s.registerReapply(mux)
+	s.registerUpgrade(mux)
 }
 
 // wireAppCenter gives the engine the server's own operations.
@@ -140,6 +151,9 @@ func (s *server) catalogList(w http.ResponseWriter, r *http.Request) {
 	if !s.appCenterOn(w) {
 		return
 	}
+	// Someone opened the app center: the catalog may be old, bring it up to
+	// date behind the page (never holds this answer).
+	s.appCenter.Catalog().TouchStale()
 	v, err := s.appCenter.List(r.Context())
 	if err != nil {
 		writeFault(w, err)
@@ -160,8 +174,28 @@ func (s *server) catalogApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, v)
 }
 
+func (s *server) catalogSkill(w http.ResponseWriter, r *http.Request) {
+	if !s.appCenterOn(w) {
+		return
+	}
+	v, err := s.appCenter.Skill(r.Context(), r.PathValue("kind"), r.PathValue("id"))
+	if err != nil {
+		writeFault(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
 func (s *server) catalogSync(w http.ResponseWriter, r *http.Request) {
 	if !s.appCenterOn(w) {
+		return
+	}
+	if r.URL.Query().Get("if_stale") != "" && r.URL.Query().Get("if_stale") != "0" {
+		st, ran := s.appCenter.Catalog().SyncIfStale(r.Context())
+		writeJSON(w, http.StatusOK, struct {
+			appinstall.SyncStatus
+			Ran bool `json:"ran"`
+		}{st, ran})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.appCenter.Catalog().Sync(r.Context()))

@@ -27,7 +27,14 @@ import (
 //     source is probed first (sources.go), the ones that refuse or do not
 //     answer are skipped and the slow ones go last; then the image is pulled
 //     from the first source by full reference and tagged back to the
-//     original name. Docker Hub itself is last.
+//     original name. Docker Hub and ghcr.io themselves are blocked there:
+//     they are neither probed nor pulled from, so an app install makes no
+//     connection to a blocked address and a failure on every mirror is
+//     reported at once (CAT-INST-12) instead of after a wait for the
+//     blocked address. They are used only when nothing else is configured
+//     or the user lists them in ACORNFOX_REGISTRY_MIRRORS /
+//     ACORNFOX_GHCR_MIRRORS (a machine that can reach them, e.g. through a
+//     proxy).
 //   - Otherwise: Docker Hub first, the mirrors only when it stalls, is too
 //     slow or fails.
 //
@@ -156,17 +163,38 @@ const DockerHubRegistry = "registry-1.docker.io"
 
 // PullSources lists the registry hosts a Docker Hub image is pulled from
 // under r, before the probe reorders them: in mainland China the mirrors
-// first and Docker Hub last; elsewhere Docker Hub first and the mirrors
-// after it. The setup's registry check probes them in this order.
+// only (Docker Hub itself is blocked there, see SkipsUpstream); elsewhere
+// Docker Hub first and the mirrors after it. The setup's registry check
+// probes them in this order.
 func (r Registry) PullSources() []string {
 	mirrors := r.mirrors()
 	out := make([]string, 0, len(mirrors)+1)
 	if r.China && len(mirrors) > 0 {
-		out = append(out, mirrors...)
-		return append(out, DockerHubRegistry)
+		return append(out, mirrors...)
 	}
 	out = append(out, DockerHubRegistry)
-	return append(out, mirrors...)
+	for _, m := range mirrors {
+		if m != DockerHubRegistry {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// SkipsUpstream reports whether Docker Hub itself is left out of the pull
+// sources: in mainland China, when there is at least one mirror and the user
+// did not list Docker Hub among them. It is blocked there, so asking it only
+// costs a wait (and a connection to a blocked address); a machine that can
+// reach it names it in ACORNFOX_REGISTRY_MIRRORS.
+func (r Registry) SkipsUpstream() bool {
+	m := r.mirrors()
+	return r.China && len(m) > 0 && !slices.Contains(m, DockerHubRegistry)
+}
+
+// SkipsGHCRUpstream is SkipsUpstream for ghcr.io.
+func (r Registry) SkipsGHCRUpstream() bool {
+	m := ghcrMirrors()
+	return r.China && len(m) > 0 && !slices.Contains(m, GHCRRegistry)
 }
 
 func registryMirrors() []string {
@@ -551,7 +579,7 @@ func platformArch(platforms []ocispec.Platform) string {
 func (d *Docker) pullFallback(ctx context.Context, ref string, platforms []ocispec.Platform) (string, pullUsed, error) {
 	start := time.Now()
 	tr := trackerFrom(ctx)
-	cands, _ := d.candidates(ref)
+	cands, domain := d.candidates(ref)
 	var probes map[string]ProbeResult
 	var skipped []ImageSource
 	if d.registry.China && len(cands) > 1 {
@@ -591,6 +619,11 @@ func (d *Docker) pullFallback(ctx context.Context, ref string, platforms []ocisp
 		}
 	}
 	pe := &PullError{Ref: ref}
+	if domain == "docker.io" && d.registry.SkipsUpstream() {
+		pe.UpstreamSkipped = DockerHubRegistry
+	} else if domain == GHCRRegistry && d.registry.SkipsGHCRUpstream() {
+		pe.UpstreamSkipped = GHCRRegistry
+	}
 	for _, s := range skipped {
 		pe.Attempts = append(pe.Attempts, attemptFor(s, probes, "skipped", pullStats{}, nil))
 	}
@@ -681,12 +714,22 @@ type PullError struct {
 	// Seconds how long the image was pulled over all sources.
 	Reason  string
 	Seconds float64
-	errs    []error
+	// UpstreamSkipped is the blocked registry (Docker Hub, ghcr.io) that a
+	// pull in mainland China did not ask at all (Registry.SkipsUpstream);
+	// the message and hint say so, empty otherwise.
+	UpstreamSkipped string
+	errs            []error
 }
 
 func (e *PullError) Unwrap() []error { return e.errs }
 
-func (e *PullError) Error() string { return SourcesSummary(e.Attempts) }
+func (e *PullError) Error() string {
+	msg := SourcesSummary(e.Attempts)
+	if e.UpstreamSkipped != "" {
+		msg += "；国内网络没有去试 " + e.UpstreamSkipped + "（它在国内被屏蔽，去了只会白等）"
+	}
+	return msg
+}
 
 // SourcesSummary is the one-line account of a failed pull's sources: how
 // many were tried and what each one did.
@@ -886,12 +929,25 @@ func pullErrorFailure(pe *PullError) *Failure {
 		f.Hint = slowHint
 	case unreach > 0:
 		f.Code = "pull_timeout"
-		f.Hint = "这台机器连不上能用的镜像源：先查网络和代理（sudo acornfox doctor），acornfox sources --probe 看每个源现在怎样；稍后重试"
+		f.Hint = "这台机器连不上能用的镜像源：先查网络和代理（sudo acornfox doctor），acornfox sources --probe 看每个源现在怎样；稍后重试" + upstreamHint(pe)
 	default:
 		f.Code = "pull_failed"
-		f.Hint = "检查镜像引用或稍后重试；acornfox sources --probe 看每个源现在怎样"
+		f.Hint = "检查镜像引用或稍后重试；acornfox sources --probe 看每个源现在怎样" + upstreamHint(pe)
 	}
 	return f
+}
+
+// upstreamHint is the advice for a machine in mainland China whose pull did
+// not ask the blocked upstream registry: if the machine does reach it (a
+// proxy), name it in the environment variable of its kind.
+func upstreamHint(pe *PullError) string {
+	switch pe.UpstreamSkipped {
+	case "":
+		return ""
+	case GHCRRegistry:
+		return "；国内网络默认不去 ghcr.io（被屏蔽）。这台机器能直连它的话，把 ghcr.io 写进环境变量 ACORNFOX_GHCR_MIRRORS（逗号分隔，放在镜像源后面）"
+	}
+	return "；国内网络默认不去 Docker Hub（被屏蔽）。这台机器能直连它的话，把 " + DockerHubRegistry + " 写进环境变量 ACORNFOX_REGISTRY_MIRRORS（逗号分隔，放在镜像源后面）"
 }
 
 // slowHint is the advice when the sources were reachable but too slow.

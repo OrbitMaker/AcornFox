@@ -1,5 +1,7 @@
-// 日志：当前版本每 2 秒接着读（GET /v1/apps/{app}/log-batch，带游标），旧版本读存档（GET /v1/deployments/{id}/logs）。
+// 日志：现在的版本每 2 秒接着读（GET /v1/apps/{app}/log-batch，带游标），以前的版本读存档（GET /v1/deployments/{id}/logs）。
 // 日志在服务端已按应用的密钥遮住；“只看出错”按关键词筛；下载保存成文本文件。
+// 样稿第 10 版（评估 F1）：右上角“复制给 AI 工作台”（复制最近 80 行和应用状态）；底部的命令收进默认收起的“用命令行”；
+// 下拉里从应用中心装的应用写“现在的”“以前的（11-10）”，自己部署的项目写“第 2 版 · 现在的”“第 1 版 · 以前的版本”。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Download, Pause, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -7,8 +9,14 @@ import { api, appPath, type ApiError } from '@/lib/api'
 import type { Deployment } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { Select, Spinner, Switch } from '@/components/ui/controls'
+import { Select, Switch } from '@/components/ui/controls'
+import { Loading } from '@/components/ui/skeleton'
+import { SkLogLines } from '@/components/skeletons'
 import { CopyLine } from '@/components/ui/copy'
+import { AskAI, CliFold } from '@/components/fold'
+import { deriveStatus } from '@/lib/appstatus'
+import { displayName, fromStore, plainStatus } from '@/lib/display'
+import { useConsole } from '@/state'
 import type { TabProps } from './app-page'
 import { parseHash } from '@/lib/router'
 
@@ -24,7 +32,11 @@ export function lineTone(l: string): 'error' | 'warn' | '' {
 
 interface Batch { lines: string[]; cursor: string; has_more: boolean; reset: boolean }
 
+const DEP_WORD: Record<string, string> = { live: '现在的', failed: '没换上的', retired: '以前的版本', superseded: '以前的版本' }
+const md = (iso: string) => { const d = new Date(iso); return Number.isFinite(d.getTime()) ? String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') : '' }
+
 export function LogsTab({ app: a }: TabProps) {
+  const { catalog, installing } = useConsole()
   const initialV = parseHash(location.hash).query?.v
   const [deps, setDeps] = useState<Deployment[]>([])
   const [sel, setSel] = useState<string>('live')
@@ -123,11 +135,23 @@ export function LogsTab({ app: a }: TabProps) {
     window.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
   }
 
+  const store = fromStore(a)
   const live = deps.find((d) => d.status === 'live')
-  const options: [string, string][] = [['live', live ? `第 ${live.seq} 版 · 当前` : '当前']]
-  for (const d of deps) if (d.status !== 'live' && (d.logs?.run || d.logs?.build)) options.push([d.id, `第 ${d.seq} 版 · ${d.status_text || d.status}`])
+  const options: [string, string][] = [['live', store || !live ? '现在的' : `第 ${live.seq} 版 · 现在的`]]
+  for (const d of deps) {
+    if (d.status === 'live' || !(d.logs?.run || d.logs?.build)) continue
+    const word = DEP_WORD[d.status] || '以前的版本'
+    options.push([d.id, store ? `${word.replace(/版本$/, '')}（${md(d.created_at)}）` : `第 ${d.seq} 版 · ${word}`])
+  }
   const selDep = deps.find((d) => d.id === sel)
   const cli = 'acornfox logs ' + a.name + (selDep ? ' --version ' + selDep.seq : ' -f')
+  // 复制给 AI 工作台：应用、状态、最近 80 行（故障编号这类原话都在日志里）
+  const forAI = () => {
+    const label = displayName(catalog, a)
+    const st = plainStatus(a, deriveStatus(a, installing))
+    const tail = (lines || []).slice(-80).join('\n')
+    return `AcornFox 上的应用 ${label}（${a.name}）现在${st.text}${st.note ? '（' + st.note + '）' : ''}。下面是${selDep ? '第 ' + selDep.seq + ' 版' : '现在的'}日志最后 ${Math.min(80, (lines || []).length)} 行，请帮我看看有没有问题、该怎么办：\n\n${tail}`
+  }
 
   return (
     <Card className="overflow-hidden">
@@ -137,14 +161,15 @@ export function LogsTab({ app: a }: TabProps) {
         <div className="ml-auto flex items-center gap-1">
           {sel === 'live' && (
             <Button variant="ghost" size="icon-sm" onClick={toggleFollow} aria-label={follow ? '暂停' : '继续'} title={follow ? '暂停' : '继续'}>
-              {follow ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
+              {follow ? <Pause className="size-icon" /> : <Play className="size-icon" />}
             </Button>
           )}
-          <Button variant="ghost" size="icon-sm" onClick={download} disabled={!lines || lines.length === 0} aria-label="下载" title="下载"><Download className="size-3.5" /></Button>
+          <Button variant="ghost" size="icon-sm" onClick={download} disabled={!lines || lines.length === 0} aria-label="下载" title="下载"><Download className="size-icon" /></Button>
+          <AskAI text={forAI} className="ml-1" />
         </div>
       </div>
-      <div ref={box} className="max-h-[420px] min-h-[160px] overflow-auto bg-muted/20 p-3 font-mono text-[11.5px] leading-relaxed" data-testid="log-box">
-        {lines === null && !err && <div className="flex items-center gap-2 text-muted-foreground"><Spinner />正在读取…</div>}
+      <div ref={box} className="max-h-[420px] min-h-[160px] overflow-auto bg-muted/20 p-3 font-mono text-xs leading-relaxed" data-testid="log-box">
+        <Loading when={lines === null && !err} skeleton={<SkLogLines />}>{null}</Loading>
         {err && <div className="text-danger">{err}</div>}
         {lines !== null && shown.length === 0 && !err && <div className="text-muted-foreground">{onlyErr ? '没有出错记录' : '还没有日志'}</div>}
         {shown.map((l, i) => {
@@ -152,9 +177,9 @@ export function LogsTab({ app: a }: TabProps) {
           return <div key={i} className={cn('whitespace-pre-wrap break-all', t === 'error' && 'text-danger', t === 'warn' && 'text-warning')}>{l}</div>
         })}
       </div>
-      <div className="flex flex-wrap items-center gap-2 border-t px-3 py-1.5">
-        <span className="text-2xs text-muted-foreground">{note || (sel === 'live' ? (follow ? '实时 · 每 2 秒更新' : '已暂停') : '存档')}</span>
-        <CopyLine className="ml-auto max-w-full sm:max-w-sm" text={cli} />
+      <div className="flex flex-col gap-1.5 border-t px-3 py-1.5">
+        <span className="text-2xs text-muted-foreground">{note || (sel === 'live' ? (follow ? '实时 · 每 2 秒更新' : '已暂停') : '以前的，不再更新')}</span>
+        <CliFold><CopyLine className="max-w-full sm:max-w-sm" text={cli} /></CliFold>
       </div>
     </Card>
   )

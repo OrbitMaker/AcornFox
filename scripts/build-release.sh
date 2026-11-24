@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建发布产物：dist/acornfox_<os>_<arch>[.exe] 和 SHA256SUMS，并附带引导脚本 get.sh、打了版本戳的安装脚本、
+# 构建发布产物：dist/acornfox_<os>_<arch>[.exe] 和 SHA256SUMS，并附带引导脚本 get.sh、get.ps1（Windows）、打了版本戳的安装脚本（含 install-windows.ps1）、
 # 入口镜像包 acornfox-edge_<入口版本>_linux_<amd64|arm64>.tar.gz（里面带上游 Caddy，上游安装包本身不再单独附带）
 # 文件名与 scripts/install/*.sh 下载的地址一致。
 #
@@ -7,8 +7,9 @@
 #   例: scripts/build-release.sh v0.4.0-rc.1
 #
 # 编哪些平台：默认 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64。
-#   Linux 是服务端加命令行；Mac 只当命令行客户端用（经 SSH 管理服务器）。
-#   本版本不编 Windows：Windows 用户经 SSH 在服务器上运行 acornfox。
+#   Linux 是服务端加命令行；Mac 的程序（darwin/arm64）既是命令行，也是 Mac 本机安装用的 acornfox mac …（装进苹果 container 开的虚拟机，
+#   虚拟机里是 linux/arm64 的程序，见 install-mac.sh）。
+#   不编 Windows 的 exe：Windows 上的 AcornFox 装在 WSL 里（get.ps1 + install-windows.ps1），命令行经 wsl 调用。
 #   要改就设 ACORNFOX_RELEASE_TARGETS（空格分隔的 os/arch），例如
 #     ACORNFOX_RELEASE_TARGETS="linux/amd64" scripts/build-release.sh v0.4.0-rc.1
 #     ACORNFOX_RELEASE_TARGETS="linux/amd64 windows/amd64" scripts/build-release.sh v0.4.0-test
@@ -56,13 +57,20 @@ for target in $TARGETS; do
 done
 
 cd "$DIST"
-cp "$ROOT/scripts/install/install.sh" "$ROOT/scripts/install/upgrade.sh" "$ROOT/scripts/install/uninstall.sh" "$ROOT/scripts/install/install-cli.sh" "$DIST/"
+cp "$ROOT/scripts/install/install.sh" "$ROOT/scripts/install/upgrade.sh" "$ROOT/scripts/install/uninstall.sh" "$ROOT/scripts/install/install-cli.sh" "$ROOT/scripts/install/install-mac.sh" "$DIST/"
 # 引导脚本 get.sh 是用户的一行命令读的入口（海外读“最新正式版”的这个附件）。它不含版本，原样带上。
 cp "$ROOT/get.sh" "$DIST/"
+# Windows：引导脚本 get.ps1（不含版本，原样带上）和打了版本戳、拼进下载网关 PowerShell 客户端的 install-windows.ps1。
+# 两个都是带 BOM 的 UTF-8（英文 Windows 的 PowerShell 5.1 读无 BOM 的中文会解析错）；Windows 上不发 exe。
+cp "$ROOT/get.ps1" "$DIST/"
+bash "$ROOT/scripts/install/windows/assemble.sh" "$DIST/install-windows.ps1" "$VERSION" >/dev/null
+for f in get.ps1 install-windows.ps1; do
+    [ "$(head -c 3 "$DIST/$f" | od -An -tx1 | tr -d ' \n')" = "efbbbf" ] || { echo "$f 没有 BOM（要带 BOM 的 UTF-8）" >&2; exit 1; }
+done
 
-# 给安装、升级、装命令行的脚本打版本戳：发行版里的脚本只处理这个版本的程序（源码里是 dev，不能直接用）。
+# 给安装、升级、装命令行、Mac 本机安装的脚本打版本戳：发行版里的脚本只处理这个版本的程序（源码里是 dev，不能直接用）。
 # 每个脚本里必须恰好有一行 SCRIPT_VERSION="dev"，改不到就停下，不发没有戳的脚本。
-for f in install.sh upgrade.sh install-cli.sh; do
+for f in install.sh upgrade.sh install-cli.sh install-mac.sh; do
     n=$(grep -c '^SCRIPT_VERSION="dev"$' "$f" || true)
     [ "$n" = 1 ] || { echo "$f 里要恰好有一行 SCRIPT_VERSION=\"dev\"，现在有 ${n} 行，没法打版本戳" >&2; exit 1; }
     sed "s/^SCRIPT_VERSION=\"dev\"\$/SCRIPT_VERSION=\"${VERSION}\"/" "$f" > "$f.tmp" && mv "$f.tmp" "$f"

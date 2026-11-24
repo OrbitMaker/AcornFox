@@ -1,48 +1,55 @@
-// 设置：通用、服务、访问、运行环境、存储、下载源、升级、开发者与 AI。没有后端支撑的项（提醒、账号）不显示。
-// “服务”分区在 services.tsx（这台机器上能给应用用的服务，旧服务端没有接口时显示还没有这项功能）。
-// “访问”分区在 access.tsx（域名、局域网里打开控制台、在外面打开控制台，一行一项、点开才展开）。
-// 接口：GET /v1/runtime/checks（数据目录、磁盘、下载顺序）、GET /v1/metrics/host、GET /v1/status（版本）、
-//       GET /v1/catalog（目录来源，含私有目录）、POST /v1/catalog/connect（连接私有目录，这一版藏起，见 PRIVATE_CATALOG_UI）。
-// 升级只有升级命令：平台只能升级、不能回滚（升级没成功时脚本自动恢复原样）。
+// 设置（样稿第 10 版，评估 N1、N2、N13、N14、R3；第 11 版把体检并了进来）。左边分页分两组：
+//   常用：外观（路由 general，以前叫“通用”）、服务、访问、这台机器（machine：升级和体检两行，见 machine.tsx）；
+//   高级（默认收起，点开才显示；地址直接进高级分区时自动展开）：平台自动填的（platform）、开发者与 AI（dev）。
+// 地址 #prefs/update、#prefs/checkup 进“这台机器”并展开升级、体检那一行。
+// 体检以前是单独一页（#runtime），更早还有设置里的“运行环境”“存储”“下载源”三个分页：#runtime 和 #prefs/engine、storage、mirror、
+// runtime、sources 进来时直接换成 #prefs/checkup（不留在浏览历史里）。不认识的分区显示第一页“外观”。
+// “服务”分区在 services.tsx；“访问”分区在 access.tsx（最下面一行是退出登录）；“平台自动填的”在 platform.tsx。
 import * as React from 'react'
-import { Bot, Globe, HardDrive, Link2, Lock, Plug, Server, SlidersHorizontal, ArrowUpCircle } from 'lucide-react'
+import { Bot, ChevronRight, Lock, Palette, Plug, Server, Wand2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { api } from '@/lib/api'
-import { usePoll } from '@/lib/hooks'
-import { go } from '@/lib/router'
-import { PRIVATE_CATALOG_UI } from '@/lib/features'
-import { UPGRADE_CN, UPGRADE_GLOBAL } from '@/lib/upgrade'
-import type { HostView, RuntimeChecks } from '@/lib/types'
 import { ACCENTS, type Theme } from '@/lib/theme'
+import { WORDS } from '@/lib/display'
 import { useConsole } from '@/state'
-import { KV } from '@/components/bits'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { Spinner, Tabs } from '@/components/ui/controls'
+import { Tabs } from '@/components/ui/controls'
 import { CopyLine } from '@/components/ui/copy'
-import { Progress } from '@/components/ui/progress'
-import { ConnectCatalogDialog } from '../store/connect-dialog'
 import { Services } from './services'
 import { Access } from './access'
+import { PlatformFilled } from './platform'
+import { Machine, type MachineRow } from './machine'
 
-export const PREF_NAV = [
-  ['general', '通用', SlidersHorizontal],
+type NavItem = readonly [string, string, typeof Plug]
+
+export const PREF_COMMON: readonly NavItem[] = [
+  ['general', '外观', Palette],
   ['services', '服务', Plug],
   ['access', '访问', Lock],
-  ['engine', '运行环境', Server],
-  ['storage', '存储', HardDrive],
-  ['mirror', '下载源', Globe],
-  ['update', '升级', ArrowUpCircle],
+  ['machine', WORDS.machine, Server],
+] as const
+
+export const PREF_ADVANCED: readonly NavItem[] = [
+  ['platform', WORDS.platformFilled, Wand2],
   ['dev', '开发者与 AI', Bot],
 ] as const
+
+export const PREF_NAV: readonly NavItem[] = [...PREF_COMMON, ...PREF_ADVANCED]
+
+// “这台机器”里直接展开某一行的地址。
+const MACHINE_ROWS: Record<string, MachineRow> = { update: 'update', checkup: 'checkup' }
+
+// 并进体检的旧地址（旧链接、书签照样能用）：换成 #prefs/checkup。
+export const MOVED_TO_CHECKUP = ['engine', 'storage', 'mirror', 'runtime', 'sources']
+
+// 只有一种语言时不显示“语言”这一行（评估 N2）；以后加了语言再显示。
+const LANGUAGES = ['简体中文']
 
 const CLI_CN = 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- cli'
 const CLI_GLOBAL = 'curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh | bash -s -- cli'
 
 function Row({ title, desc, children }: { title: React.ReactNode; desc?: React.ReactNode; children?: React.ReactNode }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+    <div className="flex min-h-ctl flex-wrap items-center justify-between gap-3 py-2.5">
       <div className="min-w-0">
         <div className="text-sm">{title}</div>
         {desc && <div className="text-2xs text-muted-foreground">{desc}</div>}
@@ -62,122 +69,22 @@ function Block({ title, desc, children }: { title: React.ReactNode; desc?: React
   )
 }
 
-function useChecks() {
-  return usePoll((s) => api.get<RuntimeChecks>('/v1/runtime/checks', s).catch(() => null), 0)
-}
-
 function General() {
   const { theme, setTheme, accent, setAccent } = useConsole()
   return (
     <>
-      <Row title="外观"><Tabs<Theme> value={theme} onChange={setTheme} label="外观" items={[['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']]} /></Row>
-      <Row title="主色" desc="按钮、开关这些主要动作的颜色；只记在这个浏览器里">
+      <Row title="明暗"><Tabs<Theme> value={theme} onChange={setTheme} label="明暗" items={[['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']]} /></Row>
+      <Row title="主色">
         <div role="radiogroup" aria-label="主色" className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
           {ACCENTS.map(([k, l, c]) => (
             <button key={k} type="button" role="radio" aria-checked={accent === k} title={'主色：' + l} aria-label={'主色：' + l} onClick={() => setAccent(k)}
-              className={cn('size-6 rounded border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', accent === k ? 'border-foreground' : 'border-transparent')}>
+              className={cn('tap size-ctl-xs rounded border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', accent === k ? 'border-foreground' : 'border-transparent')}>
               <span className="block size-full rounded-sm" style={{ background: c }} />
             </button>
           ))}
         </div>
       </Row>
-      <Row title="语言" desc="这一版只有中文"><Badge variant="outline">简体中文</Badge></Row>
-    </>
-  )
-}
-
-function Engine() {
-  const { status } = useConsole()
-  return (
-    <>
-      <div className="py-1">
-        <KV k="Docker">{status?.docker_version || '—'}</KV>
-        <KV k="执行器">{status?.runner === 'ok' ? '正常' : status ? '没有应答' : '—'}</KV>
-        {status?.edge?.state && <KV k="入口代理">{status.edge.state === 'running' ? '运行中' : status.edge.state === 'preparing' ? '正在准备' : status.edge.message || '有问题'}</KV>}
-      </div>
-      <div className="flex gap-1.5 py-2.5">
-        <Button variant="outline" size="sm" onClick={() => go('#runtime')}>查看自检</Button>
-      </div>
-    </>
-  )
-}
-
-function Storage() {
-  const checks = useChecks()
-  const host = usePoll((s) => api.get<HostView>('/v1/metrics/host', s), 0)
-  const h = host.data
-  const disk = checks.data?.items.find((i) => i.text.startsWith('磁盘：'))
-  const GB = 1024 ** 3
-  return (
-    <>
-      {checks.data?.data_dir && <Row title="数据目录" desc="应用的数据卷之外，AcornFox 自己的数据都在这里"><span className="mono text-xs">{checks.data.data_dir}</span></Row>}
-      {h?.available && h.disk_total && h.disk_used !== undefined && (
-        <Block title="磁盘" desc={`已用 ${(h.disk_used / GB).toFixed(1)} GB / ${(h.disk_total / GB).toFixed(1)} GB`}>
-          <Progress value={(h.disk_used / h.disk_total) * 100} tone={h.disk_total - h.disk_used < 3 * GB ? 'danger' : h.disk_total - h.disk_used < 10 * GB ? 'warning' : undefined} label="磁盘已用" />
-        </Block>
-      )}
-      {disk && <Row title="剩余空间" desc={disk.text.replace(/^磁盘：/, '')}>{disk.level !== 'ok' && <Badge variant={disk.level === 'fail' ? 'danger' : 'warning'} className="mono">{disk.code}</Badge>}</Row>}
-      <Row title="可回退版本" desc="除了正在运行的版本，每个应用再留 5 个不同的镜像用来回退，更早的自动删掉" />
-      <Block title="可清理的内容" desc="控制台还不能清理。在服务器上先看占用，确认不需要再清理（会删掉停掉的容器和没用的镜像）：">
-        <CopyLine text="sudo docker system df" />
-      </Block>
-    </>
-  )
-}
-
-function Mirror({ onConnect }: { onConnect: () => void }) {
-  const checks = useChecks()
-  const { catalog } = useConsole()
-  const src = checks.data?.sources
-  const cats = catalog?.sources || []
-  return (
-    <>
-      {src && (
-        <>
-          <Row title="网络" desc={src.region_source === 'install.env' ? '安装时选的' : src.region_source === 'default' ? '默认' : '自动判断'}>
-            <Badge variant="outline">{src.china ? '中国大陆：先用国内源' : '海外：先用官方源'}</Badge>
-          </Row>
-          <Block title="Docker Hub 镜像" desc="按这个顺序试，一个不通换下一个">
-            <ol className="flex flex-col gap-1" data-testid="mirror-order">
-              {src.docker_hub.map((h, i) => (
-                <li key={h} className="flex items-center gap-2 text-xs"><span className="tnum flex size-4 shrink-0 items-center justify-center rounded-full border text-2xs">{i + 1}</span><span className="mono">{h === 'registry-1.docker.io' ? 'Docker Hub 官方' : h}</span></li>
-              ))}
-            </ol>
-          </Block>
-          {src.ghcr && src.ghcr.length > 0 && <Row title="GitHub 镜像（ghcr.io）的国内源"><span className="mono text-xs">{src.ghcr.join('、')}</span></Row>}
-          <Row title="下载网关" desc="AcornFox 自己存的安装文件和大镜像包从这里取"><span className="mono text-xs">{src.gateway ? src.gateway.replace(/^https?:\/\//, '') : '已关掉'}</span></Row>
-        </>
-      )}
-      {!src && checks.loading && <div className="flex items-center gap-2 py-2.5 text-xs text-muted-foreground"><Spinner />正在读取…</div>}
-      <Block title="应用目录">
-        <ul className="flex flex-col gap-1.5" data-testid="catalog-sources">
-          {cats.map((c) => (
-            <li key={c.id} className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="font-medium">{c.name}</span>
-              {c.kind === 'private' && <span className="mono text-2xs text-muted-foreground">{c.id}</span>}
-              {c.disconnected ? <Badge variant="danger">已断开</Badge>
-                : c.code === 'CAT-SYNC-01' ? <Badge variant="outline" title={c.message}>只用程序自带的目录</Badge>
-                : c.code ? <Badge variant="warning" className="mono" title={c.message}>{c.code}</Badge>
-                : <Badge variant="success">正常</Badge>}
-              <span className="ml-auto text-2xs text-muted-foreground">{c.serial ? `第 ${c.serial} 版 · ${c.apps} 个应用` : '还没同步下来'}{c.kind === 'public' && c.origin === 'snapshot' ? ' · 程序自带' : ''}</span>
-            </li>
-          ))}
-        </ul>
-      </Block>
-      {PRIVATE_CATALOG_UI && <div className="py-2.5"><Button variant="outline" size="sm" onClick={onConnect}><Link2 className="size-3.5" />连接私有目录</Button></div>}
-    </>
-  )
-}
-
-function Update() {
-  const { status } = useConsole()
-  return (
-    <>
-      <Row title="当前版本"><span className="tnum text-sm">{status?.version || '—'}</span></Row>
-      <Block title="升级（中国大陆）" desc="在服务器上运行（会先打印要做的事）">
-        <CopyLine text={UPGRADE_CN} />
-      </Block>
-      <Block title="升级（其他地区）"><CopyLine text={UPGRADE_GLOBAL} /></Block>
+      {LANGUAGES.length > 1 && <Row title="语言"><span className="text-xs">{LANGUAGES.join('、')}</span></Row>}
     </>
   )
 }
@@ -189,9 +96,12 @@ function Dev() {
         <CopyLine text="acornfox skill install" />
         <CopyLine text="acornfox skill print" />
       </Block>
-      <Block title="在自己电脑上装命令行" desc="Linux、Mac；用来管理这台服务器">
+      <Block title="在自己电脑上装命令行" desc="Linux、Mac；用来管理这台机器">
         <CopyLine text={CLI_CN} />
         <CopyLine text={CLI_GLOBAL} />
+      </Block>
+      <Block title="部署自己的项目" desc="把自己写的程序放到这台机器上跑：在项目目录里运行，装好后出现在“我的应用”里">
+        <CopyLine text="acornfox deploy" />
       </Block>
       <Block title="常用命令" desc="页面能做的事命令行都能做，加 --json 输出给程序或 AI 读">
         <CopyLine text="acornfox apps" />
@@ -203,27 +113,41 @@ function Dev() {
   )
 }
 
+function NavLink({ item, cur }: { item: NavItem; cur: string }) {
+  const [k, l, Icon] = item
+  return (
+    <a href={'#prefs/' + k} aria-current={cur === k ? 'page' : undefined}
+      className={cn('flex h-nav shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 text-sm hover:bg-accent', cur === k ? 'bg-accent font-medium' : 'text-muted-foreground')}>
+      <Icon className="hidden size-icon md:block" />{l}
+    </a>
+  )
+}
+
 export function PrefsPage({ sec }: { sec?: string }) {
-  const cur = PREF_NAV.find((x) => x[0] === sec) || PREF_NAV[0]
-  const [connect, setConnect] = React.useState(false)
+  const moved = !!sec && MOVED_TO_CHECKUP.includes(sec)
+  React.useEffect(() => { if (moved) location.replace('#prefs/checkup') }, [moved])
+  const row = sec ? MACHINE_ROWS[sec] : undefined
+  const cur = PREF_NAV.find((x) => x[0] === (row ? 'machine' : sec)) || PREF_NAV[0]
+  const inAdvanced = PREF_ADVANCED.some((x) => x[0] === cur[0])
+  const [adv, setAdv] = React.useState(inAdvanced)
+  React.useEffect(() => { if (inAdvanced) setAdv(true) }, [inAdvanced])
+  if (moved) return null
   const body: Record<string, React.ReactNode> = {
-    general: <General />, services: <Services />, access: <Access />, engine: <Engine />, storage: <Storage />,
-    mirror: <Mirror onConnect={() => setConnect(true)} />, update: <Update />, dev: <Dev />,
+    general: <General />, services: <Services />, access: <Access />, machine: <Machine want={row} />, platform: <PlatformFilled />, dev: <Dev />,
   }
   return (
     <div>
       <div className="flex flex-col gap-4 md:flex-row">
-        <nav aria-label="设置分区" className="no-scrollbar flex gap-0.5 overflow-x-auto md:w-40 md:shrink-0 md:flex-col">
-          {PREF_NAV.map(([k, l, Icon]) => (
-            <a key={k} href={'#prefs/' + k} aria-current={cur[0] === k ? 'page' : undefined}
-              className={cn('flex h-7 shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 text-sm hover:bg-accent', cur[0] === k ? 'bg-accent font-medium' : 'text-muted-foreground')}>
-              <Icon className="hidden size-3.5 md:block" />{l}
-            </a>
-          ))}
+        <nav aria-label="设置分区" className="no-scrollbar flex items-center gap-0.5 overflow-x-auto md:w-40 md:shrink-0 md:flex-col md:items-stretch">
+          {PREF_COMMON.map((x) => <NavLink key={x[0]} item={x} cur={cur[0]} />)}
+          <button type="button" aria-expanded={adv} onClick={() => setAdv((o) => !o)} data-testid="prefs-advanced-toggle"
+            className="flex h-nav shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2 text-2xs text-muted-foreground hover:text-foreground md:mt-3">
+            <ChevronRight className={cn('size-3 transition-transform duration-[var(--dur-sm-in)] ease-out-strong', adv && 'rotate-90')} aria-hidden="true" />高级
+          </button>
+          {adv && PREF_ADVANCED.map((x) => <NavLink key={x[0]} item={x} cur={cur[0]} />)}
         </nav>
-        <Card className="min-w-0 max-w-2xl flex-1 px-4 py-1"><div className="divide-y" data-testid={'prefs-' + cur[0]}>{body[cur[0]]}</div></Card>
+        <Card className="min-w-0 max-w-2xl flex-1 px-4 md:self-start py-1"><div className="divide-y" data-testid={'prefs-' + cur[0]}>{body[cur[0]]}</div></Card>
       </div>
-      {PRIVATE_CATALOG_UI && <ConnectCatalogDialog open={connect} onClose={() => setConnect(false)} />}
     </div>
   )
 }

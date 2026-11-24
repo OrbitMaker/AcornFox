@@ -34,7 +34,7 @@ var pdomainFaults = []Fault{
 			{Text: "安装时记下的服务器地址（--public-host）是内网地址，其实这台云主机有公网地址", Check: "云厂商控制台里这台机器有公网 IP，而 domain base 的 public_ip 是空的"},
 		},
 		Steps:   []string{"acornfox --json domain base", "问用户这台机器是云主机还是家里、公司里的电脑"},
-		Actions: []Action{{Text: "照实告诉用户这一版用不了，给出 acornfox open 应用名 的办法", Tier: 0}, {Text: "第三种原因：照 Skill 里“改服务器地址”那一节改 --public-host（要重启服务，先问用户）", Tier: 2}},
+		Actions: []Action{{Text: "照实告诉用户这一版用不了，给出 acornfox open 应用名 的办法", Tier: 0}, {Text: "第三种原因：照 Skill 里 install-linux.md 的“改应用访问地址”那一节改 --public-host（要重启服务，先问用户）", Tier: 2}},
 		Ask:     "要改服务器地址、重启服务时",
 		Verify:  "acornfox --json domain base 的 supported 是 true",
 		Inject:  "开发机（局域网）上运行 acornfox domain base"},

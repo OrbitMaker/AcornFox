@@ -237,6 +237,8 @@ AcornFox 升级脚本（Linux 服务器）
     --binary PATH      使用本地 acornfox 二进制文件，不下载（用于测试候选版本）
     --edge-package PATH  使用本地的入口包 acornfox-edge_<入口版本>_linux_<架构>.tar.gz，不下载
                        （用于测试；配 --binary 时也可以把它放在程序文件旁边）
+    --china            这一次先从 Gitee（国内）下载，不改安装时记下的网络区域
+    --global           这一次先从 GitHub（海外）下载，不改安装时记下的网络区域
     -h, --help         显示此帮助信息
 
 环境变量:
@@ -252,9 +254,14 @@ EOF
 }
 
 parse_args() {
+    # --china / --global：只影响这一次从哪里下载，不改 /etc/acornfox/install.env 里记的网络区域（P-837）
+    FORCE_CHINA=false
+    FORCE_GLOBAL=false
     while [[ $# -gt 0 ]]; do
         case $1 in
             -y|--yes) ASSUME_YES=true; shift ;;
+            --china) FORCE_CHINA=true; shift ;;
+            --global) FORCE_GLOBAL=true; shift ;;
             --rollback) WANT_ROLLBACK=true; shift ;;
             --version)
                 [[ $# -ge 2 ]] || error_exit "--version 需要一个版本号"
@@ -266,7 +273,7 @@ parse_args() {
                 [[ $# -ge 2 ]] || error_exit "--edge-package 需要一个本地文件路径"
                 EDGE_PACKAGE="$2"; shift 2 ;;
             -h|--help) show_help; exit 0 ;;
-            *) error_exit "未知参数: $1（可用：-y、--version V、--binary PATH、--edge-package PATH、--help）" ;;
+            *) error_exit "未知参数: $1（可用：-y、--version V、--binary PATH、--edge-package PATH、--china、--global、--help）" ;;
         esac
     done
 }
@@ -426,6 +433,12 @@ setup_github_proxies() {
         fi
         NETWORK_DECIDED=1
     fi
+    # --china / --global 只管这一次下载：覆盖上面的判断，但不写回 install.env
+    if ${FORCE_CHINA:-false}; then
+        IN_CHINA=true
+    elif ${FORCE_GLOBAL:-false}; then
+        IN_CHINA=false
+    fi
     if $IN_CHINA; then
         GITHUB_PROXIES+=("https://ghfast.top/" "https://gh-proxy.com/")
     fi
@@ -455,6 +468,31 @@ ACORNFOX_GITEE_REPO="${ACORNFOX_GITEE_REPO-VIP13390/AcornFox}"
 GET_URL_GITEE="https://gitee.com/${ACORNFOX_GITEE_REPO:-VIP13390/AcornFox}/raw/main/get.sh"
 GET_URL_GITHUB="https://github.com/${ACORNFOX_REPO}/releases/latest/download/get.sh"
 
+# gitee_download URL OUT：从 Gitee 下载一个发行版文件。第一次没成功（连不上，或中途卡住被下面的限速判断
+# 停下）先在 Gitee 上再试一次，两次都不行才返回失败，由调用方换 GitHub。
+# 为什么：Gitee 偶尔在传输中途卡住，下一次连接几乎都是好的（2026-11-20 在 Mac 虚拟机里实测：一次停在
+# 7.9 MB，重下一次 8 秒完成，速度 2 MB/s）；以前一失败就退回 GitHub，国内直连 GitHub 只有几十 KB/s，
+# 用户看到的是“Gitee 明明很快却走了很慢的 GitHub”（P-847）。Gitee 不支持断点续传，重试是整个文件重下。
+# 限速判断：连续 15 秒低于 50 KB/s 就算卡住（curl 的 --speed-limit、--speed-time）。
+# 返回：0 成功；1 两次都失败。每次失败都会写一行日志（curl 退出码、已经下了多少）。
+gitee_download() {
+    local url="$1" out="$2" attempt rc size
+    for attempt in 1 2; do
+        rm -f "$out"
+        rc=0
+        curl_get "$out" "$url" --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15 || rc=$?
+        if [ "$rc" = 0 ]; then return 0; fi
+        size=$(stat -c %s "$out" 2>/dev/null || echo 0)
+        if [ "$attempt" = 1 ]; then
+            log_warn "Gitee 下载中断（curl 退出码 ${rc}，已下 ${size} 字节），在 Gitee 上再试一次"
+        else
+            log_warn "Gitee 第二次也中断（curl 退出码 ${rc}，已下 ${size} 字节）"
+        fi
+    done
+    rm -f "$out"
+    return 1
+}
+
 # release_download VERSION ASSET OUT：下载某个版本的 Release 文件
 release_download() {
     local version="$1" asset="$2" out="$3"
@@ -465,11 +503,10 @@ release_download() {
     fi
     if $IN_CHINA && [ -n "$ACORNFOX_GITEE_REPO" ]; then
         log_info "从 Gitee 镜像下载 ${asset}"
-        if curl_get "$out" "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}" \
-            --connect-timeout 10 --max-time 600 --speed-limit 51200 --speed-time 15; then
+        if gitee_download "https://gitee.com/${ACORNFOX_GITEE_REPO}/releases/download/${version}/${asset}" "$out"; then
             return 0
         fi
-        log_warn "Gitee 镜像下载失败，改从 GitHub 下载"
+        log_warn "Gitee 镜像两次都没下成功，改从 GitHub 下载"
     fi
     github_download "https://github.com/${ACORNFOX_REPO}/releases/download/${version}/${asset}" "$out"
 }
@@ -1544,5 +1581,10 @@ main() {
     # 显示摘要
     show_summary
 }
+
+# 只给脚本测试用（scripts/install/download.test.sh）：AFX_INSTALL_LIB=1 并且是被 source 时，只定义函数、不执行
+if [ "${AFX_INSTALL_LIB:-}" = 1 ] && [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
 
 main "$@"

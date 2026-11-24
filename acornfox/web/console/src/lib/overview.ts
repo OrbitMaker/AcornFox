@@ -1,5 +1,6 @@
-// 应用概览页图表卡片用的计算（运行条、圆环、版本时间线、访问）。都是纯函数，页面只管画。
+// 应用概览页卡片用的计算（谁能打开、运行条、圆环、版本时间线、装好的日期）。都是纯函数，页面只管画。
 // 数据都来自现有接口：GET /v1/apps/{app}、/v1/metrics/apps/{app}、/v1/apps/{app}/deployments。
+// 三档的叫法和“这一档谁能打开”那句话只在 ACCESS_LEVELS 写一次（概览的“谁能打开”卡片用）。
 import { isLoopbackURL, shortAddress } from './appstatus'
 import type { AppView, Deployment } from './types'
 
@@ -51,7 +52,7 @@ export function cpuOfLimit(cpuPercent: number | undefined | null, cpuMilli: numb
 export interface VersionNode { seq: number; live: boolean; failed: boolean; when: string }
 
 // versionTimeline：时间线上的几个版本，从旧到新，最多 max 个，正在服务的那一版一定在里面。
-// when：正在服务的写“正在服务”，没上线的写“没上线”，其余写上线那天（月-日）。
+// when：正在用的写“正在用”，没换上的写“没换上”，其余写装好那天（月-日）。
 export function versionTimeline(list: Deployment[] | undefined | null, liveSeqNow: number, max = 3): VersionNode[] {
   const bySeq = new Map<number, Deployment>()
   for (const d of list || []) if (d && d.seq > 0) bySeq.set(d.seq, d)
@@ -64,15 +65,31 @@ export function versionTimeline(list: Deployment[] | undefined | null, liveSeqNo
     const live = seq === liveSeqNow
     const failed = !live && d?.status === 'failed'
     const t = d ? Date.parse(d.finished_at || d.created_at) : NaN
-    return { seq, live, failed, when: live ? '正在服务' : failed ? '没上线' : Number.isFinite(t) ? md(t) : '' }
+    return { seq, live, failed, when: live ? '正在用' : failed ? '没换上' : Number.isFinite(t) ? md(t) : '' }
   })
+}
+
+// installedAt：现在这个版本是哪天装好的（月-日）。从版本记录里找和正在用的那一版是同一个程序（source_ref 一样）的
+// 最早一次，用它完成的时间；重装一遍程序不算重新装。读不到时返回空。
+export function installedAt(list: Deployment[] | undefined | null, live: Deployment | undefined | null): string {
+  if (!live) return ''
+  const same = (list || []).filter((d) => d && d.source_ref === live.source_ref && d.status !== 'failed')
+  const first = [live, ...same].reduce((a, b) => (b.seq < a.seq ? b : a))
+  const t = Date.parse(first.finished_at || first.created_at)
+  return Number.isFinite(t) ? md(t) : ''
+}
+
+// plainWords：服务端给的版本来源、状态这类短句里的技术词换成全站的说法（评估第 4 节）：
+// 镜像 → 应用程序，重新部署 → 重装一遍，回退 → 退回，部署 → 安装。
+export function plainWords(s: string | undefined | null): string {
+  return (s || '').replace(/镜像/g, '应用程序').replace(/重新部署/g, '重装一遍').replace(/回退/g, '退回').replace(/部署/g, '安装')
 }
 
 export type AccessLevel = 'local' | 'lan' | 'public'
 export const ACCESS_LEVELS: { key: AccessLevel; text: string; who: string }[] = [
   { key: 'local', text: '只本机', who: '只有这台机器自己能打开' },
-  { key: 'lan', text: '局域网', who: '同一个局域网里的电脑、手机都能打开' },
-  { key: 'public', text: '公网', who: '能连到这台机器的设备都能打开；机器有公网地址、端口放行了的话，外面也能访问' },
+  { key: 'lan', text: '局域网', who: '家里或公司同一个网络里的电脑、手机都能打开' },
+  { key: 'public', text: '公网', who: '互联网上任何人都能打开' },
 ]
 
 export interface Access {

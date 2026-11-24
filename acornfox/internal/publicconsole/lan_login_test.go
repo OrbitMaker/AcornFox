@@ -408,3 +408,62 @@ func TestLoginPageLooksLikeTheConsole(t *testing.T) {
 		t.Fatalf("error page:\n%s", bad)
 	}
 }
+
+// 忘了密码: the login page of the LAN entry has the fold (a sentence, the
+// command under “用命令行”, “复制给 AI 工作台”); the set-password page has none.
+// It never offers to reset from the page itself.
+func TestLoginPageForgotPassword(t *testing.T) {
+	f := newLANFixture(t)
+	c := f.client(t)
+	setup := c.do("GET", "/login", nil).Body.String()
+	if strings.Contains(setup, "忘了密码") || strings.Contains(setup, `data-ask=`) {
+		t.Fatalf("the set-password page has no password to forget:\n%s", setup)
+	}
+	c.do("POST", "/setup", setupForm("correct horse", "correct horse", false))
+	other := f.client(t)
+	w := other.do("GET", "/login", nil)
+	page := w.Body.String()
+	for _, want := range []string{
+		`<details class="forgot">`, "忘了密码", "在装着 AcornFox 的服务器上重设", "<details class=\"cli\">", "用命令行",
+		"<code>acornfox lan-console reset-password</code>", `data-copy="acornfox lan-console reset-password"`,
+		"复制给 AI 工作台", "LAN-CONSOLE-04", "acornfox faults LAN-CONSOLE-04", "不要替我设密码",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("login page lacks %q:\n%s", want, page)
+		}
+	}
+	// The command is behind the closed “用命令行” fold; the whole fold is closed.
+	if strings.Contains(page, "<details open") {
+		t.Fatalf("the folds must start closed:\n%s", page)
+	}
+	if strings.Contains(page, `action="/reset`) || strings.Contains(page, `action="/forgot`) {
+		t.Fatalf("the page must not reset a password by itself:\n%s", page)
+	}
+	if strings.Contains(page, "style=") || strings.Contains(page, "onclick") || strings.Contains(page, "<style") {
+		t.Fatalf("inline style or script:\n%s", page)
+	}
+	// A reset route does not exist: nothing here can clear the password.
+	for _, path := range []string{"/reset", "/reset-password", "/forgot"} {
+		if r := other.do("POST", path, url.Values{"x": {"y"}}); r.Code == 200 {
+			t.Fatalf("POST %s = 200: a page route must not reset the password", path)
+		}
+	}
+	// A wrong password keeps the fold (the user who mistyped may have forgotten).
+	bad := other.do("POST", "/login", url.Values{"password": {"nope nope"}}).Body.String()
+	if !strings.Contains(bad, "密码不对。") || !strings.Contains(bad, `<details class="forgot">`) {
+		t.Fatalf("wrong password page:\n%s", bad)
+	}
+	// login.js carries the copy buttons (clipboard with a plain-http fallback).
+	js := other.do("GET", "/login.js", nil).Body.String()
+	for _, want := range []string{"data-copy", "data-ask", "navigator.clipboard", "execCommand", "location.origin"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("login.js lacks %q", want)
+		}
+	}
+	css := other.do("GET", "/login.css", nil).Body.String()
+	for _, want := range []string{".forgot{", "details[open]>summary .chev", "button.copy", "button.ask"} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("login.css lacks %q", want)
+		}
+	}
+}

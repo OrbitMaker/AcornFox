@@ -57,7 +57,8 @@ type Docker struct {
 	cli atomic.Pointer[client.Client]
 
 	// registry is how Docker Hub images are pulled (pull_fallback.go):
-	// mirror first for users in mainland China, Docker Hub first otherwise.
+	// mirrors only (Docker Hub is blocked there) for users in mainland China,
+	// Docker Hub first otherwise.
 	registry Registry
 
 	// mu guards inflight, the concurrent-build dedupe map.

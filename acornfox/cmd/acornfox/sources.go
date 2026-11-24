@@ -23,7 +23,8 @@ const sourcesHelp = `用法：acornfox sources [--probe] [--image 镜像] [--jso
 看这台机器拉 Docker Hub、ghcr.io 镜像时用哪些下载源、按什么先后。下载源分层：
   我们自己的源（预留，现在还没有）→ 所在云的内网加速 → 别人公开的国内副本 → 上游自己（Docker Hub、ghcr.io）
 国内的机器拉镜像前会先对每个源实测一次：拒绝访问、没有这个镜像、限流、连不上的跳过，慢的排到后面；
-拉的过程中太慢也会换下一个源。境外的机器先用上游自己。
+拉的过程中太慢也会换下一个源。国内的机器不用上游自己（Docker Hub、ghcr.io 在国内被屏蔽，不测它也不去它那里拉；
+镜像源都不行时报 CAT-INST-12）；境外的机器先用上游自己。
 
   --probe            现在实测一遍：每个源取一次镜像清单和一段镜像层（每个源最多下 16 MB，整个最多约 10 秒），
                      写出能不能用、多快、镜像层实际从哪个地址下，以及拉镜像时会用的先后
@@ -35,6 +36,7 @@ const sourcesHelp = `用法：acornfox sources [--probe] [--image 镜像] [--jso
 没有副作用：只读配置、发几个只读的下载请求，不改任何设置。
 网络区域（国内还是境外）Linux 服务器看 /etc/acornfox/install.env，Mac、Windows 看数据目录里的 network.json。
 ACORNFOX_REGISTRY_MIRRORS、ACORNFOX_GHCR_MIRRORS（逗号分隔）可以整个换掉 Docker Hub、ghcr.io 的镜像源；
+国内的机器能直连上游自己时（例如有代理），把 registry-1.docker.io、ghcr.io 写进去，它才会被测、被用；
 /etc/docker/daemon.json 里不在表里的加速地址（例如安装时 --registry-mirror 给的）算你自己配的，排在最前。
 
 例子：
@@ -43,7 +45,7 @@ ACORNFOX_REGISTRY_MIRRORS、ACORNFOX_GHCR_MIRRORS（逗号分隔）可以整个�
   acornfox sources --probe --image ghcr.io/组织/镜像:标签 --json
 
 JSON：{"ok":true,"china":bool,"region_source":"…","docker_hub":[{"host","layer","layer_label","name"}],"ghcr":[…],
-       "self":[],"gateway":"…","probe":{"image":"…","results":[{"host","layer","status","mbps","final_host","detail"}],
+       "self":[],"upstream_skipped":["registry-1.docker.io"],"gateway":"…","probe":{"image":"…","results":[{"host","layer","status","mbps","final_host","detail"}],
        "order":["…"],"skipped":["…"]}}
      --daemon-mirrors --json：{"ok":true,"china":bool,"mirrors":["https://…"]}
 `
@@ -143,9 +145,18 @@ func runSources(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	hub, ghcr := reg.Sources(), reg.GHCRSources()
+	// In mainland China Docker Hub and ghcr.io themselves are blocked: the
+	// runner neither probes nor pulls from them (runner.Registry.SkipsUpstream).
+	upstreamSkipped := []string{}
+	if reg.SkipsUpstream() {
+		upstreamSkipped = append(upstreamSkipped, runner.DockerHubRegistry)
+	}
+	if reg.SkipsGHCRUpstream() {
+		upstreamSkipped = append(upstreamSkipped, runner.GHCRRegistry)
+	}
 	out := map[string]any{"ok": true, "china": n.China, "region_source": n.Source,
 		"docker_hub": describeSources(hub), "ghcr": describeSources(ghcr), "self": []sourceOut{},
-		"gateway": gatewayBase(dataDir)}
+		"upstream_skipped": upstreamSkipped, "gateway": gatewayBase(dataDir)}
 	var results []probeOut
 	var order, skipped []string
 	if probe {
@@ -182,6 +193,13 @@ func runSources(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "网络区域：%s；这个判断来自 %s\n", region, regionSourceText(n.Source))
 	printSources(stdout, "Docker Hub 镜像的下载源（实测之前的先后）：", hub)
 	printSources(stdout, "ghcr.io 镜像的下载源（实测之前的先后）：", ghcr)
+	for _, h := range upstreamSkipped {
+		env := "ACORNFOX_REGISTRY_MIRRORS"
+		if h == runner.GHCRRegistry {
+			env = "ACORNFOX_GHCR_MIRRORS"
+		}
+		fmt.Fprintf(stdout, "不用 %s 本身：国内被屏蔽，拉镜像时不测它也不去它那里拉（这台机器能直连它的话，把它写进环境变量 %s）\n", h, env)
+	}
 	fmt.Fprintln(stdout, "我们自己的源：还没有（预留）")
 	if gw := gatewayBase(dataDir); gw != "" {
 		fmt.Fprintf(stdout, "下载网关：%s（应用中心里写了镜像包的应用先从这里取，取不到才用上面的源）\n", gw)

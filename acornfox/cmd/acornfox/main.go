@@ -48,7 +48,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "uninstall":
 			return runUninstall(cmdArgs, stdin, stdout, stderr)
 		case "doctor":
+			if macVMInstalled() {
+				return macDoctorRun(hasJSONFlag(cmdArgs), false, stdout)
+			}
 			return runDoctor(cmdArgs, stdout, stderr)
+		case "mac":
+			return runMac(cmdArgs, stdout, stderr)
 		case "runner":
 			return runRunner(cmdArgs...)
 		case "proxy":
@@ -65,6 +70,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runIdentity(cmdArgs, stdout, stderr)
 		case "faults":
 			return runFaults(cmdArgs, stdout, stderr)
+		case "capabilities":
+			return runCapabilities(cmdArgs, stdout, stderr)
 		case "sources":
 			return runSources(cmdArgs, stdout, stderr)
 		}
@@ -76,7 +83,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), cliStopSignals(signal.Ignored)...)
 	defer stop()
-	return cli.MainWithConnector(ctx, args, stdin, stdout, stderr, os.Getenv, connect, "", mustGetwd())
+	return cli.MainWithConnector(ctx, args, stdin, stdout, stderr, os.Getenv, connect, os.Getenv("ACORNFOX_CONFIG_DIR"), mustGetwd())
 }
 
 // cliStopSignals lists the signals that cancel a client command so it can
@@ -97,7 +104,7 @@ func cliStopSignals(ignored func(os.Signal) bool) []os.Signal {
 var mainCommands = map[string]bool{
 	"server": true, "serve": true, "install": true, "uninstall": true, "doctor": true, "runner": true,
 	"proxy": true, "version": true, "init": true, "migrate": true, "admin-token": true, "identity": true,
-	"faults": true, "sources": true,
+	"faults": true, "sources": true, "capabilities": true, "mac": true,
 }
 
 // noJSONCommands are user-facing commands handled here that have no JSON

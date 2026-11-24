@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/acornfox/acornfox/internal/client"
 )
@@ -49,6 +50,11 @@ type app struct {
 	flagTarget string
 	flagApp    string
 
+	// The notice that the server is newer than this command line
+	// (notices.go): asked at most once per process; now is the clock (tests).
+	noticeAsked bool
+	now         func() time.Time
+
 	// N3 `open` injection points (nil in production → real implementations).
 	openTunnel func(ctx context.Context, t client.Target, localPort int) (*client.Tunnel, error)
 	// `open APP`: tunnel to the app's port on the server.
@@ -75,7 +81,7 @@ func MainWithConnector(ctx context.Context, args []string, stdin io.Reader, stdo
 	return mainWith(ctx, args, stdin, stdout, stderr, getenv, configDir, workDir, connect)
 }
 
-func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv env, configDir, workDir string, connect Connector) int {
+func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv env, configDir, workDir string, connect Connector) (code int) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
@@ -93,10 +99,18 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.out.usageError("%s", err.Error())
 	}
 	if len(rest) == 0 {
-		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、services、version、doctor、identity、faults、sources（acornfox help 看说明）")
+		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、services、backup、machine、version、doctor、identity、faults、sources、capabilities（acornfox help 看说明）")
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
+	// After a command that changed what is installed or its settings and
+	// succeeded: write the "what this server can do now" part again
+	// (machine.go; silent, never changes the exit code).
+	defer func() {
+		if code == exitOK {
+			a.autoRefreshMachine(ctx, cmd, cmdArgs)
+		}
+	}()
 	switch cmd {
 	case "help", "-h", "--help":
 		_, _ = io.WriteString(stdout, usageText)
@@ -111,6 +125,10 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdInstall(ctx, cmdArgs)
 	case "services":
 		return a.cmdServices(ctx, cmdArgs)
+	case "machine":
+		return a.cmdMachine(ctx, cmdArgs)
+	case "backup":
+		return a.cmdBackup(ctx, cmdArgs)
 	case "target":
 		return a.cmdTarget(ctx, cmdArgs)
 	case "deploy":
@@ -163,11 +181,14 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdPublicConsole(ctx, cmdArgs)
 	case "limits":
 		return a.cmdLimits(ctx, cmdArgs)
-	case "doctor", "identity", "uninstall", "faults", "sources":
+	case "doctor", "identity", "uninstall", "faults", "sources", "capabilities":
 		// These run in the acornfox binary itself and only look at this
 		// computer; they reach here only when written after --target or --app.
 		if cmd == "sources" {
 			return a.out.usageError("sources 只看这台机器的镜像下载源，不接受 --target、--app；直接运行 acornfox sources（要实测加 --probe，要 JSON 加 --json）")
+		}
+		if cmd == "capabilities" {
+			return a.out.usageError("capabilities 只看这个程序自己能做什么，不连服务器，不接受 --target、--app；直接运行 acornfox capabilities（要 JSON 加 --json）")
 		}
 		if cmd == "faults" {
 			return a.out.usageError("faults 只查程序里的故障目录，不连服务器，不接受 --target、--app；直接运行 acornfox faults 编号（要 JSON 加 --json）")
@@ -196,12 +217,15 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   identity show                    这台机器在下载网关上的安装编号和公钥（reset --yes 重新生成）
   faults [编号]                    故障目录：一个故障编号是什么意思、怎么判定、怎么处理（只读，不连服务器）
   sources [--probe]                这台机器拉镜像用哪些下载源、按什么先后；--probe 现在实测每个源通不通、多快（只读）
+  capabilities [--json]            这个 acornfox 程序自己能做什么：每条命令和参数、故障编号、平台变量、服务类型、清单格式从哪版起支持什么（只读，不连服务器；
+                                   查“这个版本有没有某条命令”以它为准）
 
 服务器
   target add 名称 --ssh 用户@主机   添加服务器（list、use、remove 管理已有的）
   open [应用]                      打开网页控制台；带应用名时在你电脑上打开这个应用（经 SSH 隧道，只本机的应用也能开）
   lan-console enable               在局域网打开控制台，第一次打开时在浏览器里设密码（disable、status、
-                                   reset-password 清密码重设、devices 看记住的设备、forget 让设备失效；--help 看全）
+                                   reset-password 清密码重设（忘了密码就用它，只能在服务器上做）、devices 看记住的设备、
+                                   forget 让设备失效；--help 看全）
   public-console enable 域名        开放控制台公网访问（disable、status）；登录后的控制台页面“设置 › 访问”
                                    也能开关，要再输一次控制台密码（acornfox open 进来的不用）
 
@@ -231,6 +255,7 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
 
 应用中心
   catalog list / info 应用 / sync  看目录里的应用和配方、应用详情和参数、让服务器同步目录
+  catalog show 应用                应用中心页面上这个应用的展示内容：一句话、角标、介绍（用户问“能做什么”时读它，只读）
   catalog platform-vars            平台按这台机器自动填给应用的时区、下载源等（只读）
   apps vars 应用 [--reveal]         看一个装好的应用是用什么设置装的：每个变量的值、谁给的、能不能改（只读）
   install 应用 [--plan] [--use …]   从目录装一个应用（--recipe 配方 装一组；--plan 只看计划；--no-wait 只提交；acornfox install -h 看详情）
@@ -243,8 +268,21 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
   services add 类型 --name 名字 --set 项=值   登记一条自己已有的服务（保密项写 项=-，从标准输入读）
   services set 名字 项=值 / test 名字 / remove 名字 [--yes]   改几项 / 试一下通不通 / 删一条（不加 --yes 只试跑）
 
+数据备份
+  backup create [应用] [--plan]     给应用的数据做一份备份（应用暂停几十秒，打完包自动继续；--plan 只看会怎样）
+  backup list [应用]                看备份（不带应用名看整个备份目录和磁盘）；show 应用 编号 看一份的清单
+  backup restore 应用 编号|latest [--plan] [--yes]   用备份覆盖现在的数据（先自动另存现在的、失败自动退回；要用户同意加 --yes）
+  backup rm 应用 编号 [--yes]       删一份备份（删了找不回来，要用户同意）；backup task 任务编号 看进度
+
 其他
-  skill install                    把 AcornFox Skill 装到 AI 工作台
+  skill install                    把 AcornFox Skill（入口 SKILL.md 加全部分册）装到 AI 工作台（每个文件头带这个命令行的版本号，acornfox doctor 逐个核对；
+                                   写、重装都不出错，旧版本留下的分册会删掉）；同时给每台登记的服务器写一份“本机能力”分册 machine-服务器名.md
+  skill print [--all | --file 名]  打印 Skill：默认打印入口，--all 全部，--file install-linux.md 一册（只读）
+  skill refresh                    重新写“本机能力”分册（装、删、升级应用之后命令行会自动刷新；在页面上动过应用后手动运行）
+  machine                          这台服务器现在能做什么：装了哪些应用和解决方案、各自怎么打开、有没有手册、有哪些服务、平台能做什么（只读；
+                                   AI 工作台开始做事前先看它，不含任何密码和 Key）
+                                   连上服务器时发现服务器比这个命令行新，会提醒一次更新命令行和 Skill（每天最多一次，
+                                   写到标准错误；--json 时在结果的 notices 里；ACORNFOX_NO_UPDATE_NOTICE=1 关掉；CLI-UPDATE-01）
   catalog lint 目录                检查应用目录的清单和配方（只读，给目录维护者用）
   catalog build|keygen|verify      打包签名发布目录、生成签名钥匙、校验发布目录（给目录维护者用）
   version                          版本号

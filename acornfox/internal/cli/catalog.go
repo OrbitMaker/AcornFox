@@ -24,8 +24,12 @@ const catalogUsage = `catalog 子命令（给目录维护者用）：
                  默认试跑：只打包签名、检查序号，列出要写的文件，不写；加 --apply 才写输出目录
   keygen --out 私钥文件
                  生成 ed25519 签名钥匙，写私钥（0600），打印公钥。文件已存在就拒绝，不覆盖
+  show-sign show.json --key 私钥文件 [--index 目录或index.json] [--apply]
+                 给应用中心的展示内容 show.json 签名，写 show.json.sig。默认试跑；序号要和同一次发布的 index.json 一样
   verify 输出目录 [--pubkey 公钥]...
-                 只读校验发布目录：签名、序号、每个应用包的 sha256。不给 --pubkey 用程序内置的公钥
+                 只读校验发布目录：签名、序号、每个应用包的 sha256，目录里有 show.json 的话连展示内容的签名和序号、
+                 它列出的每份操作手册（skills/）的大小和 sha256。
+                 不给 --pubkey 用程序内置的公钥
 每个子命令加 -h 看详细说明；加 --json 输出机器可读结果。
 例子：
   acornfox catalog lint .
@@ -34,6 +38,7 @@ const catalogUsage = `catalog 子命令（给目录维护者用）：
   acornfox catalog gaps .
   acornfox catalog keygen --out ~/.acornfox-catalog-key.pem
   acornfox catalog build . --out dist --serial 12 --key ~/.acornfox-catalog-key.pem --apply
+  acornfox catalog show-sign dist/show.json --key ~/.acornfox-catalog-key.pem --apply
   acornfox catalog verify dist --pubkey <keygen 打印的公钥>`
 
 const catalogBuildUsage = `用法：acornfox catalog build 目录 --out 输出目录 --serial N --key 私钥文件 [--catalog 目录编号] [--prev 上次的发布目录] [--apply]
@@ -80,12 +85,14 @@ const catalogKeygenUsage = `用法：acornfox catalog keygen --out 私钥文件
 
 const catalogVerifyUsage = `用法：acornfox catalog verify 输出目录 [--pubkey 公钥]...
 
-用途：只读校验一个发布目录：index.json 的签名、version.txt 和 index.json 的序号一致、每个应用包的 sha256 和大小。
+用途：只读校验一个发布目录：index.json 的签名、version.txt 和 index.json 的序号一致、每个应用包的 sha256 和大小；
+  目录里有 show.json（应用中心的展示内容）时，再验 show.json.sig 的签名、格式、序号和 index.json 一致（没有就不查，输出里 show 是 none），
+  以及它列出的每份操作手册（skills/app-<id>.md、skills/solution-<id>.md）：文件在、大小和 sha256 对得上、不超过 32 KB（输出里 skills 是份数）。
   --pubkey 可以给多次（换钥匙期间新旧都认）；不给就用程序内置的受信公钥。
 副作用：无，只读。
 例子：
   acornfox catalog verify dist --pubkey <keygen 打印的公钥>
-出错编号：CAT-VER-01～04、CAT-KEY-04（公钥格式不对）`
+出错编号：CAT-VER-01～04、CAT-SHOW-01～03（展示内容）、CAT-SKILL-01～03（操作手册）、CAT-KEY-04（公钥格式不对）`
 
 const catalogLintUsage = `用法：acornfox catalog lint 目录
 
@@ -188,18 +195,25 @@ const catalogVarsUsage = `用法：acornfox catalog vars 目录 [--app 应用编
 
 const catalogGapsUsage = `用法：acornfox catalog gaps 目录
 
-用途：核对缺变量登记。起草清单时发现平台还没有要用的变量（或清单格式缺一种写法），就在目录仓库根目录的
-  gaps.yaml 登记一条，应用照常往下走（那一项先写死、让用户做一步，或先不配）。这个命令逐条核对：
-  - 想要的是 platform.名字，而平台变量表里已经有了、这条还没标 done：提示“可以关了：变量已有，请改清单”；
+用途：核对缺口登记。目录仓库根目录的 gaps.yaml 登记两种缺口，编号共用一串：
+  - 变量缺口（kind 不写，或写 variable）：起草清单时发现平台还没有要用的变量（或清单格式缺一种写法），应用照常往下走
+    （那一项先写死、让用户做一步，或先不配）；
+  - 手册缺口（kind: manual）：应用手册里平台做不到、只好让用户自己做（或在手册里绕过去）的一步；手册里那一行以
+    【要用户自己做】开头、行尾带 （GAP-0004） 这样的编号，没登记的手册发不出去。
+  这个命令逐条核对：
+  - 想要的是 platform.名字，而平台变量表里已经有了、这条还没标 done：提示“可以关了”（变量缺口说改清单，手册缺口说去改手册）；
   - 登记的应用已不在目录里：提示。
-  gaps.yaml 的格式见目录仓库 schema/gaps.schema.json：每条有 id（GAP-0001 这样）、app、upstream_key（上游配置项名字）、
+  gaps.yaml 的格式见目录仓库 schema/gaps.schema.json。变量缺口每条有 id（GAP-0001 这样）、app、upstream_key（上游配置项名字）、
   want（想要的变量或写法）、layer（platform、param、format）、handling（hardcoded、user_step、omitted）、
   doc_url（上游文档地址）、date（登记日期）、status（open、planned、done；done 时要写 done_in 平台版本）、note（可选）。
+  手册缺口每条有 id、kind: manual、apps（哪几个应用，周报按个数排名）、want（希望平台能做什么）、handling（user_step 让用户做、
+  workaround 手册里绕过去）、where（在手册哪一节）、date、status、done_in、note（可选）。
 副作用：无，只读。目录在、gaps.yaml 不存在算“没有登记”，退出码 0；格式不对报 CAT-LINT-19，退出码 1；
   目录本身不存在报 CAT-LINT-01，退出码 1。
   有提示（notices）不算错，退出码仍是 0。
 输出（--json）：{"ok":true,"registered":true,"file":"gaps.yaml","gaps":[…],"by_status":{"open":N,"planned":N,"done":N},
-  "notices":[{id, app, kind(can_close|app_missing), message}],"problems":[]}
+  "by_kind":{"variable":N,"manual":N},"notices":[{id, app, kind(can_close|app_missing), message}],"problems":[]}
+  gaps 里每条都有 kind；手册缺口用 apps、where，没有 app、upstream_key、layer、doc_url。
 例子：
   acornfox catalog gaps .
   acornfox --json catalog gaps ~/acornfox-catalog`
@@ -224,10 +238,16 @@ func (a *app) cmdCatalog(ctx context.Context, args []string) int {
 		return a.cmdCatalogKeygen(args[1:])
 	case "verify":
 		return a.cmdCatalogVerify(args[1:])
+	case "show-sign":
+		return a.cmdCatalogShowSign(args[1:])
 	case "list":
 		return a.cmdCatalogList(ctx, args[1:])
 	case "info":
 		return a.cmdCatalogInfo(ctx, args[1:])
+	case "show":
+		return a.cmdCatalogShow(ctx, args[1:])
+	case "skill":
+		return a.cmdCatalogSkill(ctx, args[1:])
 	case "sync":
 		return a.cmdCatalogSync(ctx, args[1:])
 	case "connect":
@@ -476,7 +496,7 @@ func (a *app) cmdCatalogGaps(args []string) int {
 	ok := len(rep.Problems) == 0
 	if a.out.json {
 		a.out.encodeRedacted(a.out.stdout, map[string]any{"ok": ok, "registered": rep.Registered, "file": rep.File,
-			"gaps": rep.Gaps, "by_status": rep.ByStatus, "notices": rep.Notices, "problems": rep.Problems})
+			"gaps": rep.Gaps, "by_status": rep.ByStatus, "by_kind": rep.ByKind, "notices": rep.Notices, "problems": rep.Problems})
 	} else {
 		w := a.out.stdout
 		switch {
@@ -493,6 +513,9 @@ func (a *app) cmdCatalogGaps(args []string) int {
 			}
 			fmt.Fprintf(w, "登记了 %d 条：待定 %d，已排期 %d，已有 %d；%d 条提示\n", len(rep.Gaps),
 				rep.ByStatus["open"], rep.ByStatus["planned"], rep.ByStatus["done"], len(rep.Notices))
+			if n := rep.ByKind[catalog.GapManual]; n > 0 {
+				fmt.Fprintf(w, "其中手册缺口 %d 条（应用手册里要用户自己做的步骤），变量缺口 %d 条\n", n, rep.ByKind[catalog.GapVariable])
+			}
 		}
 	}
 	if !ok {
@@ -611,9 +634,15 @@ func (a *app) cmdCatalogVerify(args []string) int {
 		return a.catalogFail(err)
 	}
 	if a.out.json {
-		a.out.emitJSON(map[string]any{"serial": res.Serial, "apps": res.Apps, "recipes": res.Recipes, "packages": res.Packages})
+		a.out.emitJSON(map[string]any{"serial": res.Serial, "apps": res.Apps, "recipes": res.Recipes, "packages": res.Packages, "show": res.Show, "skills": res.Skills})
 		return exitOK
 	}
 	fmt.Fprintf(a.out.stdout, "校验通过：序号 %d，%d 个应用、%d 个配方，%d 个应用包都对得上\n", res.Serial, res.Apps, res.Recipes, res.Packages)
+	if res.Show == catalog.ShowOK {
+		fmt.Fprintln(a.out.stdout, "展示内容（show.json）的签名、格式、序号都对得上")
+		if res.Skills > 0 {
+			fmt.Fprintf(a.out.stdout, "%d 份操作手册（skills/）都在，大小和 sha256 都对得上\n", res.Skills)
+		}
+	}
 	return exitOK
 }

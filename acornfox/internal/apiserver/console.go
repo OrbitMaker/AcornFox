@@ -23,8 +23,13 @@ const sessionCookieName = "af_session"
 // csrfHeader is required on every non-GET console request.
 const csrfHeader = "X-AcornFox-CSRF"
 
-// contentSecurityPolicy locks the console to same-origin assets only.
-const contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+// contentSecurityPolicy locks the console to same-origin assets, with two
+// exceptions the app center's display content needs: cover pictures and the
+// pictures in an app's introduction come from the main site
+// (https://acornfox.com/catalog/assets/…, catalog.CoverPrefix), and an
+// introduction may embed a Bilibili video player. Scripts, styles and
+// everything else stay same-origin.
+const contentSecurityPolicy = "default-src 'self'; img-src 'self' data: https://acornfox.com; style-src 'self'; script-src 'self'; frame-src https://player.bilibili.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 // createConsoleToken implements POST /v1/console/tokens (trusted entry only).
 // It returns a one-time token the browser trades for a session cookie.

@@ -252,6 +252,11 @@ func manifestRefs(m *Manifest) []RefUse {
 		for _, r := range stepRefs(s) {
 			out = append(out, RefUse{r, "/init/" + s.Label(i)})
 		}
+		// What an on_change step watches counts as used: a change of it
+		// is what makes the step run.
+		for _, r := range s.Watch {
+			out = append(out, RefUse{r, "/init/" + s.Label(i) + "/watch"})
+		}
 	}
 	for _, lf := range m.FirstLogin {
 		if lf.From != "" {
