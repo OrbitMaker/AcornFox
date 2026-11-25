@@ -245,6 +245,10 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	appHist := apiserver.NewAppHistory(st, runnerAPI)
 	go appHist.Run(ctx)
 	apiCfg.AppHistory = appHist
+	// Tell the user when a newer AcornFox is out (a check every 6 hours).
+	updater := newPlatformUpdater(o)
+	go updater.Run(ctx)
+	apiCfg.PlatformUpdate = updater
 	if o.CheckPorts {
 		admin, lan := o.EdgeAdminPort, o.LANConsolePort
 		if admin == 0 {

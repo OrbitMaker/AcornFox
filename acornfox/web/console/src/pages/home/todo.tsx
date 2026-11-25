@@ -4,13 +4,14 @@
 // 数据：应用和安装任务用共享数据（useConsole）；体检项 GET /v1/runtime/checks（60 秒；几处同时要时只发一次请求，30 秒内复用）。
 // 规则在 lib/dashboard.ts 的 todoItems、machineTodo（纯函数）；这里只负责取数和画一行。
 import * as React from 'react'
-import { AlertTriangle, Bell, Package, Unlink, Wrench } from 'lucide-react'
+import { AlertTriangle, Bell, CircleArrowUp, Package, Unlink, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { usePoll } from '@/lib/hooks'
 import { go } from '@/lib/router'
 import { machineTodo, todoItems, type ListItem } from '@/lib/dashboard'
 import { displayName } from '@/lib/display'
+import { useUpdateSeen } from '@/lib/update-seen'
 import type { RuntimeCheck, RuntimeChecks } from '@/lib/types'
 import { showCheck } from '@/pages/runtime/checkup'
 import { useConsole } from '@/state'
@@ -52,19 +53,21 @@ export function useNameOf(): (id: string) => string {
 
 // useTodo：需要你处理的全部事（items），其中这台机器自己的（machine，体检里要处理的项）。
 export function useTodo(): { items: ListItem[]; machine: RuntimeCheck[] } {
-  const { apps, installing, tasks, behind, catalog } = useConsole()
+  const { apps, installing, tasks, behind, catalog, status } = useConsole()
+  const updateSeen = useUpdateSeen()
+  const platformUpdate = status?.platform_update
   const fetched = useChecks()
   // 展示内容这次没能用上，也算体检里一项要注意的（和“设置 › 这台机器”里体检那一行同一个说法）
   const sc = showCheck(catalog?.sync?.show)
   const checks = React.useMemo(() => (fetched && sc ? { ...fetched, items: [...fetched.items, sc] } : fetched), [fetched, sc?.code]) // eslint-disable-line react-hooks/exhaustive-deps
   const nameOf = useNameOf()
   return React.useMemo(() => ({
-    items: todoItems({ apps: apps || [], installing, checks, tasks, now: new Date(), nameOf, behind }),
+    items: todoItems({ apps: apps || [], installing, checks, tasks, now: new Date(), nameOf, behind, platformUpdate, updateSeen }),
     machine: machineTodo(checks),
-  }), [apps, installing, checks, tasks, nameOf, behind])
+  }), [apps, installing, checks, tasks, nameOf, behind, platformUpdate, updateSeen])
 }
 
-const ICON: Record<string, React.ComponentType<{ className?: string }>> = { alert: AlertTriangle, wrench: Wrench, package: Package, unlink: Unlink }
+const ICON: Record<string, React.ComponentType<{ className?: string }>> = { alert: AlertTriangle, wrench: Wrench, package: Package, unlink: Unlink, up: CircleArrowUp }
 
 export function TodoIcon({ it, small }: { it: ListItem; small?: boolean }) {
   const Icon = ICON[it.icon] || Bell

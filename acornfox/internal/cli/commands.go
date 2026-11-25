@@ -70,6 +70,7 @@ func (a *app) cmdStatus(ctx context.Context, args []string) int {
 			return a.out.fail(derr)
 		}
 		defer api.Close()
+		a.askPlatformUpdate(ctx, api)
 		return a.statusApp(ctx, api, res.app)
 	}
 
@@ -97,6 +98,7 @@ func (a *app) cmdStatus(ctx context.Context, args []string) int {
 		return a.out.fail(derr)
 	}
 	defer api.Close()
+	a.askPlatformUpdate(ctx, api)
 
 	if !appOK {
 		return a.statusDeployment(ctx, api, arg)
@@ -158,6 +160,7 @@ func (a *app) statusDeployment(ctx context.Context, api client.API, id string) i
 				"message": dep.Diagnosis.Message, "log_excerpt": dep.Diagnosis.LogExcerpt, "hint": dep.Diagnosis.Hint,
 			}
 		}
+		a.addPlatformUpdateFields(fields)
 		a.out.emitJSON(fields)
 		return exitOK
 	}
@@ -168,6 +171,7 @@ func (a *app) statusDeployment(ctx context.Context, api client.API, id string) i
 	if dep.Diagnosis != nil {
 		a.out.printDiagnosis(*dep.Diagnosis)
 	}
+	a.humanPlatformUpdate()
 	return exitOK
 }
 
@@ -233,6 +237,7 @@ func (a *app) renderAppStatus(app client.App) int {
 		if app.InternalOnly {
 			fields["internal_only"], fields["internal_note"] = true, app.InternalNote
 		}
+		a.addPlatformUpdateFields(fields)
 		a.out.emitJSON(fields)
 		return exitOK
 	}
@@ -293,6 +298,7 @@ func (a *app) renderAppStatus(app client.App) int {
 			a.out.human("  %s", appServiceLine(s))
 		}
 	}
+	a.humanPlatformUpdate()
 	return exitOK
 }
 

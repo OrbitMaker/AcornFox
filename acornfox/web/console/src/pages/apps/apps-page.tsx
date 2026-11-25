@@ -6,6 +6,7 @@
 //   “给别的应用用，不用打开”），右边“打开”或“怎么打开”（去详情）和“更多”；“新版本没换上、旧版本照常用”时“打开”能点；
 //   应用少于 8 个时筛选、视图切换整排不显示（只用卡片）；搜索只用顶栏那一个（⌘K），页面里不再放第二个搜索框；
 //   空的时候一句话加一个按钮，不放命令（部署自己的项目在“设置 › 开发者与 AI”里）。
+//   最下面有一组默认收起的“这台机器上的其他容器”（用户自己装的，只看不管理，others-group.tsx）；没有就不显示。
 //   表格是给应用多的人看的：仍有地址、内存、CPU、版本几列。
 //   状态后面可以跟一句小字：“设置要跟上”（琥珀，平台自动填的值变了、应用还没跟上，GET /v1/platform/affected）、
 //   “有新版本”（应用中心里有比现在新的，catalog_update）；都是服务端说了才写。
@@ -32,6 +33,7 @@ import { Dropdown } from '@/components/ui/menu'
 import { useToast } from '@/components/ui/toast'
 import { ACTION_DONE, ACTION_FAIL, actionToast, runAction, type AppAction } from './actions'
 import { AppMenuItems } from './app-menu'
+import { OthersGroup } from './others-group'
 
 type Filter = 'all' | 'running' | 'stopped' | 'problem'
 const PROBLEM: AppStatus[] = ['failed', 'crashed']
@@ -292,6 +294,7 @@ export function AppsPage() {
           {apps && list.length === 0 && <EmptyState className="mt-3" title="没有这种状态的应用" action={<Button variant="outline" size="sm" onClick={() => setF('all')}>看全部</Button>} />}
         </>
       )}
+      <OthersGroup />
     </div>
   )
 }

@@ -191,12 +191,15 @@ func (in *Installer) fetch(ctx context.Context, a Artifact) (string, error) {
 	return in.fetcher().Fetch(ctx, a)
 }
 
+// china says whether the mirrors in mainland China go first. --china / --global are the person's word;
+// without them the two sources are measured once (see region.go) and the faster goes first.
 func (in *Installer) china() bool {
-	if in.Opt.China {
-		return true
-	}
-	if in.Opt.Global {
-		return false
+	if in.Opt.China || in.Opt.Global {
+		if note := os.Getenv("ACORNFOX_GET_PROBE_NOTE"); note != "" && !chinaCache.noted {
+			chinaCache.noted = true
+			in.say("%s（get.sh 的测速，已作为 --china / --global 传到这里）", note)
+		}
+		return in.Opt.China
 	}
 	if v, ok := in.chinaGuess(); ok {
 		return v
@@ -205,33 +208,46 @@ func (in *Installer) china() bool {
 }
 
 var chinaCache struct {
-	set bool
-	v   bool
+	set     bool
+	v       bool
+	decided bool // the speed test told which is faster (not "neither brought data")
+	noted   bool
 }
 
-// chinaGuess: GitHub cannot be reached in 5 seconds = mainland China.
+// chinaGuess measures Gitee and GitHub once per run. When neither brought data, Gitee goes first (and nothing is
+// passed on: the install script in the virtual machine decides for itself).
 func (in *Installer) chinaGuess() (bool, bool) {
 	if chinaCache.set {
 		return chinaCache.v, true
 	}
-	if in.Opt.ReleaseBase != "" {
+	if in.Opt.ReleaseBase != "" || in.Opt.GiteeRepo == "-" {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://github.com", nil)
-	if err != nil {
-		return false, false
-	}
-	resp, err := in.client().Do(req)
+	giteeURL, githubURL := in.probeURLs()
+	r := ProbeSources(context.Background(), in.client(), giteeURL, githubURL, probeWindow())
+	in.say("%s", r.Note)
 	chinaCache.set = true
-	if err != nil {
-		chinaCache.v = true
-		return true, true
+	chinaCache.decided = r.Pick != ""
+	chinaCache.v = r.Pick != "github"
+	return chinaCache.v, true
+}
+
+// regionArg is what goes to install.sh / upgrade.sh inside the virtual machine: the person's word, or what the speed test decided.
+func (in *Installer) regionArg() string {
+	var region string
+	if in.Opt.China {
+		region = " --china"
+	} else if in.Opt.Global {
+		region = " --global"
+	} else {
+		in.china() // measures once if it has not yet
+		if chinaCache.decided && chinaCache.v {
+			region = " --china"
+		} else if chinaCache.decided {
+			region = " --global"
+		}
 	}
-	resp.Body.Close()
-	chinaCache.v = false
-	return false, true
+	return region
 }
 
 func (in *Installer) releaseVersion() string {

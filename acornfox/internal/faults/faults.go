@@ -31,7 +31,7 @@
 // full checkout of the repository before merging.
 //
 // What is in it: the CAT-* (CAT-SVC-* among them), CLI-*, WIN-*, MAC-*, SETUP-*, EDGE-*, LAN-CONSOLE-*,
-// INSTALL-*, UPGRADE-*, UNINSTALL-*, OPEN-APP-*, APP-VARS-*, APP-APPLY-*, APP-UPG-*, ID-KEY-*, PDOMAIN-*, PUBCON-*, BKP-*, MACHINE-* codes, the download gateway's GW-* codes
+// INSTALL-*, UPGRADE-*, UNINSTALL-*, OPEN-APP-*, APP-VARS-*, APP-APPLY-*, APP-UPG-*, ID-KEY-*, PDOMAIN-*, PUBCON-*, BKP-*, MACHINE-*, PLAT-UPD-* codes, the download gateway's GW-* codes
 // as this machine sees them, and the lower-case diagnosis codes of deploys
 // (stage upload … route, addon), of connecting to a server (stage connect),
 // of domains and the public console, of the LAN console and of installing
@@ -118,6 +118,7 @@ var Groups = []struct{ Key, Name string }{
 	{"GW", "下载网关返回的编号（GW）"},
 	{"ID", "本机身份（ID-KEY）"},
 	{"MACHINE", "本机能力和分册（MACHINE）"},
+	{"UPD", "平台新版本提醒（PLAT-UPD）"},
 	{"ANY", "兜底"},
 }
 
@@ -135,7 +136,7 @@ const FallbackCode = "ANY-00"
 // Catalog is every entry, grouped in the order of Groups, the fallback last.
 var Catalog = join(
 	installFaults, upgradeFaults, winFaults, macFaults, setupFaults, edgeFaults, lanFaults, linkFaults, deployFaults, domainFaults, pdomainFaults, backupFaults, openFaults, cliFaults,
-	instFaults, connFaults, svcFaults, syncFaults, pubFaults, gatewayFaults, idFaults, machineFaults, anyFaults,
+	instFaults, connFaults, svcFaults, syncFaults, pubFaults, gatewayFaults, idFaults, machineFaults, platUpdFaults, anyFaults,
 )
 
 func join(parts ...[]Fault) []Fault {

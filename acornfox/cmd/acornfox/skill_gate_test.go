@@ -232,7 +232,7 @@ func TestSkillCommandsAreInTheTable(t *testing.T) {
 }
 
 // Every upper-case fault code the Skill writes is in the catalog.
-var skillFaultCode = regexp.MustCompile(`\b(?:CAT-(?:INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}\b`)
+var skillFaultCode = regexp.MustCompile(`\b(?:CAT-(?:INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|PLAT-UPD|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}\b`)
 
 func TestSkillFaultCodesAreInTheCatalog(t *testing.T) {
 	have := map[string]bool{}

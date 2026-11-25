@@ -9,7 +9,9 @@
 // The runner refuses anything outside its contract: it only touches Docker
 // objects carrying LabelManaged=1, never creates privileged or host-network
 // containers, never bind-mounts host paths or the Docker socket, and only
-// mounts named volumes whose name starts with "af-<app>-".
+// mounts named volumes whose name starts with "af-<app>-". The one exception
+// is the read-only listing of the containers AcornFox does not manage
+// (others.go): it reads names, states, published ports and usage, nothing else.
 //
 // It runs a command inside a container only through Exec (exec.go): in a
 // running app-role container of the app the request names, with an argument

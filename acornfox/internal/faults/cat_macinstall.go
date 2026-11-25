@@ -72,6 +72,7 @@ var macFaults = []Fault{
 		Cause{Text: "container 服务没启动（重启电脑后、或被手动停了）", Check: "container system status 不是 running", Auto: true},
 		Cause{Text: "安装包没装全，container 程序不在 /usr/local/bin", Check: "which container 没有输出；ls /usr/local/bin/container"},
 		Cause{Text: "macOS 太旧或和这个 container 版本不兼容", Check: "container system start 的报错里写版本要求"},
+		Cause{Text: "这台 Mac 上原来就装着别的版本的 container（自己装的、Homebrew 装的），和测过的 1.7.x 不一样", Check: "container --version 不是 1.7.x；先问用户要不要升到 1.7.1（他可能还在用它），同意了请他自己装，不要替他卸载或换掉"},
 		[]string{"container --version", "container system status", "container system start", "acornfox mac doctor"},
 		[]Action{{Text: "运行 container system start", Tier: 1}, {Text: "重新运行安装命令", Tier: 1}},
 		"container system start 报同一个错两次：带报错原文反馈", "container system status 显示 running"),

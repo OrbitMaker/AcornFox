@@ -5,15 +5,16 @@
 // 数据只用服务端真有的接口，没有来源的样稿图表不放进来（见 README“首页看板”）：
 //   这台机器：CPU、内存（GET /v1/metrics/host/history，近 1 小时、24 小时；只存在内存里，没有 7 天）、
 //             磁盘（GET /v1/metrics/host）、已分配内存（GET /v1/resources）
-//   应用：应用状态（GET /v1/apps）、各应用 CPU / 内存（GET /v1/metrics/apps/{app}）
+//   应用：应用状态（GET /v1/apps）、各应用 CPU / 内存（GET /v1/metrics/apps/{app}；再加一项“其他容器”：这台机器上不是从 AcornFox 装的容器在跑的加起来，GET /v1/host/containers）
 //   提醒与记录：需要你处理（应用状态、体检、失败的安装）、最近发生的事（安装和更新记录、安装任务）
 // 样稿第 10 版（评估 C2、C5、C6、X3、X4、X8）：页面上只写人话和应用中心里的名字；故障编号、任务号、诊断只放进 ListItem.ask
 // （“复制给 AI 工作台”复制的那段）；不写“第几版”；家里的机器不在公网上（NET-LAN-01）不算要处理的事。
 // 都是纯函数，页面只负责取数和显示；单元测试见 dashboard.test.ts（第 10 版改了文字，测试还没跟上）。
 import { deployDiagnosisForAI, deriveStatus, PENDING } from './appstatus'
 import { problemLine } from './display'
-import type { AppMetrics, AppView, Deployment, HostHistory, HostView, Resources, RuntimeCheck, RuntimeChecks, TaskView } from './types'
+import type { AppMetrics, AppView, Deployment, HostHistory, HostView, OtherContainersView, PlatformUpdate, Resources, RuntimeCheck, RuntimeChecks, TaskView } from './types'
 import { appHref } from './router'
+import { OTHERS_NAME, othersForChart } from './others'
 
 export type RangeKey = '1h' | '24h'
 export const RANGE_NAME: Record<string, string> = { '1h': '近 1 小时', '24h': '近 24 小时' }
@@ -42,6 +43,8 @@ export interface DashCtx {
   apps: AppView[]
   installing: Set<string>
   metrics: Record<string, AppMetrics>
+  // others：这台机器上不是从 AcornFox 装的容器（GET /v1/host/containers）；读不到（旧服务端、Docker 没回应）是 null。各应用内存、CPU 图里合成一项“其他容器”，总数才对得上。没给当作 null。
+  others?: OtherContainersView | null
   resources: Resources | null
   checks: RuntimeChecks | null
   deployments: Deployment[]
@@ -50,12 +53,16 @@ export interface DashCtx {
   nameOf?: (id: string) => string
   // behind：设置落在后面的应用（平台自动填的值变了、应用里用的还是以前的，GET /v1/platform/affected）。没给当作没有。
   behind?: { app: string; blocked?: string }[]
+  // platformUpdate：服务端查到的 AcornFox 新版本（GET /v1/status 的 platform_update）；updateSeen：用户已经看过提醒的那个版本（lib/update-seen.ts）。
+  // 有新版本、而且这个版本用户还没看过，才在“需要你处理”里出一条。没给当作没有。
+  platformUpdate?: PlatformUpdate | null
+  updateSeen?: string
   // loading：哪几样数据第一次还没读到（样稿第 14 版）。用到它的图表这时画占位形状，不先写“读不到磁盘”这类话。没给当作都读到了。
   loading?: Partial<Record<Need, boolean>>
 }
 
 // 图表要的数据分这几样（和 chart-board.tsx 的 useDashData 里的几个请求一一对应）。
-export type Need = 'host' | 'history' | 'apps' | 'metrics' | 'resources' | 'checks' | 'deployments'
+export type Need = 'host' | 'history' | 'apps' | 'metrics' | 'resources' | 'checks' | 'deployments' | 'others'
 
 const nameIn = (ctx: { nameOf?: (id: string) => string }, id: string) => (ctx.nameOf ? ctx.nameOf(id) : id)
 
@@ -163,18 +170,19 @@ export const SOURCES: Record<string, SourceDef> = {
     },
   },
   appMem: {
-    name: '各应用内存', group: '应用', icon: 'grid', fixed: '现在', needs: ['apps', 'metrics'],
-    gen: (ctx) => appCat(ctx, (m) => (m.memory_usage_mb === undefined ? null : round(m.memory_usage_mb)), 'MB'),
+    name: '各应用内存', group: '应用', icon: 'grid', fixed: '现在', needs: ['apps', 'metrics', 'others'],
+    gen: (ctx) => appCat(ctx, (m) => (m.memory_usage_mb === undefined ? null : round(m.memory_usage_mb)), 'MB', othersForChart(ctx.others, 'memory')),
   },
   appCpu: {
-    name: '各应用 CPU', group: '应用', icon: 'grid', fixed: '现在', needs: ['apps', 'metrics'],
-    gen: (ctx) => appCat(ctx, (m) => (m.cpu_percent === undefined ? null : round(m.cpu_percent, 2)), '%'),
+    name: '各应用 CPU', group: '应用', icon: 'grid', fixed: '现在', needs: ['apps', 'metrics', 'others'],
+    gen: (ctx) => appCat(ctx, (m) => (m.cpu_percent === undefined ? null : round(m.cpu_percent, 2)), '%', othersForChart(ctx.others, 'cpu')),
   },
   todo: { name: '需要你处理', group: '提醒与记录', icon: 'bell', fixed: '', needs: ['apps', 'checks'], gen: (ctx) => ({ kind: 'list', type: 'todo', items: todoItems(ctx), empty: '都处理好了' }) },
   events: { name: '最近发生的事', group: '提醒与记录', icon: 'history', fixed: '', needs: ['apps', 'deployments'], gen: (ctx) => ({ kind: 'list', type: 'events', items: eventItems(ctx), empty: '还没有记录' }) },
 }
 
-function appCat(ctx: DashCtx, pick: (m: AppMetrics) => number | null, unit: string): Data {
+// others：“其他容器”合成的一项（在跑的加起来；没有就是 null、不加这一项），放在最后、用灰色。
+function appCat(ctx: DashCtx, pick: (m: AppMetrics) => number | null, unit: string, others: number | null = null): Data {
   const names = ctx.apps.map((a) => a.name)
   const items: CatItem[] = []
   for (const a of ctx.apps) {
@@ -184,6 +192,7 @@ function appCat(ctx: DashCtx, pick: (m: AppMetrics) => number | null, unit: stri
     if (v === null) continue
     items.push({ name: nameIn(ctx, a.name), value: v, color: appColor(a.name, names) })
   }
+  if (others !== null) items.push({ name: OTHERS_NAME, value: others, color: 'var(--s-other)' })
   if (items.length === 0) {
     const running = ctx.apps.filter((a) => a.observed_state === 'running')
     if (running.some((a) => !ctx.metrics[a.name])) return { kind: 'none', text: '正在读取…' }
@@ -241,7 +250,7 @@ export function machineTodo(checks: RuntimeChecks | null): RuntimeCheck[] {
 
 // todoItems：需要你处理的事。title 是一句人话（problemLine），action 一律“去看看”；编号和诊断放进 ask。
 // 颜色一律琥珀（样稿第 11 版：“要处理”用琥珀，红色只给删除和出错）。
-export function todoItems(ctx: Pick<DashCtx, 'apps' | 'installing' | 'checks' | 'tasks' | 'now' | 'nameOf' | 'behind'>): ListItem[] {
+export function todoItems(ctx: Pick<DashCtx, 'apps' | 'installing' | 'checks' | 'tasks' | 'now' | 'nameOf' | 'behind' | 'platformUpdate' | 'updateSeen'>): ListItem[] {
   const out: ListItem[] = []
   for (const a of ctx.apps) {
     const s = deriveStatus(a, ctx.installing)
@@ -265,6 +274,11 @@ export function todoItems(ctx: Pick<DashCtx, 'apps' | 'installing' | 'checks' | 
   for (const c of machineTodo(ctx.checks)) {
     const head = c.text.split(/[：，。]/)[0]
     out.push({ key: 'k-' + c.text, tone: 'warning', icon: 'wrench', title: head, href: '#prefs/checkup', action: '去看看', ask: `AcornFox 体检有一项${c.level === 'fail' ? '不通过' : '要注意'}：${[c.code, c.text].filter(Boolean).join(' ')}` })
+  }
+  // AcornFox 自己有新版本：不是故障，同一个版本只提醒一次（用户在“设置 › 这台机器”看过就不再出，lib/update-seen.ts）。
+  const pu = ctx.platformUpdate
+  if (pu?.enabled && pu.available && pu.latest && ctx.updateSeen !== pu.latest) {
+    out.push({ key: 'u-' + pu.latest, tone: 'warning', icon: 'up', title: `AcornFox 有新版本 ${pu.latest}`, href: '#prefs/update', action: '去看看', ask: `AcornFox 有新版本 ${pu.latest}（现在是 ${pu.current}）。请先把发行说明${pu.notes_url ? '（' + pu.notes_url + '）' : ''}和新版本告诉我，问我同意以后再升级：acornfox update 能看到该用的升级命令。` })
   }
   for (const t of ctx.tasks) {
     if (t.status !== 'failed') continue

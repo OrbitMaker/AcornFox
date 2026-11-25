@@ -55,6 +55,10 @@ type app struct {
 	noticeAsked bool
 	now         func() time.Time
 
+	// The new-version check of the server `status` is talking to
+	// (update.go); nil when it was not asked or the server has none.
+	platformUpd *client.PlatformUpdate
+
 	// N3 `open` injection points (nil in production → real implementations).
 	openTunnel func(ctx context.Context, t client.Target, localPort int) (*client.Tunnel, error)
 	// `open APP`: tunnel to the app's port on the server.
@@ -99,7 +103,7 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.out.usageError("%s", err.Error())
 	}
 	if len(rest) == 0 {
-		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、services、backup、machine、version、doctor、identity、faults、sources、capabilities（acornfox help 看说明）")
+		return a.out.usageError("需要一个子命令；可用：target、deploy、status、diagnose、apps、versions、logs、stats、env、volume、app set、rollback、redeploy、stop、start、restart、delete、open、domain、add、remove、addons、lan-console、public-console、limits、skill、catalog、install、services、backup、machine、other-containers、update、version、doctor、identity、faults、sources、capabilities（acornfox help 看说明）")
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
@@ -127,6 +131,10 @@ func mainWith(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return a.cmdServices(ctx, cmdArgs)
 	case "machine":
 		return a.cmdMachine(ctx, cmdArgs)
+	case "update":
+		return a.cmdUpdate(ctx, cmdArgs)
+	case "other-containers":
+		return a.cmdOtherContainers(ctx, cmdArgs)
 	case "backup":
 		return a.cmdBackup(ctx, cmdArgs)
 	case "target":
@@ -283,8 +291,11 @@ const usageText = `用法：acornfox [--target 服务器] [--app 应用] [--json
                                    AI 工作台开始做事前先看它，不含任何密码和 Key）
                                    连上服务器时发现服务器比这个命令行新，会提醒一次更新命令行和 Skill（每天最多一次，
                                    写到标准错误；--json 时在结果的 notices 里；ACORNFOX_NO_UPDATE_NOTICE=1 关掉；CLI-UPDATE-01）
+  other-containers                 这台服务器上不是从 AcornFox 装的容器（用户自己 docker run 装的）：名字、在跑还是停了、端口、占了多少内存
+                                   （只读，只能看不能管；Windows、Mac 上只看得到 AcornFox 自己那套环境里的）
   catalog lint 目录                检查应用目录的清单和配方（只读，给目录维护者用）
   catalog build|keygen|verify      打包签名发布目录、生成签名钥匙、校验发布目录（给目录维护者用）
+  update [check]                   AcornFox 自己有没有新版本、该用哪条命令升级（服务器每 6 小时自己查；check 现在就查；只提醒，不升级，只读线上）
   version                          版本号
 
 每个命令加 -h 查看它的参数。

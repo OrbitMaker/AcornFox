@@ -11,7 +11,7 @@ import (
 // Code shapes: upper-case codes of the program and the scripts, lower-case
 // diagnosis codes, and the fallback.
 var (
-	upperCode = regexp.MustCompile(`^(CAT-(INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}$`)
+	upperCode = regexp.MustCompile(`^(CAT-(INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|PLAT-UPD|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}$`)
 	lowerCode = regexp.MustCompile(`^[a-z][a-z_]*[a-z]$`)
 )
 
@@ -60,6 +60,8 @@ func groupOf(code string) string {
 		return "ID"
 	case strings.HasPrefix(code, "MACHINE-"):
 		return "MACHINE"
+	case strings.HasPrefix(code, "PLAT-UPD-"):
+		return "UPD"
 	}
 	return "?"
 }

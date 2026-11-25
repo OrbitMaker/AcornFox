@@ -48,5 +48,30 @@ foreach ($f in $files) {
         }
     }
 }
+# 测速选源：get.ps1 和 install-windows.ps1 里“# >>> 测速选源”到“# <<< 测速选源”必须逐字一样，并核对换算和拼地址的函数
+$blocks = @{}
+foreach ($f in $files) {
+    if (-not (Test-Path -LiteralPath $f.p)) { continue }
+    $t = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($f.p)).TrimStart([char]0xFEFF)
+    $m = [regex]::Match($t, '(?s)# >>> 测速选源.*?# <<< 测速选源')
+    if ($m.Success) { $blocks[$f.n] = ($m.Value -replace "`r`n", "`n") }
+}
+if ($blocks['get.ps1'] -and $blocks['get.ps1'] -eq $blocks['install-windows.ps1']) { Ok "get.ps1 和 install-windows.ps1 里的测速选源那一段逐字一样" } else { Bad "get.ps1 和 install-windows.ps1 里的测速选源那一段不一样（或找不到）" '' }
+if ($blocks['get.ps1']) {
+    Invoke-Expression $blocks['get.ps1']
+    $cases = @(
+        @{ n = '2 MB 用 1 秒 = 每秒 2 MiB'; o = '206 2097152 1.000'; w = 2097152 },
+        @{ n = '到点停下：200 状态也按窗口内取到的字节算'; o = '200 10485760 5.000000'; w = 2097152 },
+        @{ n = '没取到数据（状态码 000）= 0'; o = '000 0 4.000000'; w = 0 },
+        @{ n = '500 = 0'; o = '500 0 0.300000'; w = 0 },
+        @{ n = '空输出 = 0'; o = ''; w = 0 }
+    )
+    foreach ($c in $cases) { $got = Get-ProbeBps $c.o; if ($got -eq $c.w) { Ok "测速换算：$($c.n)" } else { Bad "测速换算：$($c.n)" "要 $($c.w)，得到 $got" } }
+    $env:ACORNFOX_GITEE_REPO = $null; $env:ACORNFOX_REPO = $null; $env:ACORNFOX_GITEE_HOST = $null; $env:ACORNFOX_GITHUB_HOST = $null
+    if ((Get-ProbeUrl 'gitee' 'v0.7.0' 'x') -eq 'https://gitee.com/VIP13390/AcornFox/releases/download/v0.7.0/x' -and (Get-ProbeUrl 'github' 'v0.7.0' 'x') -eq 'https://github.com/OrbitMaker/AcornFox/releases/download/v0.7.0/x') { Ok '测速拼的地址：Gitee、GitHub 的发行版文件' } else { Bad '测速拼的地址不对' '' }
+    $env:ACORNFOX_GITEE_HOST = 'http://127.0.0.1:9'
+    if ((Get-ProbeUrl 'gitee' 'v0.7.0' 'x') -eq 'http://127.0.0.1:9/VIP13390/AcornFox/releases/download/v0.7.0/x') { Ok '测速拼的地址：ACORNFOX_GITEE_HOST 能换成假服务器' } else { Bad '测速拼的地址：换假服务器不生效' '' }
+    $env:ACORNFOX_GITEE_HOST = $null
+}
 Write-Host "通过 $pass/$total"
 if ($pass -ne $total) { exit 1 }

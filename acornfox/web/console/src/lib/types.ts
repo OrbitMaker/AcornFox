@@ -130,6 +130,33 @@ export interface OpenHint {
   tunnel_url?: string
 }
 
+// GET /v1/host/containers：这台机器上不是从 AcornFox 装的容器（用户自己 docker run 装的），只读。
+// memory_mb、cpu_percent：读到用量的在跑容器加起来；旧服务端没有这个接口（404），读不到时是 503（MACHINE-04）。
+export interface OtherPort { host: number; container: number; proto: string }
+export interface OtherContainer {
+  id: string
+  name: string
+  image: string
+  state: string
+  running: boolean
+  created: number
+  ports: OtherPort[]
+  host_network?: boolean
+  stats_available: boolean
+  cpu_available: boolean
+  cpu_percent: number
+  memory_usage_mb: number
+}
+export interface OtherContainersView {
+  observed_at: string
+  containers: OtherContainer[]
+  running: number
+  stopped: number
+  memory_mb: number
+  cpu_percent: number
+  truncated?: boolean
+}
+
 export interface AppMetrics {
   app: string
   available: boolean
@@ -156,7 +183,26 @@ export interface Session { csrf: string; expires_at: string; server: string }
 // on_public、latest_version：服务端还没有给这两项（要服务端配合），没给时页面照没有这回事处理。on_public：这台机器在不在公网上
 // （家里的机器不在，是正常情况）；latest_version：线上最新的版本号（和 version 一样就是“已是最新”）。
 // apps_outdated：有新版本的应用（数量，或应用代号的列表）；服务端没给时不提。
-export interface ServerStatus { runner?: string; docker_version?: string; apps?: number; version?: string; setup?: { state: string }; edge?: { state: string; message?: string }; on_public?: boolean; latest_version?: string; apps_outdated?: number | string[] }
+// platform_update（W12-3，服务端每 6 小时查一次线上最新的正式版）：GET /v1/status 带上；旧服务端没有，页面照旧只看 latest_version。
+export interface PlatformUpdate {
+  enabled: boolean // false：服务的环境里设了 ACORNFOX_UPDATE_CHECK=off，不联网查
+  current: string
+  latest?: string // 最近一次查到的最新正式版；还没查到过时没有
+  available: boolean // latest 比 current 新
+  checked_at?: string // 上次查的时间（不管成没成），RFC 3339
+  ok: boolean // 上次查到了
+  source?: string // gitee、github
+  notes_url?: string // 发行说明
+  upgrade_command?: string // 这台机器该用的那一条升级命令（Linux、Windows、Mac 不一样，国内用 Gitee、海外用 GitHub）
+  upgrade_where?: string // 在哪里运行它
+  host_kind?: string // linux、windows、mac
+  last_ok_at?: string
+  failures?: number
+  unreachable?: boolean // 好几天一直查不到
+  error?: string
+  code?: string // PLAT-UPD-01 有新版本、PLAT-UPD-02 一直查不到
+}
+export interface ServerStatus { runner?: string; docker_version?: string; apps?: number; version?: string; setup?: { state: string }; edge?: { state: string; message?: string }; on_public?: boolean; latest_version?: string; platform_update?: PlatformUpdate; apps_outdated?: number | string[] }
 
 // ---- 首页看板、运行环境、设置 ----
 

@@ -4,7 +4,7 @@ import {
   todoItems, typesFor, typesForSource, type DashCtx,
 } from './dashboard'
 import { app, task } from '@/test/fixtures'
-import type { AppView, HostHistory } from './types'
+import type { AppView, HostHistory, PlatformUpdate } from './types'
 
 const GB = 1024 ** 3
 const hist = (n: number): HostHistory => ({
@@ -139,5 +139,26 @@ describe('布局', () => {
     expect(fmtValue(12.345, '%')).toBe('12.3%')
     expect(fmtValue(1234, 'MB')).toBe('1,234 MB')
     expect(fmtValue(null, 'GB')).toBe('—')
+  })
+})
+
+describe('AcornFox 有新版本（铃铛里“需要你处理”的一条）', () => {
+  const pu = (o: Partial<PlatformUpdate> = {}): PlatformUpdate => ({ enabled: true, current: '0.7.0', latest: '0.7.1', available: true, ok: true, notes_url: 'https://gitee.com/x/releases/tag/v0.7.1', ...o })
+  it('有新版本、这个版本还没看过：出一条琥珀色的，去“设置 › 这台机器”的升级', () => {
+    const items = todoItems(ctx({ platformUpdate: pu(), updateSeen: '' }))
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ key: 'u-0.7.1', tone: 'warning', title: 'AcornFox 有新版本 0.7.1', href: '#prefs/update', action: '去看看' })
+    expect(items[0].ask).toContain('0.7.1')
+    expect(items[0].ask).toContain('问我同意以后再升级')
+  })
+  it('同一个版本看过就不再出；更新的版本再出', () => {
+    expect(todoItems(ctx({ platformUpdate: pu(), updateSeen: '0.7.1' }))).toEqual([])
+    expect(todoItems(ctx({ platformUpdate: pu({ latest: '0.7.2' }), updateSeen: '0.7.1' }))).toHaveLength(1)
+  })
+  it('已是最新、关掉了、服务端没给：都不出', () => {
+    expect(todoItems(ctx({ platformUpdate: pu({ available: false, latest: '0.7.0' }) }))).toEqual([])
+    expect(todoItems(ctx({ platformUpdate: pu({ enabled: false }) }))).toEqual([])
+    expect(todoItems(ctx({ platformUpdate: null }))).toEqual([])
+    expect(todoItems(ctx())).toEqual([])
   })
 })

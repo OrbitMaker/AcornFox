@@ -8,7 +8,7 @@
 
 1. **只读检查**（什么都不改，退出码 0 就是能装）：在用户的 PowerShell 里运行下面“安装命令”，末尾加 `-Plan`（可再加 `-Json`，那时标准输出只有最后一行 JSON）。它会检查 Windows 版本、虚拟化、公司策略、磁盘，并打印将要做的事；检查不过时带故障编号 `WIN-…` 停下。`-Plan` 什么都不改，连操作记录文件也不写。
 2. **先问用户、得到明确同意**，把下面三件事说给他听：① 第一次装会弹**一次管理员确认**（窗口写 Windows PowerShell、发布者 Microsoft Windows），要他自己点“是”（电脑上已有 WSL 2 就不弹也不重启）；② 电脑上没有 WSL 时要**重启一次电脑**，重启后登录会自动弹出窗口接着装；③ 默认让局域网里的手机、电脑也能打开应用，不想要加 `-LocalOnly`。下载约 350 MB（WSL 安装包）加 85 MB（Debian 镜像），装 Docker 等再几百 MB，一共要 10 GB 以上空闲。
-3. **安装命令**（普通 PowerShell，**不要**“以管理员身份运行”；国内用第一条，海外用第二条，不确定就先试第二条，它会自动退到另一个源）：
+3. **安装命令**（普通 PowerShell，**不要**“以管理员身份运行”；国内用第一条，海外用第二条，不确定就先试第一条；没写 `-China`/`-Global` 时脚本会当场测速：同时从 Gitee 和 GitHub 取同一个发行版文件的开头，谁快先用谁，屏幕上有一行“测速：Gitee x MB/s、GitHub y MB/s，先用 …”，判断一路交给 WSL 里的安装脚本；一个源取不到会自动换另一个）：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://gitee.com/VIP13390/AcornFox/raw/main/get.ps1')).TrimStart([char]0xFEFF)))"

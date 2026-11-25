@@ -5,7 +5,7 @@
 // 只有展开时才挂上（ChartBoard 不渲染就不轮询下面这些接口）。
 // 数据只来自服务端真有的接口（见 lib/dashboard.ts 文件头）；时间范围只给服务端有的历史（1 小时、24 小时）。
 // 接口：GET /v1/metrics/host（10 秒）、GET /v1/metrics/host/history?range=（30 秒）、GET /v1/metrics/apps/{app}（15 秒，只问在跑的应用）、
-//       GET /v1/runtime/checks（60 秒）、GET /v1/apps/{app}/deployments?limit=5（60 秒）；应用、安装任务、资源用共享数据。
+//       GET /v1/host/containers（15 秒，各应用内存、CPU 里合成一项“其他容器”）、GET /v1/runtime/checks（60 秒）、GET /v1/apps/{app}/deployments?limit=5（60 秒）；应用、安装任务、资源用共享数据。
 import * as React from 'react'
 import {
   Activity, Bell, ChartArea, ChartBar, ChartColumn, ChartLine, ChartNoAxesGantt, ChartPie, Cpu, Gauge, GripVertical, HardDrive, Hash,
@@ -28,6 +28,7 @@ import { Loading, Sk } from '@/components/ui/skeleton'
 import { SkViz } from '@/components/skeletons'
 import { useToast } from '@/components/ui/toast'
 import { Viz } from './viz'
+import { fetchOthers } from '@/lib/others'
 import { useNameOf } from './todo'
 
 const SOURCE_ICON = { cpu: Cpu, memory: MemoryStick, disk: HardDrive, grid: LayoutGrid, bell: Bell, history: History }
@@ -50,6 +51,8 @@ export function useDashData(range: RangeKey): DashCtx {
     return { key: runningKey, out }
   }, 15000, [runningKey])
   const checks = usePoll((s) => api.get<RuntimeChecks>('/v1/runtime/checks', s).catch(() => null), 60000)
+  // 这台机器上不是从 AcornFox 装的容器（各应用内存、CPU 图里合成一项“其他容器”）；读不到就是 null，不影响别的图。
+  const others = usePoll((s) => fetchOthers(s), 15000)
   const names = (apps || []).map((a) => a.name)
   const namesKey = names.join(',')
   const deployments = usePoll(async (s) => {
@@ -65,14 +68,15 @@ export function useDashData(range: RangeKey): DashCtx {
   if (namesKey && deployments.data?.key === namesKey) depsOnce.current = true
   const lMetrics = running.length > 0 && !metricsOnce.current
   const lChecks = checks.loading && !checks.data
+  const lOthers = others.loading && !others.data
   const lDeps = names.length > 0 && !depsOnce.current
   const lApps = !apps
   const lRes = !resources
   return React.useMemo(() => ({
     now: new Date(), range, host: host.data, history: history.data, apps: apps || [], installing, metrics: metrics.data?.out || {},
-    resources, checks: checks.data, deployments: deployments.data?.list || [], tasks, nameOf, behind,
-    loading: { host: lHost, history: lHistory, apps: lApps, metrics: lMetrics, resources: lRes, checks: lChecks, deployments: lDeps },
-  }), [range, host.data, history.data, apps, installing, metrics.data, resources, checks.data, deployments.data, tasks, nameOf, behind, lHost, lHistory, lApps, lMetrics, lRes, lChecks, lDeps])
+    others: others.data, resources, checks: checks.data, deployments: deployments.data?.list || [], tasks, nameOf, behind,
+    loading: { host: lHost, history: lHistory, apps: lApps, metrics: lMetrics, resources: lRes, checks: lChecks, deployments: lDeps, others: lOthers },
+  }), [range, host.data, history.data, apps, installing, metrics.data, others.data, resources, checks.data, deployments.data, tasks, nameOf, behind, lHost, lHistory, lApps, lMetrics, lRes, lChecks, lDeps, lOthers])
 }
 
 interface Drag { id: string | null; over: string | null; start: (id: string) => void; overAt: (id: string) => void; end: () => void; drop: (id: string) => void }

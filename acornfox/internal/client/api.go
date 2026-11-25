@@ -250,6 +250,11 @@ type Status struct {
 	// AppsOutdated is how many apps from the app center have a newer
 	// version this machine can install (0 from an older server).
 	AppsOutdated int `json:"apps_outdated,omitempty"`
+	// LatestVersion is the newest stable AcornFox found online and
+	// PlatformUpdate the whole answer of the new-version check (nil from an
+	// older server); see internal/platformupdate.
+	LatestVersion  string          `json:"latest_version,omitempty"`
+	PlatformUpdate *PlatformUpdate `json:"platform_update,omitempty"`
 	// Features lists capabilities added after api_version 1 (Feature*).
 	Features []string `json:"features,omitempty"`
 }

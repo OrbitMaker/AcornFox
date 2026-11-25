@@ -171,6 +171,7 @@ AcornFox 在 Mac 上是苹果 container 开的一台 Debian 虚拟机；下面�
 | `skill print` | 把 Skill 内容打印出来，给其他工具用：默认打印入口，`--all` 打印全部文件，`--file 文件名` 打印一册（例如 `install-linux.md`） | `acornfox skill print > SKILL.md`、`acornfox skill print --file deploy.md` |
 | `skill refresh` | 重新写 Skill 目录里的“本机能力”分册 `machine-服务器名.md`（`skill install` 会给每台登记的服务器写一份；命令行里装、删、升级、退回、恢复应用和改设置之后自己刷新，在页面上动过应用后手动运行）；`--target` 只刷新一台，已经不登记的服务器的旧分册会删掉。里面没有密码和 Key。写不进目录 `MACHINE-02`，连不上服务器 `MACHINE-03`。v0.7.0 起 | `acornfox skill refresh` |
 | `machine` | 这台服务器现在能做什么：装了哪些应用和解决方案、状态、怎么打开、有没有手册、有哪些服务和谁在用、平台能备份和升级吗。只读，现场算，没有密码和 Key；AI 工作台开始做事前先看它。v0.7.0 起，服务器也要是 0.7.0 | `acornfox --json machine` |
+| `update`、`update check` | AcornFox 自己有没有新版本：服务器每 6 小时自己查一次线上最新的正式版（国内先 Gitee、其他地区先 GitHub，一边不通换另一边），`update` 看结果（最新版本、发行说明、这台机器该用的升级命令），`update check` 现在就查一次。只提醒，不升级；`status` 最后一行、`doctor` 也会提醒（`PLAT-UPD-01`、`PLAT-UPD-02`）。服务的环境变量 `ACORNFOX_UPDATE_CHECK=off` 可关掉。v0.7.1 起，服务器也要是 0.7.1 | `acornfox --json update check` |
 
 ## 目录维护（给维护应用目录的人用）
 

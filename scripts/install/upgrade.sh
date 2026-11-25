@@ -432,6 +432,8 @@ setup_github_proxies() {
             detect_location
         fi
         NETWORK_DECIDED=1
+        # get.sh 当场测速选的源（屏幕上“测速：…”那一行），记进这次升级的输出
+        [ -z "${ACORNFOX_GET_PROBE_NOTE:-}" ] || log_info "${ACORNFOX_GET_PROBE_NOTE}（已作为 --china / --global 传到这里）"
     fi
     # --china / --global 只管这一次下载：覆盖上面的判断，但不写回 install.env
     if ${FORCE_CHINA:-false}; then
@@ -1182,7 +1184,7 @@ edge_health() {
 # 就是现在入口的那个，都不删。旧容器挂的卷里，新入口还在用的（证书卷）不删；新入口不用的（旧的设置卷）
 # 跟着删掉，不留一个没有容器用的卷。
 remove_replaced_edge() {
-    local cur ids id state keep vols v
+    local cur ids id state keep vols v waited
     cur=$(docker inspect -f '{{if .State.Running}}{{.Id}}{{end}}' acornfox-edge 2>/dev/null || true)
     [ -n "$cur" ] || return 0
     keep=" $(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cur" 2>/dev/null || true) "
@@ -1191,6 +1193,14 @@ remove_replaced_edge() {
     for id in $ids; do
         [ "$id" != "$cur" ] || continue
         state=$(docker inspect -f '{{.State.Running}} {{index .Config.Labels "acornfox.edge"}}' "$id" 2>/dev/null || true)
+        # 新入口健康以后，程序才去平稳停旧入口（docker stop，最多 10 秒）；这里可能赶在它停完之前，
+        # 等它停下（最多 ${EDGE_OLD_STOP_WAIT:-20} 秒）再删。等不到就不删（程序没停成时旧的照常听着，留给下次）。
+        waited=0
+        while [ "$state" = "true 1" ] && [ "$waited" -lt "${EDGE_OLD_STOP_WAIT:-20}" ]; do
+            sleep 1
+            waited=$((waited + 1))
+            state=$(docker inspect -f '{{.State.Running}} {{index .Config.Labels "acornfox.edge"}}' "$id" 2>/dev/null || true)
+        done
         case "$state" in
             "false 1")
                 vols=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$id" 2>/dev/null || true)

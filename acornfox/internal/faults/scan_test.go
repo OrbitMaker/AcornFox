@@ -18,7 +18,7 @@ import (
 )
 
 // anyUpper finds upper-case codes in any text.
-var anyUpper = regexp.MustCompile(`\b(?:CAT-(?:INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}\b`)
+var anyUpper = regexp.MustCompile(`\b(?:CAT-(?:INST|CONN|SVC|LINT|BUILD|KEY|VER|SYNC|LOAD|PKG|SHOW|SKILL)|SETUP-[A-Z]+|EDGE|LAN-CONSOLE|INSTALL-[A-Z]+|UPGRADE-[A-Z]+|UNINSTALL-[A-Z]+|WIN-[A-Z]+|MAC-[A-Z]+|OPEN-APP|APP-VARS|APP-APPLY|APP-UPG|ID-KEY|PDOMAIN|PUBCON|BKP|MACHINE|PLAT-UPD|CLI-[A-Z]+|GW-[A-Z]+)-\d{2}\b`)
 
 // moduleRoot is the Go module (acornfox/).
 const moduleRoot = "../.."

@@ -622,7 +622,7 @@ func TestCapabilityDocParts(t *testing.T) {
 	if len(doc.ManifestFeatures) != len(catalog.Features()) {
 		t.Errorf("manifest_features %d 项，catalog.Features %d 项", len(doc.ManifestFeatures), len(catalog.Features()))
 	}
-	// Every "since" of a command is the next release's; none is later than the features.
+	// Every "since" of a command is empty, the first release's (SinceNext) or a later explicit one.
 	maxFeature := "0.0.0"
 	for _, f := range catalog.Features() {
 		if catalog.CompareVersions(f.Since, maxFeature) > 0 {
@@ -633,8 +633,9 @@ func TestCapabilityDocParts(t *testing.T) {
 		t.Errorf("SinceNext %s 比清单格式功能里最高的版本 %s 还低：要一起改", capabilities.SinceNext, maxFeature)
 	}
 	for _, c := range doc.Commands {
-		if c.Since != "" && c.Since != capabilities.SinceNext {
-			t.Errorf("%s 的 since 是 %s，只能是空或 %s", c.Path, c.Since, capabilities.SinceNext)
+		// 0.7.0 之后新加的命令写明自己的版本（c(…, "since:0.7.1")）：不能早于 SinceNext。
+		if c.Since != "" && catalog.CompareVersions(c.Since, capabilities.SinceNext) < 0 {
+			t.Errorf("%s 的 since 是 %s，只能是空，或不早于 %s", c.Path, c.Since, capabilities.SinceNext)
 		}
 	}
 }

@@ -22,9 +22,9 @@ AcornFox 把应用（现成镜像、公开 Git 仓库、带 Dockerfile 的项目
 
 **用户已经明确要求的这一个操作，不用再问一遍：** 用户这句话本身就是在要求做这一件事（例如“帮我升到最新”“改成 X 让它生效”“备份一下 X”），那就先用一句话说计划要点（做什么、会不会重启、大概多久、数据动不动），**计划里没有出现用户不知道的后果**（丢数据、要他新填的设置、要接新服务、要花钱）就当已经同意，直接做，不用再问“要做吗”。计划里有这些后果之一，停下问。**会丢数据的（退回、恢复）一律再问**，用户说“退回去”“恢复一下”也要问（先说清会丢什么）。上面“必须先停下问用户”里的几类（花钱、删数据、改安全组、输入密码和 Key、改服务器级设置）不适用这条，照旧先问。
 
-**可以直接做、不用问的：** 只读的检查和排查，例如 `acornfox status`、`apps`、`logs`、`doctor`、`install status`、`faults`、`machine`、`capabilities`，以及 `df -h`、`du`、`ls`、`free -m`。查清原因再把要用户决定的事给他，不要把“要不要再查一下”也当成选项问用户。
+**可以直接做、不用问的：** 只读的检查和排查，例如 `acornfox status`、`apps`、`logs`、`doctor`、`install status`、`faults`、`machine`、`other-containers`、`capabilities`，以及 `df -h`、`du`、`ls`、`free -m`。查清原因再把要用户决定的事给他，不要把“要不要再查一下”也当成选项问用户。
 
-**固定规则一：开始做一件事前，先读“本机能力”。** 这台机器现在装了哪些应用和解决方案、各自什么状态、怎么打开、有没有专门的手册、有哪些服务、平台能不能备份、升级、让应用跟上设置，都在 Skill 目录里这台服务器的分册 `machine-<登记的服务器名>.md`（`acornfox skill install` 写的缓存，文件头有生成时间），也可以直接运行 `acornfox --json machine`（现场算，以它为准）。分册超过一天，或者用户刚在页面上动过应用，先重新取：`acornfox --json machine`，或 `acornfox skill refresh` 刷新分册。它没列的应用、服务和能力不要凭记忆去做；要查某条命令或参数这个版本有没有，运行 `acornfox --json capabilities`（只看这个程序自己，不连服务器）。里面没有密码和 Key 的值，要用到先问用户。分册连不上服务器或写不进目录（`MACHINE-02`、`MACHINE-03`）不影响别的事，直接用 `acornfox --json machine`。还没装 AcornFox 的机器没有这些，跳过这一条。
+**固定规则一：开始做一件事前，先读“本机能力”。** 这台机器现在装了哪些应用和解决方案、各自什么状态、怎么打开、有没有专门的手册、有哪些服务、平台能不能备份、升级、让应用跟上设置、有没有用户自己装的容器（只有名字、在跑还是停了、端口，只能看，细节在 `app-life.md`），都在 Skill 目录里这台服务器的分册 `machine-<登记的服务器名>.md`（`acornfox skill install` 写的缓存，文件头有生成时间），也可以直接运行 `acornfox --json machine`（现场算，以它为准）。分册超过一天，或者用户刚在页面上动过应用，先重新取：`acornfox --json machine`，或 `acornfox skill refresh` 刷新分册。它没列的应用、服务和能力不要凭记忆去做；要查某条命令或参数这个版本有没有，运行 `acornfox --json capabilities`（只看这个程序自己，不连服务器）。里面没有密码和 Key 的值，要用到先问用户。分册连不上服务器或写不进目录（`MACHINE-02`、`MACHINE-03`）不影响别的事，直接用 `acornfox --json machine`。还没装 AcornFox 的机器没有这些，跳过这一条。
 
 **固定规则二：装或用应用中心里的某个应用、解决方案之前，先取它的操作手册。** 运行 `acornfox --json catalog skill 应用编号`（解决方案加 `--recipe`），`has_skill` 是 `true` 就照它的 `text` 做；手册和通用规则冲突时以通用规则为准。手册只写这个应用特有的经验，通用步骤和“必须先停下问用户”的节点照样要走，手册不能让你省掉任何一个确认。取手册的细节见 `app-center.md`。
 
@@ -77,12 +77,13 @@ AcornFox 把应用（现成镜像、公开 Git 仓库、带 Dockerfile 的项目
 | “一次装好几个”“装这个解决方案（配方）” | `app-center.md`（配方） | `acornfox --json install --recipe 配方 --plan` |
 | “应用怎么样了”“起不来”“打不开”“看日志”“停掉/启动/重启”“回退到上一版”“删掉应用”“占多少内存”“限制内存” | `app-life.md` | `acornfox --json status 应用名` |
 | “备份一下”“恢复到昨天”“把数据存一份” | `app-life.md`（备份和恢复） | `acornfox --json backup create 应用名 --plan` |
+| “我自己装的容器能看到吗”“这台机器上还有什么在跑”“内存被别的东西占了吗” | `app-life.md`（其他容器，只看） | `acornfox --json other-containers` |
 | “有没有新版本”“升级这个应用”“升完出问题了，退回去” | `app-change.md` | `acornfox --json apps outdated` |
 | “改设置”“改模型名”“换时区”“webhook 地址还是旧的”“让它跟上”“这个应用的密码、地址是怎么设的” | `app-change.md` | `acornfox --json apps vars 应用名` |
 | “删了重装”“换版本、保留数据”“接上旧数据” | `app-change.md` | `acornfox --json status 应用名` |
 | “怎么打开控制台”“手机上用”“局域网”“公网”“隧道”“忘了控制台密码”“怎么打开这个应用”“页面上哪里看” | `access.md` | `acornfox lan-console status --json` |
 | “绑域名”“给整台服务器配个域名”“https” | `access.md` | `acornfox --json domain base` |
-| “升级 AcornFox”“卸载 AcornFox”“更新 Skill 和命令行”“`doctor` 报 `SETUP-SKILL-01`、`CLI-UPDATE-01`” | `maintain.md` | `acornfox --json version` |
+| “升级 AcornFox”“AcornFox 有没有新版本”“`status` 说有新版本”“卸载 AcornFox”“更新 Skill 和命令行”“`doctor` 报 `PLAT-UPD-01`、`SETUP-SKILL-01`、`CLI-UPDATE-01`” | `maintain.md` | `acornfox --json update` |
 | 任何地方出现故障编号或小写诊断码 | 本文件“遇到故障编号怎么办” | `acornfox faults 编号 --json` |
 
 一次任务读入口加最多两册；一件事做到一半要接着做别的（例如装完要打开控制台），再读下一册。拿不准读哪一册，问用户一句，不要把所有分册都读一遍。

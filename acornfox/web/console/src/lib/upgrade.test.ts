@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './api'
-import { UPGRADE_CN, UPGRADE_GLOBAL, faultNeedsPlatform, higherVersion, installNeedsPlatform, needsPlatform, needsPlatformText, upgradeFirstText } from './upgrade'
+import { UPGRADE_CN, UPGRADE_GLOBAL, clockText, faultNeedsPlatform, higherVersion, installNeedsPlatform, needsPlatform, needsPlatformText, safeNotesUrl, upgradeFirstText, upgradeForAI, upgradeView } from './upgrade'
+import type { PlatformUpdate } from './types'
 import { catalog, hermesDetail, newApiDetail } from '@/test/fixtures'
 
 describe('要先升级 AcornFox 才能装', () => {
@@ -68,5 +69,62 @@ describe('要先升级 AcornFox 才能装', () => {
     expect([e.status, e.code, e.message, e.hint, e.needsPlatform]).toEqual([409, 'CAT-INST-08', 'm', 'h', '9.9.9'])
     expect((await toApiError(res({ error: { code: 'CAT-INST-29', message: 'm' } }))).needsPlatform).toBe('')
     expect((await toApiError(res({ error: { code: 'CAT-INST-29', message: 'm', needs_platform: 3 } }))).needsPlatform).toBe('')
+  })
+})
+
+// ---- 平台新版本提醒（W12-3） ----
+
+const NOW = new Date(2026, 10, 25, 12, 0, 0) // 本地时间 2026-11-25 12:00
+const pu = (o: Partial<PlatformUpdate> = {}): PlatformUpdate => ({
+  enabled: true, current: '0.7.0', available: false, ok: true, host_kind: 'linux',
+  upgrade_command: 'curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | sudo bash -s -- upgrade', upgrade_where: '在这台服务器上运行', ...o,
+})
+
+describe('升级那一行：服务端的 platform_update', () => {
+  it('有新版本：写新版本号和现在的版本，命令、在哪运行、发行说明都用服务端给的', () => {
+    const v = upgradeView({ version: '0.7.0', platform_update: pu({ latest: '0.7.1', available: true, notes_url: 'https://gitee.com/x/releases/tag/v0.7.1', checked_at: new Date(2026, 10, 25, 10, 0).toISOString() }) }, true, NOW)
+    expect(v).toMatchObject({ kind: 'new', line: '有新版本 0.7.1，现在是 0.7.0', latest: '0.7.1', where: '在这台服务器上运行', notesUrl: 'https://gitee.com/x/releases/tag/v0.7.1', canCheck: true })
+    expect(v.commands).toEqual([pu().upgrade_command])
+  })
+  it('已是最新：带上次查的时间', () => {
+    const v = upgradeView({ version: '0.7.0', platform_update: pu({ latest: '0.7.0', checked_at: new Date(2026, 10, 25, 10, 5).toISOString() }) }, null, NOW)
+    expect(v.kind).toBe('latest')
+    expect(v.line).toBe('现在是 0.7.0，已是最新（上次查：今天 10:05）')
+  })
+  it('已是最新但好几天没查到新的：说一句', () => {
+    const v = upgradeView({ version: '0.7.0', platform_update: pu({ latest: '0.7.0', unreachable: true, ok: false, failures: 20 }) }, null, NOW)
+    expect(v).toMatchObject({ kind: 'latest', stale: true, line: '现在是 0.7.0，已是最新（好几天没查到新的了）' })
+  })
+  it('还没查过、暂时查不到、已关闭', () => {
+    expect(upgradeView({ version: '0.7.0', platform_update: pu({ ok: false }) }, null, NOW)).toMatchObject({ kind: 'pending', line: '现在是 0.7.0（还没查过最新版本）', canCheck: true })
+    expect(upgradeView({ version: '0.7.0', platform_update: pu({ ok: false, checked_at: '2026-11-25T01:00:00Z', failures: 2, error: '连不上' }) }, null, NOW)).toMatchObject({ kind: 'unreachable', line: '现在是 0.7.0（暂时查不到最新版本）' })
+    expect(upgradeView({ version: '0.7.0', platform_update: pu({ enabled: false }) }, null, NOW)).toMatchObject({ kind: 'off', line: '现在是 0.7.0（新版本提醒已关闭）' })
+  })
+  it('旧服务端没有 platform_update：只比 latest_version，说法和以前一样，命令按体检里的国内海外选', () => {
+    expect(upgradeView({ version: '0.6.3', latest_version: '0.6.4' }, true, NOW)).toMatchObject({ kind: 'new', line: '有新版本 0.6.4，现在是 0.6.3', canCheck: false, commands: [UPGRADE_CN] })
+    expect(upgradeView({ version: '0.6.3', latest_version: '0.6.3' }, false, NOW)).toMatchObject({ kind: 'latest', line: '现在是 0.6.3，已是最新', commands: [UPGRADE_GLOBAL] })
+    expect(upgradeView({ version: '0.6.3' }, null, NOW)).toMatchObject({ kind: 'unknown', line: '现在是 0.6.3', commands: [UPGRADE_CN, UPGRADE_GLOBAL] })
+    expect(upgradeView(null, null, NOW)).toMatchObject({ kind: 'unknown', line: '正在读取版本…' })
+  })
+  it('发行说明只认 https', () => {
+    expect(safeNotesUrl('https://github.com/x')).toBe('https://github.com/x')
+    expect(safeNotesUrl('javascript:alert(1)')).toBe('')
+    expect(safeNotesUrl('http://x')).toBe('')
+    expect(safeNotesUrl(undefined)).toBe('')
+  })
+  it('时间：今天、昨天、更早', () => {
+    expect(clockText(new Date(2026, 10, 25, 9, 3).toISOString(), NOW)).toBe('今天 09:03')
+    expect(clockText(new Date(2026, 10, 24, 23, 59).toISOString(), NOW)).toBe('昨天 23:59')
+    expect(clockText(new Date(2026, 10, 20, 8, 0).toISOString(), NOW)).toBe('11-20 08:00')
+    expect(clockText('', NOW)).toBe('')
+    expect(clockText('坏的', NOW)).toBe('')
+  })
+  it('复制给 AI 的话：给了“在哪运行”就按它写，并说先问我', () => {
+    const t = upgradeForAI('0.7.0', '0.7.1', ['powershell -NoProfile … -Action upgrade'], '在这台电脑的 PowerShell 里运行')
+    expect(t).toContain('从 0.7.0 升级到 0.7.1')
+    expect(t).toContain('问我同意以后，在这台电脑的 PowerShell 里运行')
+    expect(t).toContain('-Action upgrade')
+    // 不给 where 时和以前一样
+    expect(upgradeForAI('0.6.3', '0.6.4', ['a'])).toContain('在这台机器上运行（会先打印要做的事')
   })
 })

@@ -27,6 +27,8 @@ export interface ConsoleState {
   resources: Resources | null
   refreshResources: () => Promise<void>
   status: ServerStatus | null
+  // 马上重读 GET /v1/status（“设置 › 这台机器”点了“现在查一次”以后用，让铃铛跟着变）
+  refreshStatus: () => Promise<void>
   // 落在后面的应用（平台自动填的值或用到的服务变了，应用里用的还是以前的；GET /v1/platform/affected）；旧服务端没有这个接口时是空的
   behind: AffectedApp[]
   refreshAffected: () => Promise<void>
@@ -140,6 +142,7 @@ export function ConsoleProvider({ session, install, installTarget, logout, child
     resources: resources.data,
     refreshResources: resources.refresh,
     status: status.data,
+    refreshStatus: status.refresh,
     behind,
     refreshAffected: affected.refresh,
     theme,

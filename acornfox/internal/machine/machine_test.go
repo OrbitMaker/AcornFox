@@ -145,3 +145,32 @@ func TestCacheFileNameStaysInTheDirectory(t *testing.T) {
 		}
 	}
 }
+
+// The containers AcornFox does not manage: only a name, running or not and
+// the ports; none when there are none.
+func TestOtherContainersInTheView(t *testing.T) {
+	v := View{OtherContainers: []OtherContainer{{Name: "redis", Running: true, Ports: []int{6379, 80}}, {Name: "old-db"}}}
+	Normalize(&v)
+	if v.OtherContainers[0].Name != "old-db" || v.OtherContainers[0].Ports == nil || v.OtherContainers[1].Ports[0] != 80 {
+		t.Fatalf("顺序和空列表：%+v", v.OtherContainers)
+	}
+	b, _ := json.Marshal(v)
+	if strings.Contains(string(b), "null") {
+		t.Fatalf("有 null：%s", b)
+	}
+	md := Markdown(v, "n7")
+	for _, want := range []string{"不归 AcornFox 管的容器（2 个）", "只能看，不能管", "redis：在跑，端口 80、6379", "old-db：停了", "acornfox --json other-containers"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("分册缺 %q:\n%s", want, md)
+		}
+	}
+	if h := Text(v); !strings.Contains(h, "不归 AcornFox 管的容器 2 个（只看）") || !strings.Contains(h, "redis：在跑") {
+		t.Errorf("短文字：%s", h)
+	}
+	// None: the section is not there at all.
+	none := View{}
+	Normalize(&none)
+	if strings.Contains(Markdown(none, "n7"), "不归 AcornFox 管") || strings.Contains(Text(none), "不归 AcornFox 管") {
+		t.Error("没有其他容器时不写这一节")
+	}
+}

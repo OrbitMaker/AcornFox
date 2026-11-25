@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/acornfox/acornfox/internal/appinstall"
 	"github.com/acornfox/acornfox/internal/machine"
+	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
 )
 
@@ -177,6 +179,26 @@ func (s *server) machineView(ctx context.Context) machine.View {
 				}
 			}
 			v.Services = append(v.Services, ms)
+		}
+	}
+	// The containers AcornFox does not manage: names, running or not, ports.
+	// A runner that cannot list them (an older one) leaves the part out; a
+	// Docker that does not answer is named in the warnings.
+	if oc, oerr := s.otherContainers(ctx, false, false); oerr != nil {
+		if !errors.Is(oerr, runner.ErrUnsupported) {
+			warn("other_containers", "读不到这台机器上其他容器（%s，acornfox faults %s）", "Docker 没有回应", codeOthersUnavailable)
+		}
+	} else {
+		for _, c := range oc.Containers {
+			mc := machine.OtherContainer{Name: c.Name, Running: c.Running}
+			seen := map[int]bool{}
+			for _, p := range c.Ports {
+				if !seen[p.Host] {
+					seen[p.Host] = true
+					mc.Ports = append(mc.Ports, p.Host)
+				}
+			}
+			v.OtherContainers = append(v.OtherContainers, mc)
 		}
 	}
 	machine.Normalize(&v)

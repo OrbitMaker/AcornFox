@@ -381,12 +381,7 @@ func (in *Installer) stepLinux(ctx context.Context) (string, string, error) {
 			return "", "", faultf("MAC-LINUX-01", "%v", err)
 		}
 	}
-	region := ""
-	if in.Opt.China {
-		region = " --china"
-	} else if in.Opt.Global {
-		region = " --global"
-	}
+	region := in.regionArg()
 	host := in.Cfg.PublicHost
 	if host == "" {
 		host = "127.0.0.1"

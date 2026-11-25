@@ -59,6 +59,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+PathContainerLogBatch, s.handleLogBatch)
 	s.mux.HandleFunc("POST "+PathContainerLogTail, s.handleLogTail)
 	s.mux.HandleFunc("POST "+PathContainerStats, s.handleContainerStats)
+	s.mux.HandleFunc("POST "+PathContainersOthers, s.handleContainersOthers)
 	s.mux.HandleFunc("POST "+PathContainerDiff, s.handleContainerDiff)
 	s.mux.HandleFunc("POST "+PathVolumeEnsure, s.handleVolumeEnsure)
 	s.mux.HandleFunc("POST "+PathVolumeList, s.handleVolumeList)

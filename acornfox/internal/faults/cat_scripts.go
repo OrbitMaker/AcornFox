@@ -161,7 +161,7 @@ var upgradeFaults = []Fault{
 		Symptoms: []string{"一行命令打印“[引导] 出错：下载 vX 的 … 失败”和“故障编号: INSTALL-GET-02”"},
 		Causes: []Cause{
 			{Text: "写的版本号不存在", Check: "发行版列表里没有这个版本"},
-			{Text: "两个下载源都连不上或中途断了", Check: "curl -I https://gitee.com、curl -I https://github.com"},
+			{Text: "两个下载源都连不上或中途断了", Check: "curl -I https://gitee.com、curl -I https://github.com；失败前屏幕上有一行“测速：Gitee、GitHub 都没取到数据”就是这种情况（测速取的是同一个版本的程序文件开头，最多 5 秒、各试两次）"},
 			{Text: "这台机器没有 curl", Check: "command -v curl 没有输出"},
 		},
 		Steps:   []string{"核对版本号", "curl -I https://gitee.com", "curl -I https://github.com"},

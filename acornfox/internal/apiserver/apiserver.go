@@ -205,6 +205,10 @@ type Config struct {
 	Sources func() DownloadSources
 	// Version is this program's version, reported by GET /v1/status.
 	Version string
+	// PlatformUpdate remembers the newest stable AcornFox version found
+	// online (platform_update.go); nil => GET /v1/status has no
+	// platform_update and the /v1/platform/update routes answer 404.
+	PlatformUpdate PlatformUpdater
 
 	// Backups backs up and restores app data (package appbackup); nil =>
 	// the backup routes answer 404.
@@ -226,6 +230,7 @@ type server struct {
 	store          Store
 	kicker         Kicker
 	runner         Runner
+	others         othersCache // the last listing of the containers AcornFox does not manage (others.go)
 	uploadDir      string
 	publicHost     string
 	maxUploadBytes int64
@@ -256,6 +261,7 @@ type server struct {
 	sources         func() DownloadSources
 	version         string
 	backups         *appbackup.Manager
+	platformUpdate  PlatformUpdater
 
 	// resMu serializes the allocation check and the write that follows it
 	// (app limits, add-ons, new apps, server-wide caps), see resources.go.
@@ -325,6 +331,7 @@ func newServer(cfg Config) *server {
 		sources:         cfg.Sources,
 		version:         cfg.Version,
 		backups:         cfg.Backups,
+		platformUpdate:  cfg.PlatformUpdate,
 	}
 }
 
@@ -389,8 +396,10 @@ func (s *server) registerV1(mux *http.ServeMux) {
 	s.registerCatalog(mux)
 	s.registerServices(mux)
 	s.registerMachine(mux)
+	s.registerOthers(mux)
 	s.registerPlatformDomain(mux)
 	s.registerBackups(mux)
+	s.registerPlatformUpdate(mux)
 }
 
 // New builds the trusted HTTP handler (Unix socket / loopback). It serves the

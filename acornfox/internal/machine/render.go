@@ -3,6 +3,7 @@ package machine
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,24 @@ var statusText = map[string]string{
 	"provider_stopped": "提供它的应用停着",
 	"provider_gone":    "提供它的应用已删",
 	"not_ready":        "还不能用（提供它的应用还没准备好）",
+}
+
+// otherLine is one unmanaged container: its name, whether it runs, the ports
+// it publishes.
+func otherLine(c OtherContainer) string {
+	state := "停了"
+	if c.Running {
+		state = "在跑"
+	}
+	line := c.Name + "：" + state
+	if len(c.Ports) > 0 {
+		ps := make([]string, len(c.Ports))
+		for i, p := range c.Ports {
+			ps[i] = strconv.Itoa(p)
+		}
+		line += "，端口 " + strings.Join(ps, "、")
+	}
+	return line
 }
 
 func lookupText(m map[string]string, k string) string {
@@ -160,6 +179,15 @@ func Markdown(v View, server string) string {
 	}
 	b.WriteString("\n")
 
+	if len(v.OtherContainers) > 0 {
+		fmt.Fprintf(&b, "## 这台机器上不归 AcornFox 管的容器（%d 个）\n\n", len(v.OtherContainers))
+		b.WriteString("用户自己装的（docker run、compose 或别的面板）。只能看，不能管；要看用了多少内存：`acornfox --json other-containers`。\n\n")
+		for _, c := range v.OtherContainers {
+			fmt.Fprintf(&b, "- %s\n", otherLine(c))
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("## 平台本身能做什么\n\n")
 	yes := func(ok bool) string {
 		if ok {
@@ -201,6 +229,12 @@ func Text(v View) string {
 	fmt.Fprintf(&b, "服务 %d 条：\n", len(v.Services))
 	for _, s := range v.Services {
 		fmt.Fprintf(&b, "  %s（%s）  %s\n", s.Service, s.Name, lookupText(statusText, s.Status))
+	}
+	if len(v.OtherContainers) > 0 {
+		fmt.Fprintf(&b, "不归 AcornFox 管的容器 %d 个（只看）：\n", len(v.OtherContainers))
+		for _, c := range v.OtherContainers {
+			fmt.Fprintf(&b, "  %s\n", otherLine(c))
+		}
 	}
 	for _, w := range v.Warnings {
 		fmt.Fprintf(&b, "注意（%s）：%s\n", w.Code, w.Message)

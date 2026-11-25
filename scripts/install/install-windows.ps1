@@ -29,7 +29,8 @@
 #     -Plan            试跑：只说要做什么，不下载、不改任何东西，连操作记录文件也不写（写操作都支持）
 #     -Json            标准输出只有最后一行 JSON（ok、action、exit_code、steps、faults），不再打印给人看的话；给 AI 工作台和脚本用
 #     -Yes             不再询问（卸载 -Purge 在没有终端时必须加）
-#     -China / -Global 这一次先用国内（Gitee）或海外（GitHub）下载 AcornFox 本体；不写就先试 GitHub 通不通
+#     -China / -Global 这一次先用国内（Gitee）或海外（GitHub）下载 AcornFox 本体；不写就当场测速：同时从 Gitee 和 GitHub 各取同一个发行版文件的开头，
+#       比每秒取到多少，快的先用，屏幕上有一行“测速：Gitee x MB/s、GitHub y MB/s，先用 …”，并把这个判断用 --china/--global 交给 WSL 里的 get.sh 和 install.sh
 #     -Image debian|ubuntu   用哪个 Linux 发行版镜像（默认 debian，Ubuntu 24.04 可选）
 #     -NoGateway       不联系下载网关，WSL 安装包和镜像直接从官方地址下载（也可设环境变量 ACORNFOX_GATEWAY= 空值）
 #     -LocalOnly       应用只在这台电脑上打开，不让局域网里的设备访问
@@ -57,7 +58,8 @@
 #   管理员那一步的记录 %LOCALAPPDATA%\AcornFox\logs\admin-step.log；WSL 里的安装记录 /root/acornfox-install.log。
 #   卸载时 WSL 里的输出 %LOCALAPPDATA%\AcornFox\logs\uninstall-wsl.log。
 # 环境变量：ACORNFOX_GATEWAY（下载网关地址，设成空值就不联系网关）、ACORNFOX_RELEASE_BASE（同 -ReleaseBase）、
-#   ACORNFOX_REPO、ACORNFOX_GITEE_REPO（换发布仓库）、AFX_WIN_DL_PARALLEL（分段下载起始路数，默认 16，最多 32）；
+#   ACORNFOX_PROBE_SECONDS（测速最多等几秒，默认 5）、ACORNFOX_PROBE_VERSION（只给测试：用哪个版本的文件测速，默认就是要装的版本）、
+#   ACORNFOX_GITEE_HOST、ACORNFOX_GITHUB_HOST（只给测试：换成假服务器）、ACORNFOX_REPO、ACORNFOX_GITEE_REPO（换发布仓库）、AFX_WIN_DL_PARALLEL（分段下载起始路数，默认 16，最多 32）；
 #   AFX_WIN_LIB=1（只给测试用：点引入本脚本时只定义函数、不执行，用来单独测下载这类函数）。
 #
 # 本文件含中文，必须存成带 BOM 的 UTF-8（英文 Windows 的 PowerShell 5.1 读无 BOM 的中文会解析错）。
@@ -1201,9 +1203,97 @@ default=root
     Add-Step 'systemd' 'done' $state
 }
 
-function Get-ForceRegionArgs {
-    if ($China) { return @('--china') }
-    if ($Global) { return @('--global') }
+# >>> 测速选源（get.ps1 和 install-windows.ps1 里从这一行到“<<<”那一行必须一模一样；scripts/get.test.sh 会逐字核对）
+# 做法和 get.sh 一样：没写 -China/-Global 时，同时从 Gitee 和 GitHub 各取同一个发行版文件的开头（最多 1 MiB、最多 ACORNFOX_PROBE_SECONDS 秒，默认 5），
+# 比每秒取到多少字节，快的先用；没取到数据的那个再试一次（Gitee 偶尔中途卡住，P-847）；两边差不多快（Gitee 不到 1.3 倍）先用 GitHub。
+# 为什么不用“github.com 连不连得上”：国内常常连得上但极慢。用 Windows 自带的 curl.exe 取（Gitee 的发行版文件不认 Range，所以按固定时间窗口比）。
+function Get-ProbeUrl([string]$Src, [string]$Ver, [string]$Name) {
+    $gh = $env:ACORNFOX_REPO; if (-not $gh) { $gh = 'OrbitMaker/AcornFox' }
+    $ge = [Environment]::GetEnvironmentVariable('ACORNFOX_GITEE_REPO'); if ($null -eq $ge) { $ge = 'VIP13390/AcornFox' }
+    $giteeHost = $env:ACORNFOX_GITEE_HOST; if (-not $giteeHost) { $giteeHost = 'https://gitee.com' }      # 只给测试用：换成本机的假服务器
+    $githubHost = $env:ACORNFOX_GITHUB_HOST; if (-not $githubHost) { $githubHost = 'https://github.com' }
+    if ($Src -eq 'gitee') { return "$giteeHost/$ge/releases/download/$Ver/$Name" }
+    return "$githubHost/$gh/releases/download/$Ver/$Name"
+}
+function Start-ProbeCurl([string[]]$CurlArgs) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path -LiteralPath $curl)) { return $null }
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $curl
+        $psi.Arguments = (($CurlArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' ')
+        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($psi)
+        return @{ Proc = $p; Task = $p.StandardOutput.ReadToEndAsync() }
+    } catch { return $null }
+}
+function Receive-ProbeCurl($H, [int]$Sec) {
+    if (-not $H) { return '' }
+    try {
+        if (-not $H.Proc.WaitForExit(($Sec + 3) * 1000)) { try { $H.Proc.Kill() } catch { } }
+        return [string]$H.Task.Result
+    } catch { return '' }
+}
+function Get-ProbeBps([string]$Out) {  # “状态码 字节数 用时”换算成每秒字节数，没取到数据是 0
+    if ($Out -match '^\s*(\d+)\s+(\d+)\s+([0-9.]+)') {
+        $inv = [Globalization.CultureInfo]::InvariantCulture
+        $size = [double]::Parse($Matches[2], $inv); $sec = [double]::Parse($Matches[3], $inv)
+        if (($Matches[1] -eq '200' -or $Matches[1] -eq '206') -and $size -gt 0 -and $sec -gt 0) { return [long][math]::Floor($size / $sec) }
+    }
+    return [long]0
+}
+function Select-SourceBySpeed([string]$Ver, [string]$Asset) {  # 返回 @{ Pick = 'gitee'|'github'|''（空 = 两边都没取到数据）; Note = 给人看的一行 }
+    $secs = 5; if ($env:ACORNFOX_PROBE_SECONDS -match '^\d+$' -and [int]$env:ACORNFOX_PROBE_SECONDS -gt 0) { $secs = [int]$env:ACORNFOX_PROBE_SECONDS }
+    $bps = @{ gitee = [long]0; github = [long]0 }
+    $todo = @('gitee', 'github')
+    for ($try = 1; $try -le 2 -and $todo.Count -gt 0; $try++) {
+        $hs = @{}
+        foreach ($s in $todo) {
+            $hs[$s] = Start-ProbeCurl @('-sL', '-r', '0-1048575', '--connect-timeout', '4', '-m', "$secs", '-o', 'NUL', '-w', '%{http_code} %{size_download} %{time_total}', (Get-ProbeUrl $s $Ver $Asset))
+        }
+        foreach ($s in $todo) { $bps[$s] = Get-ProbeBps (Receive-ProbeCurl $hs[$s] $secs) }
+        $todo = @($todo | Where-Object { $bps[$_] -eq 0 })
+    }
+    $d = $bps['gitee']; $g = $bps['github']
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $dm = ([double]$d / 1MB).ToString('0.00', $inv); $gm = ([double]$g / 1MB).ToString('0.00', $inv)
+    if ($d -eq 0 -and $g -eq 0) { return @{ Pick = ''; Note = '测速：Gitee、GitHub 都没取到数据（各试了两次），先用 Gitee，取不到再换 GitHub' } }
+    if ($g -eq 0) { return @{ Pick = 'gitee'; Note = "测速：Gitee $dm MB/s、GitHub 没测通，先用 Gitee" } }
+    if ($d -eq 0) { return @{ Pick = 'github'; Note = "测速：Gitee 没测通、GitHub $gm MB/s，先用 GitHub" } }
+    if (($d * 10) -gt ($g * 13)) { return @{ Pick = 'gitee'; Note = "测速：Gitee $dm MB/s、GitHub $gm MB/s，先用 Gitee" } }
+    return @{ Pick = 'github'; Note = "测速：Gitee $dm MB/s、GitHub $gm MB/s，先用 GitHub" }   # 更快或差不多快：新发布的文件总是先到 GitHub
+}
+# <<< 测速选源
+
+# 国内还是海外：-China / -Global 照用户的；都没写就当场测速（一次运行只测一次），结果交给 WSL 里的 get.sh / install.sh（--china / --global）。
+# 返回 'china'、'global'，或 ''（没写、两边也都没测通：下载先试 Gitee，不往下传判断）。
+# 用发布源（-ReleaseBase）测试时也测：下载来自发布源，但软件源、Docker 镜像的选法还是要看这台电脑实际连哪边快。
+$script:RegionPick = $null
+$script:ProbeNote = ''
+function Get-RegionChoice([string]$Ver) {
+    if ($China -or $Global) {
+        if ($env:ACORNFOX_GET_PROBE_NOTE -and -not $script:ProbeNote) {
+            $script:ProbeNote = $env:ACORNFOX_GET_PROBE_NOTE
+            Write-Log ($script:ProbeNote + '（get.ps1 的测速，已作为 -China / -Global 传到这里）')
+        }
+        if ($China) { return 'china' }; return 'global'
+    }
+    if ($null -eq $script:RegionPick) {
+        $script:RegionPick = ''
+        $pv = $env:ACORNFOX_PROBE_VERSION; if (-not $pv) { $pv = $Ver }
+        if ($pv) {
+            $r = Select-SourceBySpeed $pv 'acornfox_linux_amd64'
+            $script:ProbeNote = [string]$r.Note
+            Say $script:ProbeNote
+            if ($r.Pick -eq 'gitee') { $script:RegionPick = 'china' } elseif ($r.Pick -eq 'github') { $script:RegionPick = 'global' }
+        }
+    }
+    return $script:RegionPick
+}
+function Get-ForceRegionArgs([string]$Ver) {
+    $rc = Get-RegionChoice $Ver
+    if ($rc -eq 'china') { return @('--china') }
+    if ($rc -eq 'global') { return @('--global') }
     return @()
 }
 
@@ -1213,6 +1303,7 @@ function Get-InsideEnvLines {
     $env1 = ''
     $rb = $ReleaseBase; if (-not $rb) { $rb = $env:ACORNFOX_RELEASE_BASE }
     if ($rb) { $env1 = "export ACORNFOX_RELEASE_BASE='" + $rb + "'`n" }
+    if ($script:ProbeNote) { $env1 += "export ACORNFOX_GET_PROBE_NOTE='" + ($script:ProbeNote -replace "'", '') + "'`n" }
     foreach ($v in @('ACORNFOX_REPO', 'ACORNFOX_GITEE_REPO')) {
         $val = [Environment]::GetEnvironmentVariable($v)
         if ($null -ne $val) { $env1 += "export $v='" + $val + "'`n" }
@@ -1223,9 +1314,8 @@ function Get-InsideEnvLines {
 # 在 WSL 里运行 AcornFox 的安装或升级脚本（同一个 install.sh / upgrade.sh：经引导脚本 get.sh 取这个版本自带的）。
 # $Verb：install 或 upgrade。输出直接接到当前窗口，同时记在 WSL 里的 /root/acornfox-install.log。
 function Invoke-InsideRun([string]$Verb, [string]$PublicHost, [string]$Ver) {
-    $china = $China
-    if (-not $China -and -not $Global) { $china = (-not (Test-UrlReachable 'https://github.com' 5)) }
-    $region = (Get-ForceRegionArgs) -join ' '
+    $region = (Get-ForceRegionArgs $Ver) -join ' '
+    $china = ((Get-RegionChoice $Ver) -ne 'global')    # 软件源：测速没分出高下（''）时也先用国内镜像，连不上会退回原来的
     $env1 = Get-InsideEnvLines
     # 软件源：国内先换成国内镜像（下面装 curl 才快，install.sh 之后会自己测速选源）；镜像连不上就退回原来的源再试，
     # 最后再试一次镜像。原来的文件备份成 .afxbak，不丢。
@@ -1310,13 +1400,6 @@ function Install-LinuxSide([string]$PublicHost, [string]$Ver) {
     Add-Step 'linux-install' 'done' "用时=${sec}s"
 }
 
-function Test-UrlReachable([string]$Url, [int]$Sec) {
-    try {
-        $req = [Net.WebRequest]::Create($Url); $req.Method = 'HEAD'; $req.Timeout = $Sec * 1000
-        $rsp = $req.GetResponse(); $rsp.Close(); return $true
-    } catch [Net.WebException] { return ($null -ne $_.Exception.Response) } catch { return $false }
-}
-
 # 在 Windows 这一侧取 get.sh（引导脚本）：从发行版取、核对 SHA256SUMS，放在 Work 里，WSL 里经 /mnt/c 运行
 function Get-ReleaseSources([string]$Ver) {
     $list = @()
@@ -1326,8 +1409,7 @@ function Get-ReleaseSources([string]$Ver) {
     $ge = [Environment]::GetEnvironmentVariable('ACORNFOX_GITEE_REPO'); if ($null -eq $ge) { $ge = 'VIP13390/AcornFox' }
     $hub = "https://github.com/$gh/releases/download/$Ver/"
     $gitee = $(if ($ge) { "https://gitee.com/$ge/releases/download/$Ver/" } else { '' })
-    $china = $China
-    if (-not $China -and -not $Global) { $china = (-not (Test-UrlReachable 'https://github.com' 5)) }
+    $china = ((Get-RegionChoice $Ver) -ne 'global')
     if ($china -and $gitee) { $list = @($gitee, $hub) } elseif ($gitee) { $list = @($hub, $gitee) } else { $list = @($hub) }
     return $list
 }

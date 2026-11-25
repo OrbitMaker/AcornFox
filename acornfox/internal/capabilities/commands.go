@@ -30,8 +30,10 @@ import "strings"
 // ship with: the version the next release carries, the same one the
 // manifest features of the reapply work are marked with. A command with no
 // "since" in the output was already there before this list existed (0.6.3
-// and earlier). When the next release gets another number, change it here
-// (a test checks it is not lower than any manifest feature's version).
+// and earlier). 0.7.0 is out: a command added after it carries its own
+// version, c(path, flags, writes, "since:0.7.1"), and SinceNext stays what
+// the 0.7.0 commands were marked with (a test checks it is not lower than
+// any manifest feature's version, and no "since" is lower than it).
 const SinceNext = "0.7.0"
 
 // Command is one runnable command or subcommand.
@@ -61,7 +63,8 @@ type Command struct {
 }
 
 // c builds one table row: path, flags as one space-separated string, writes,
-// then options: new, local, internal, alias:a,b.
+// then options: new, since:x.y.z (a version after SinceNext), local,
+// internal, alias:a,b.
 func c(path, flags string, writes bool, opts ...string) Command {
 	cmd := Command{Path: path, Flags: []string{}, Writes: writes}
 	if flags != "" {
@@ -76,6 +79,10 @@ func c(path, flags string, writes bool, opts ...string) Command {
 		case "internal":
 			cmd.Internal = true
 		default:
+			if v, ok := strings.CutPrefix(o, "since:"); ok {
+				cmd.Since = v
+				continue
+			}
 			if a, ok := strings.CutPrefix(o, "alias:"); ok {
 				cmd.Aliases = append(cmd.Aliases, strings.Split(a, ",")...)
 				continue
@@ -209,6 +216,9 @@ var Commands = []Command{
 	c("skill print", "--all --file", false),
 	c("skill refresh", "--dir --json", true, "new"),
 	c("machine", "--json", false, "new"),
+	c("update", "--json", false, "since:0.7.1"),
+	c("update check", "--json", true, "since:0.7.1"),
+	c("other-containers", "--json", false, "since:0.7.1"),
 
 	// How AcornFox starts and installs itself.
 	c("server", "--listen --data-dir --listen-group --console-listen --runner-socket --runner-uid --edge --edge-admin-port --public-host --public-port-min --public-port-max --http-port --https-port --https-issuer --https-ca-file --acme-email --public-console-listen --lan-console-port --wsl --default-exposure", true, "local", "internal"),

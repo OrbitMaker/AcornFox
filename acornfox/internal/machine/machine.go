@@ -34,6 +34,11 @@ type View struct {
 	Solutions   []Solution `json:"solutions"`
 	Services    []Service  `json:"services"`
 	Platform    Platform   `json:"platform"`
+	// OtherContainers are the containers on this machine AcornFox does not
+	// manage (the user started them with docker run, compose or another
+	// panel): name, running or not, published ports. Read-only, nothing more
+	// of them is shown; `acornfox other-containers` has the usage figures.
+	OtherContainers []OtherContainer `json:"other_containers"`
 	// Warnings are the parts that could not be worked out (the rest is
 	// still given): the answer is then incomplete, not wrong.
 	Warnings []Warning `json:"warnings"`
@@ -123,10 +128,17 @@ type Platform struct {
 	Reapply bool `json:"reapply"`
 }
 
+// OtherContainer is one container AcornFox does not manage.
+type OtherContainer struct {
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+	Ports   []int  `json:"ports"` // published on this machine, ascending
+}
+
 // Warning is a part that could not be worked out.
 type Warning struct {
 	Code    string `json:"code"`
-	Part    string `json:"part"` // apps | solutions | services | manuals
+	Part    string `json:"part"` // apps | solutions | services | manuals | other_containers
 	Message string `json:"message"`
 }
 
@@ -157,6 +169,16 @@ func Normalize(v *View) {
 	}
 	if v.Warnings == nil {
 		v.Warnings = []Warning{}
+	}
+	if v.OtherContainers == nil {
+		v.OtherContainers = []OtherContainer{}
+	}
+	sort.SliceStable(v.OtherContainers, func(i, j int) bool { return v.OtherContainers[i].Name < v.OtherContainers[j].Name })
+	for i := range v.OtherContainers {
+		if v.OtherContainers[i].Ports == nil {
+			v.OtherContainers[i].Ports = []int{}
+		}
+		sort.Ints(v.OtherContainers[i].Ports)
 	}
 	sort.SliceStable(v.Apps, func(i, j int) bool { return v.Apps[i].Instance < v.Apps[j].Instance })
 	for i := range v.Apps {

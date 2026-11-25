@@ -825,6 +825,7 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	if s.version != "" {
 		body["version"] = s.version
 	}
+	s.addPlatformUpdate(body)
 	if s.edgeStatus != nil {
 		if st, msg := s.edgeStatus(); st != "" {
 			body["edge"] = map[string]string{"state": st, "message": msg}

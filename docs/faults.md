@@ -418,6 +418,9 @@
 | MACHINE-01 | P3 | 本机能力有一块没算全 | 运行 acornfox --json machine 看 warnings 里每一项的 part 和 message：manuals 是应用目录读不了（应用名字、一句话、手册没查到），先 acornfox catalog sync；services 是服务登记表的问题，看 acornfox services list；apps 是某个应用的情况读不出来，acornfox status 应用名 |
 | MACHINE-02 | P3 | “本机能力”分册写不进 Skill 目录 | 不加 --json 运行 acornfox skill refresh，看 ✗ 那一行写的路径和原因；Skill 目录以前被 sudo 建过的，请用户确认后改回自己的属主；要马上用，直接运行 acornfox --json machine |
 | MACHINE-03 | P3 | 这台服务器的“本机能力”分册没能写：连不上，或服务器上的 AcornFox 太旧 | 先运行 acornfox --target 服务器名 status 看能不能连上（连不上看里面的连接编号）；能连上但提示服务器版本旧，让用户先升级服务器上的 AcornFox；好了再 acornfox skill refresh |
+| MACHINE-04 | P3 | 读不到这台机器上不是从 AcornFox 装的容器 | 运行 acornfox doctor 看 Docker 一项；Docker 好了再运行 acornfox other-containers；doctor 里 Docker 正常却还是这个编号，多半是后台服务和执行器版本不一致，先问用户再重启后台服务 |
+| PLAT-UPD-01 | P3 | AcornFox 有新版本可以升级 | 运行 acornfox update 看最新版本号、发行说明地址和这台机器该用的那一条升级命令；先把新版本和发行说明告诉用户，问他要不要现在升，同意以后再运行那条命令（Windows、Mac 的命令和 Linux 服务器不一样，以 acornfox update 给的为准） |
+| PLAT-UPD-02 | P3 | 好几天查不到 AcornFox 的最新版本 | 运行 acornfox update check 现在查一次，看 error 里写的是哪一边、什么原因；确认这台机器能打开 gitee.com 和 github.com（国内机器只通 Gitee 就够）；公司网络有代理的看服务的代理设置；不想要这个提醒就关掉（ACORNFOX_UPDATE_CHECK=off） |
 | ANY-00 | P2 | 目录里找不到对应的情况 | 先把出错那条输出里的 message 和 hint 原样告诉用户；hint 只是让这条命令换个参数或稍后重试的，可以照做；别的一律只读、不动任何东西，收集证据包交给用户（或反馈给维护者） |
 
 ## 安装脚本（install.sh）
@@ -761,7 +764,7 @@
 可能原因（逐条判定）：
 
 1. 写的版本号不存在 —— 判定：发行版列表里没有这个版本
-2. 两个下载源都连不上或中途断了 —— 判定：curl -I https://gitee.com、curl -I https://github.com
+2. 两个下载源都连不上或中途断了 —— 判定：curl -I https://gitee.com、curl -I https://github.com；失败前屏幕上有一行“测速：Gitee、GitHub 都没取到数据”就是这种情况（测速取的是同一个版本的程序文件开头，最多 5 秒、各试两次）
 3. 这台机器没有 curl —— 判定：command -v curl 没有输出
 
 排查顺序：
@@ -1984,6 +1987,7 @@
 1. container 服务没启动（重启电脑后、或被手动停了）［doctor 自动判定］ —— 判定：container system status 不是 running
 2. 安装包没装全，container 程序不在 /usr/local/bin —— 判定：which container 没有输出；ls /usr/local/bin/container
 3. macOS 太旧或和这个 container 版本不兼容 —— 判定：container system start 的报错里写版本要求
+4. 这台 Mac 上原来就装着别的版本的 container（自己装的、Homebrew 装的），和测过的 1.7.x 不一样 —— 判定：container --version 不是 1.7.x；先问用户要不要升到 1.7.1（他可能还在用它），同意了请他自己装，不要替他卸载或换掉
 
 排查顺序：
 
@@ -10807,7 +10811,8 @@
 1. 应用目录读不了：从没同步过又读不了内置的，或缓存坏了［doctor 自动判定］ —— 判定：warnings 里 part 是 manuals；acornfox catalog sources 和 acornfox doctor 的“应用目录同步”一项
 2. 某个应用的清单读不出来（目录里已经没有它，或它用的是旧格式）［doctor 自动判定］ —— 判定：warnings 里 part 是 apps，message 写着是哪个应用；acornfox apps vars 应用 也读不了
 3. 服务登记表里有几条存的值解不开（数据目录里的加密钥匙换过或丢了）［doctor 自动判定］ —— 判定：warnings 里 part 是 services，message 列着是哪几条；acornfox services list 末尾有同样一行
-4. 服务器上的程序正在升级、重启，应用列表暂时读不了 —— 判定：稍等一两分钟再运行 acornfox --json machine，warnings 没了就是这个
+4. Docker 没有回应，“不归 AcornFox 管的容器”那一块读不到（part 是 other_containers） —— 判定：acornfox other-containers 报 MACHINE-04；acornfox doctor 的 Docker 一项
+5. 服务器上的程序正在升级、重启，应用列表暂时读不了 —— 判定：稍等一两分钟再运行 acornfox --json machine，warnings 没了就是这个
 
 排查顺序：
 
@@ -10823,7 +10828,7 @@
 
 - 必须先停下问用户：服务的值解不开时：停下问用户，不动那几条服务
 - 确认恢复：acornfox --json machine 的 warnings 是空的
-- 相关编号：CAT-SVC-08
+- 相关编号：CAT-SVC-08、MACHINE-04
 - 演练方法：测试机上登记一条服务，再把数据目录里存服务值用的钥匙文件换成别的内容，运行 acornfox --json machine：warnings 里有 part 是 services 的一项（恢复：把钥匙文件换回来）
 
 ### MACHINE-02 “本机能力”分册写不进 Skill 目录
@@ -10888,6 +10893,103 @@
 - 确认恢复：acornfox skill refresh 这台服务器后面是 ✓
 - 相关编号：MACHINE-02、CLI-UPDATE-01
 - 演练方法：在测试机上 acornfox target add 一台连不上的服务器（--url http://127.0.0.1:1），运行 acornfox skill refresh
+
+### MACHINE-04 读不到这台机器上不是从 AcornFox 装的容器
+
+- 分组：本机能力和分册（MACHINE）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：acornfox other-containers、控制台“我的应用”最下面的“这台机器上的其他容器”和首页资源图里的“其他容器”，都要后台执行器去问 Docker：这台机器上有哪些容器不是 AcornFox 装的（用户自己 docker run、docker compose 或别的面板装的）。Docker 没回应，或执行器是旧版本、不认这个请求时就读不到。只影响这一块的显示：AcornFox 管的应用、数据库和入口代理不受影响，也没有任何容器被动过。
+- 下一步：运行 acornfox doctor 看 Docker 一项；Docker 好了再运行 acornfox other-containers；doctor 里 Docker 正常却还是这个编号，多半是后台服务和执行器版本不一致，先问用户再重启后台服务
+- AcornFox 已经自动做的：没有；这一块先空着，下次读（几秒后）会再试
+- 现象：acornfox other-containers 报 MACHINE-04；控制台“我的应用”最下面没有“这台机器上的其他容器”这一组，同时别处也显示 Docker 有问题；acornfox --json machine 的 warnings 里有 part 是 other_containers 的一项
+
+可能原因（逐条判定）：
+
+1. Docker 没在运行，或后台执行器连不上它［doctor 自动判定］ —— 判定：acornfox doctor 的 Docker 一项；报了 SETUP-RT-03 就照那个编号处理
+2. Docker 正忙（机器内存或磁盘很紧、容器非常多），这一次没来得及回答 —— 判定：过几秒再运行 acornfox other-containers；acornfox doctor 里磁盘一项有没有警告
+3. 后台执行器是旧版本，不认这个请求（刚升级了命令行或服务，执行器还没重启） —— 判定：acornfox --json version 看服务器版本；acornfox other-containers 的报错里写着“执行器还是旧版本”
+
+排查顺序：
+
+1. acornfox doctor（看 Docker 一项）
+2. acornfox other-containers（过几秒再读一次）
+3. acornfox --json version
+
+处置：
+
+- ［0 级 只读］照 doctor 里 Docker 一项的故障编号处理（acornfox faults 编号）
+- ［0 级 只读］过几秒再运行一次 acornfox other-containers
+- ［2 级 先问用户］旧版本执行器：升级后让后台服务重启（先问用户，会让应用短暂中断）
+
+- 必须先停下问用户：要重启后台服务或升级时（先问用户）
+- 确认恢复：acornfox other-containers 能列出来，或写“没有不是从 AcornFox 装的容器”
+- 相关编号：MACHINE-01、SETUP-RT-03
+- 演练方法：在测试机上让 Docker 不回话（sudo pkill -STOP -x dockerd；恢复：sudo pkill -CONT -x dockerd），等几秒后运行 acornfox other-containers：约 20 秒后报 MACHINE-04。不要用停掉 Docker 服务的办法：acornfox 的后台服务会跟着停，报的是连不上本机服务
+
+## 平台新版本提醒（PLAT-UPD）
+
+### PLAT-UPD-01 AcornFox 有新版本可以升级
+
+- 分组：平台新版本提醒（PLAT-UPD）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：这不是故障，是一条提醒：服务器查到线上有比现在更新的正式版。现在的版本照常能用，什么时候升由用户定。升级会短暂停一下服务（应用自己的容器不重启），脚本先备份、没成功自动恢复原样。
+- 下一步：运行 acornfox update 看最新版本号、发行说明地址和这台机器该用的那一条升级命令；先把新版本和发行说明告诉用户，问他要不要现在升，同意以后再运行那条命令（Windows、Mac 的命令和 Linux 服务器不一样，以 acornfox update 给的为准）
+- AcornFox 已经自动做的：没有；服务器只提醒，不会自己升级
+- 现象：acornfox status 最后一行写“AcornFox 有新版本 …”；acornfox update 写“AcornFox 有新版本 …”；acornfox doctor 里一行“AcornFox 有新版本 …”（!）；控制台“设置 › 这台机器”里升级那一行写“有新版本 …”，铃铛里有一条“AcornFox 有新版本”
+
+可能原因（逐条判定）：
+
+1. 线上发了新的正式版，这台机器还在用旧的［doctor 自动判定］ —— 判定：acornfox update 里 latest 比 current 高
+2. 这是自己编出来的程序（版本号带 -dev）：线上的同一个数字的正式版也会被当成“更新”［doctor 自动判定］ —— 判定：acornfox version 里带 -dev；不用管
+
+排查顺序：
+
+1. acornfox update（看 latest、notes_url、upgrade_command、upgrade_where）
+2. 把发行说明地址和新版本号告诉用户，问他要不要现在升
+
+处置：
+
+- ［0 级 只读］acornfox update check 现在就重新查一次（只读线上）
+- ［2 级 先问用户］照 acornfox update 给的升级命令升级：先用 --plan（Linux、Mac 把 upgrade 换成 upgrade --plan；Windows 末尾加 -Plan）看会做什么，用户同意后再真升
+
+- 必须先停下问用户：要升级之前：先说新版本号和发行说明地址、会短暂停服务，等用户明确同意（升级由这条命令做，不是这个提醒做）
+- 确认恢复：升级后 acornfox version 是新版本号，acornfox update 写“已是最新”
+- 回滚：升级脚本自己在失败时恢复原样；升级成功后平台不能退回旧版本
+- 相关编号：PLAT-UPD-02、CLI-UPDATE-01
+- 演练方法：测试机上用环境变量 ACORNFOX_UPDATE_GITHUB_URL、ACORNFOX_UPDATE_GITEE_URL 指向一个本机假的发行版列表（里面放一个比现在高的正式版），重启 acornfox-server，acornfox update check
+
+### PLAT-UPD-02 好几天查不到 AcornFox 的最新版本
+
+- 分组：平台新版本提醒（PLAT-UPD）
+- 默认等级：P3（提示或用法问题，不急）
+- 是什么：服务器每 6 小时去 Gitee 或 GitHub 查一次最新的正式版，一边不通换另一边。连续 3 天以上两边都没查到，说明这台机器连不上这两个网站，或者发行版列表的返回读不懂。应用和平台照常运行，只是看不到“有新版本”的提醒。
+- 下一步：运行 acornfox update check 现在查一次，看 error 里写的是哪一边、什么原因；确认这台机器能打开 gitee.com 和 github.com（国内机器只通 Gitee 就够）；公司网络有代理的看服务的代理设置；不想要这个提醒就关掉（ACORNFOX_UPDATE_CHECK=off）
+- AcornFox 已经自动做的：没有；每 6 小时自动再试，上次查到的结果还留着
+- 现象：acornfox update 写“已经好几天查不到最新版本了”；acornfox doctor 里一行“好几天查不到 AcornFox 的最新版本”（!）；控制台“设置 › 这台机器”里升级那一行写“暂时查不到最新版本”
+
+可能原因（逐条判定）：
+
+1. 这台机器连不上 Gitee 也连不上 GitHub（断网、防火墙、DNS）［doctor 自动判定］ —— 判定：acornfox update check --json 里 platform_update.error 写“连不上”；在这台机器上 curl -sI https://gitee.com 和 https://github.com
+2. 对方的接口限流或临时出错（返回 403、429、5xx）［doctor 自动判定］ —— 判定：error 里写“返回 403”等；过几小时再 acornfox update check
+3. 发行版列表里一个正式版都没有，或返回的格式变了［doctor 自动判定］ —— 判定：error 里写“没有正式版”或“返回的内容看不懂”
+4. 服务的环境里把查询地址改成了测试用的地址（ACORNFOX_UPDATE_GITEE_URL、ACORNFOX_UPDATE_GITHUB_URL） —— 判定：systemctl show acornfox-server -p Environment 里有这两个变量
+
+排查顺序：
+
+1. acornfox update check --json（看 platform_update.error、failures、last_ok_at）
+2. curl -sI https://gitee.com；curl -sI https://github.com
+3. systemctl show acornfox-server -p Environment
+
+处置：
+
+- ［0 级 只读］acornfox update check 再查一次（只读线上）
+- ［0 级 只读］把 error 原样告诉用户；这只影响“有新版本”的提醒，不影响应用
+- ［2 级 先问用户］用户不想要这个提醒：在服务的环境里设 ACORNFOX_UPDATE_CHECK=off 并重启 acornfox-server
+
+- 必须先停下问用户：要改服务的环境变量、重启 acornfox-server 之前先问用户
+- 确认恢复：acornfox update check 之后 platform_update.ok 是 true，acornfox doctor 里没有这一行
+- 相关编号：PLAT-UPD-01
+- 演练方法：测试机上把 ACORNFOX_UPDATE_GITEE_URL、ACORNFOX_UPDATE_GITHUB_URL 都指向 http://127.0.0.1:9/，重启 acornfox-server，acornfox update check 得到“连不上”；要看“好几天”，把数据目录里 platform-update.json 的 first_fail_at 改成 4 天前
 
 ## 兜底
 

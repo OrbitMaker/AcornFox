@@ -14,6 +14,8 @@
 #   升级： … | bash -s -- upgrade
 #   卸载： … | bash -s -- uninstall            （保留虚拟机和里面的数据；连数据一起删加 --purge --yes）
 #   试跑： … | bash -s -- install --plan       （只说要做什么，什么都不改）
+#   选源：写了 --china/--global 照写的；都不写就同时从 Gitee 和 GitHub 取同一个文件的开头测速，快的先用（屏幕上有一行“测速：…”），
+#   并把判断用 --china/--global 传给 acornfox mac，虚拟机里的安装脚本也照同一个判断下载。
 #   其余参数原样交给 acornfox mac：--china、--global、--memory 6、--idle 30、--no-lan、--no-open、--json、--version vX.Y.Z …
 #   （acornfox mac --help 看全部）
 # 前提：Apple 芯片的 Mac、macOS 26 或更新、磁盘剩 12 GB 以上、能联网。第一次装且没有苹果的 container 时，会让你输一次这台
@@ -24,7 +26,7 @@
 #   本脚本自己出错是 1，并打印故障编号：MAC-OS-01（不是 Mac 或系统太旧）、MAC-ARCH-01（Intel 的 Mac）、
 #   MAC-DL-02（取不到发行版的程序或校验不过）、MAC-SRC-01（源码版脚本，没有版本号）。
 # 副作用：只在临时目录里放下载的程序，结束时删掉；真正的改动都由 acornfox mac 做（它的 --plan 能先看）。
-# 环境变量：ACORNFOX_REPO、ACORNFOX_GITEE_REPO（换仓库）、ACORNFOX_RELEASE_BASE（测试或自建镜像：从
+# 环境变量：ACORNFOX_PROBE_SECONDS（测速最多等几秒，默认 5）、ACORNFOX_REPO、ACORNFOX_GITEE_REPO（换仓库）、ACORNFOX_RELEASE_BASE（测试或自建镜像：从
 #   <地址>/releases/download/<版本>/ 取文件）、ACORNFOX_MAC_HOME（状态目录）、ACORNFOX_INSTALL_DIR（acornfox 命令装到哪）。
 # 出错先看哪里：屏幕上的故障编号和它上面几行；~/Library/Application Support/AcornFox/mac/logs/install.log。
 # 兼容 macOS 自带的 bash 3.2。
@@ -90,12 +92,67 @@ case "$VERSION" in
 esac
 command -v curl >/dev/null 2>&1 || fail MAC-DL-02 "找不到 curl"
 
-# ---------- 选源（和 get.sh 同一套规矩） ----------
+# ---------- 选源（和 get.sh 同一套规矩：用户写了 --china/--global 照用户的，否则当场测速） ----------
+# >>> 测速选源（get.sh 和 install-mac.sh 里从这一行到“<<<”那一行必须一模一样；scripts/get.test.sh 会逐字核对）
+# 没写 --china/--global、也没有安装登记时，同时从 Gitee 和 GitHub 各取同一个发行版文件的开头（最多 1 MiB、最多 PROBE_SECS 秒），
+# 比每秒取到多少字节，快的先用。为什么不用“GitHub 连不连得上”：国内常常连得上但极慢（实测 30 KB/s，1 MB/s 以上的 Gitee 反而更快）。
+# 为什么按固定时间窗口取而不是只用 Range：Gitee 的发行版文件不认 Range，会一直传，所以到点就停，用“窗口内取到的字节 ÷ 用时”比。
+# 结果：PROBE_PICK=gitee|github（空 = 两边都没取到数据）、PROBE_NOTE=给人看的一行。
+GITEE_HOST="${ACORNFOX_GITEE_HOST:-https://gitee.com}"      # 只给测试用：换成本机的假服务器
+GITHUB_HOST="${ACORNFOX_GITHUB_HOST:-https://github.com}"
+PROBE_SECS="${ACORNFOX_PROBE_SECONDS:-5}"
+PROBE_PICK=""; PROBE_NOTE=""
+probe_url() {  # 源 版本 文件
+    case "$1" in
+        gitee) echo "${GITEE_HOST}/${GITEE_REPO}/releases/download/$2/$3";;
+        github) echo "${GITHUB_HOST}/${GITHUB_REPO}/releases/download/$2/$3";;
+    esac
+}
+probe_start() {  # 源 版本 文件 结果文件：放到后台取开头，结果写成一行“状态码 字节数 用时”
+    ( curl -sL -r 0-1048575 --connect-timeout 4 -m "$PROBE_SECS" -o /dev/null -w '%{http_code} %{size_download} %{time_total}' \
+        "$(probe_url "$1" "$2" "$3")" > "$4" 2>/dev/null || true ) &
+}
+probe_bps() {  # 结果文件：打印每秒字节数，没取到数据打 0
+    awk 'BEGIN { r = 0 } { if (($1 == 200 || $1 == 206) && $2 > 0 && $3 > 0) r = $2 / $3 } END { printf "%d", r }' "$1" 2>/dev/null || printf 0
+}
+probe_mb() { awk -v b="$1" 'BEGIN { printf "%.2f", b / 1048576 }'; }
+speed_pick() {  # 版本 文件
+    local d s g
+    d="$(mktemp -d "${TMPDIR:-/tmp}/acornfox-probe.XXXXXX")"
+    probe_start gitee "$1" "$2" "$d/gitee"; probe_start github "$1" "$2" "$d/github"; wait
+    s="$(probe_bps "$d/gitee")"; g="$(probe_bps "$d/github")"
+    # Gitee 偶尔在传输中途卡住，紧接着再连一次几乎都是好的（P-847）：没取到数据的那个再试一次，不要凭一次失败就放弃它
+    if [ "$s" = 0 ] || [ "$g" = 0 ]; then
+        [ "$s" != 0 ] || probe_start gitee "$1" "$2" "$d/gitee"
+        [ "$g" != 0 ] || probe_start github "$1" "$2" "$d/github"
+        wait
+        s="$(probe_bps "$d/gitee")"; g="$(probe_bps "$d/github")"
+    fi
+    rm -rf "$d"
+    if [ "$s" = 0 ] && [ "$g" = 0 ]; then
+        PROBE_PICK=""
+        PROBE_NOTE="测速：Gitee、GitHub 都没取到数据（各试了两次），先用 Gitee，取不到再换 GitHub"
+    elif [ "$g" = 0 ]; then
+        PROBE_PICK=gitee; PROBE_NOTE="测速：Gitee $(probe_mb "$s") MB/s、GitHub 没测通，先用 Gitee"
+    elif [ "$s" = 0 ]; then
+        PROBE_PICK=github; PROBE_NOTE="测速：Gitee 没测通、GitHub $(probe_mb "$g") MB/s，先用 GitHub"
+    elif [ $((s * 10)) -gt $((g * 13)) ]; then
+        PROBE_PICK=gitee; PROBE_NOTE="测速：Gitee $(probe_mb "$s") MB/s、GitHub $(probe_mb "$g") MB/s，先用 Gitee"
+    else
+        # GitHub 更快，或者差不多快（Gitee 不到 1.3 倍）：先用 GitHub，新发布的文件总是先到那里
+        PROBE_PICK=github; PROBE_NOTE="测速：Gitee $(probe_mb "$s") MB/s、GitHub $(probe_mb "$g") MB/s，先用 GitHub"
+    fi
+}
+# <<< 测速选源
 if [ -n "$BASE" ]; then ORDER="base"
 elif [ -z "$GITEE_REPO" ]; then ORDER="github"
 else
     if [ -z "$PREFER" ]; then
-        if curl -fsI -m 5 -o /dev/null "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null; then PREFER=github; else PREFER=gitee; fi
+        # 经 get.sh 来的一般已经带了 --china/--global；直接运行这份脚本时在这里测速
+        speed_pick "$VERSION" acornfox_darwin_arm64
+        say "$PROBE_NOTE"
+        PREFER="${PROBE_PICK:-gitee}"
+        if [ -n "$PROBE_PICK" ]; then if [ "$PROBE_PICK" = gitee ]; then PASS+=("--china"); else PASS+=("--global"); fi; fi
     fi
     if [ "$PREFER" = gitee ]; then ORDER="gitee github"; else ORDER="github gitee"; fi
 fi

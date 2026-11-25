@@ -22,6 +22,7 @@ import (
 	"github.com/acornfox/acornfox/internal/client"
 	"github.com/acornfox/acornfox/internal/hostcheck"
 	"github.com/acornfox/acornfox/internal/platform"
+	"github.com/acornfox/acornfox/internal/platformupdate"
 	"github.com/acornfox/acornfox/internal/publicconsole"
 	"github.com/acornfox/acornfox/internal/runner"
 	"github.com/acornfox/acornfox/internal/state"
@@ -104,6 +105,7 @@ func linuxHostChecks(ctx context.Context, r *doctorReport, dc *dockerclient.Clie
 		doctorAppsBehind(ctx, r, socket)
 		doctorAppsOutdated(ctx, r, socket)
 		doctorPlatformDomain(ctx, r, socket)
+		doctorPlatformUpdate(r, svc.st.PlatformUpdate)
 		doctorBackups(ctx, r, socket)
 	}
 	doctorLANConsole(r, use.LANNoPassword)
@@ -265,6 +267,22 @@ func doctorAppsOutdated(ctx context.Context, r *doctorReport, socket string) {
 		if u.CanRollback && u.Snapshot != nil {
 			r.add(true, "APP-UPG-07", "应用 %s 留着升级前（%s）的快照 %s（约 %d MB），出问题可以 acornfox apps rollback %s --plan 退回", a.Name, u.Snapshot.Version, u.Snapshot.ID, u.Snapshot.SizeMB, a.Name)
 		}
+	}
+}
+
+// doctorPlatformUpdate says when a newer AcornFox is out (a hint, not a
+// fault: the user decides when to upgrade) and when the latest version could
+// not be read for days (PLAT-UPD-02). pu is what GET /v1/status carried;
+// nothing is added when the server has no such check or it is switched off.
+func doctorPlatformUpdate(r *doctorReport, pu *client.PlatformUpdate) {
+	if pu == nil || !pu.Enabled {
+		return
+	}
+	if pu.Available {
+		r.warn(platformupdate.CodeAvailable, "AcornFox 有新版本 %s（现在 %s）：acornfox update 看发行说明和升级命令，升级要用户同意", pu.Latest, pu.Current)
+	}
+	if pu.Unreachable {
+		r.warn(platformupdate.CodeUnreachable, "好几天查不到 AcornFox 的最新版本（%s）：acornfox update check 现在查一次，看 acornfox faults %s", pu.Error, platformupdate.CodeUnreachable)
 	}
 }
 

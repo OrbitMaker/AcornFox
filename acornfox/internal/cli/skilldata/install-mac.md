@@ -32,6 +32,15 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.s
 6. **装 Skill**：运行 `acornfox skill install`（入口和全部分册一起，装进用户 Mac 上已经有的 AI 工作台：有 `~/.claude` 才装 Claude Code，有 `~/.codex` 才装 Codex）。
 7. **之后**：`acornfox apps`、`acornfox install 应用名`、`acornfox deploy` 等和 Linux 服务器上完全一样（用哪一册看入口的对照表；默认服务器是 `local`；用户原来还登记了别的服务器且默认是别的，安装结果会写出来，要让命令默认管这台 Mac：`acornfox target use local`）。
 
+## 第一次装苹果的 container 和内核（这台 Mac 上还没有时才会做）
+
+装之前 `--plan` 会写明这两步要不要做（“没有装苹果的 container”“没有默认内核”）；已经有了就跳过，什么都不动。
+
+- **正常的样子**：先下载 container 安装包（约 170 MB），屏幕提示输这台 Mac 的登录密码——输入时屏幕不显示字符，是正常的，由用户自己输；装好后启动 container 服务；再下载内核包（约 676 MB，经下载网关分段多路下载，家里宽带可能要 10～20 分钟，屏幕上有进度），装成默认内核。断了、关了终端都没关系：重新运行安装命令，已下的部分接着下，已做完的步骤跳过。
+- **怎么确认这两步好了**：`container --version` 有输出（测过的是 1.7.1）；`container system status` 是 running；`ls ~/Library/Application\ Support/com.apple.container/kernels/` 里有 `default.kernel-arm64`。
+- **用户这台 Mac 上已经有苹果的 container**（自己装过，或用 Homebrew 装的）：安装程序直接用它、不重装。版本不是 1.7.x 时，后面建虚拟机可能失败（`MAC-VM-01`、`MAC-CTR-01`）：把 `container --version` 的结果告诉用户，**先问他**要不要把自己的 container 升到 1.7.1（他可能还在用它跑别的东西）；同意了再请他自己装（同样要输密码），然后重新运行安装命令。不要替他卸载或换掉。
+- 卡在这两步时按下面“出错时”的 `MAC-ADMIN-01`、`MAC-DL-01`、`MAC-CTR-01`、`MAC-KERNEL-01` 处理。
+
 ## 日常（用户问“占内存”“怎么停”“怎么一直开着”）
 
 | 要做什么 | 命令 |
@@ -60,7 +69,9 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.s
 
 - 检查没过（macOS 低于 26、Intel 的 Mac、磁盘不够 12 GB）什么都没装：把原因告诉用户，这几项都要用户自己处理（升级系统、Intel 的 Mac 改走情况乙、清磁盘）。
 - 要管理员密码没输成（`MAC-ADMIN-01`）：请用户自己在终端里运行屏幕上给的 `sudo installer …`，再重新运行安装命令。
-- 下载失败或校验不过（`MAC-DL-01`、`MAC-DL-02`）：确认能上网、关代理、再运行，已下的部分会接着下，**不要跳过校验**；换源加 `--china` 或 `--global`。
+- 苹果的 container 装了但用不了（`MAC-CTR-01`）：先 `container --version`、`container system status`；服务没起来就 `container system start`，再重新运行安装命令；版本不是 1.7.x 照上面“已经有苹果的 container”一条先问用户。
+- 虚拟机内核没装上（`MAC-KERNEL-01`）：多半是内核包没下全或磁盘满了，重新运行安装命令（接着下）；还不行看 `acornfox mac doctor` 和屏幕上 `container system kernel set` 的报错。
+- 下载失败或校验不过（`MAC-DL-01`、`MAC-DL-02`）：确认能上网、关代理、再运行，已下的部分会接着下，**不要跳过校验**；换源加 `--china` 或 `--global`（不写时脚本当场测速，谁快先用谁，屏幕上有一行“测速：Gitee x MB/s、GitHub y MB/s，先用 …”，并把判断带进虚拟机里的安装脚本）。
 - 建不了虚拟机、起不来、里面的准备没成（`MAC-VM-01`、`MAC-VM-02`、`MAC-PROV-01`）：`acornfox mac doctor --wake`、`container machine logs acornfox`；同名虚拟机不是本安装建的，不要删，问用户。
 - 虚拟机里装 AcornFox 没成（`MAC-LINUX-01`）：看屏幕上带出的 `INSTALL-…` 等编号，`acornfox faults 那个编号`。
 - 常驻程序没运行、端口被占、命令连不上虚拟机（`MAC-LAUNCH-01`、`MAC-PORT-01`、`MAC-SSH-01`）：`acornfox mac status`、`acornfox mac doctor`，重新运行安装命令只补缺的部分。

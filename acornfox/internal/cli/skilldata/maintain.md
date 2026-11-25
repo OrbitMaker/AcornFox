@@ -1,6 +1,24 @@
 # 升级和卸载 AcornFox、更新电脑上的 Skill 和命令行
 
-**什么时候读这一册**：用户要升级 AcornFox 到新版本、卸载 AcornFox；任何命令输出 `CLI-UPDATE-01`（服务器比这台电脑上的命令行新），或 `acornfox doctor` 报 `SETUP-SKILL-01`（已装的 Skill 和命令行不是同一个版本）；升级后要更新电脑上的 Skill 和命令行；问“怎么更新 Skill”。应用自己的升级读 `app-change.md`。
+**什么时候读这一册**：用户要升级 AcornFox 到新版本、问“AcornFox 有没有新版本”，或 `acornfox status`、`acornfox doctor` 提醒有新版本（`PLAT-UPD-01`）；卸载 AcornFox；任何命令输出 `CLI-UPDATE-01`（服务器比这台电脑上的命令行新），或 `acornfox doctor` 报 `SETUP-SKILL-01`（已装的 Skill 和命令行不是同一个版本）；升级后要更新电脑上的 Skill 和命令行；问“怎么更新 Skill”。应用自己的升级读 `app-change.md`。
+
+## 有没有新版本（v0.7.1 起）
+
+服务器每 6 小时自己去线上查一次最新的正式版（国内先 Gitee，其他地区先 GitHub，一边不通换另一边；带“-”的预发布版不算），结果记在服务器上。它**只提醒，不会自己升级**。看到提醒的几个地方：
+
+- `acornfox status`（看应用或看一次部署都一样）最后一行写“提醒：AcornFox 有新版本 …”；加 `--json` 时结果里多一个 `platform_update` 对象和 `latest_version`；
+- `acornfox --json update`：同一个对象；`acornfox --json update check` 现在就去查一次（只读线上，几秒内重复运行只查一次）；
+- `acornfox doctor` 里一行 `PLAT-UPD-01`（有新版本，不是故障）或 `PLAT-UPD-02`（好几天查不到，应用不受影响）；
+- 控制台“设置 › 这台机器 › 升级”那一行，和铃铛里的一条“AcornFox 有新版本”（同一个版本只提醒一次）。
+
+最低路径（固定步骤）：
+
+1. 看到有新版本，运行 `acornfox --json update`（要最新结果加 `check`），读 `platform_update`：`latest`（新版本）、`notes_url`（发行说明）、`upgrade_command`（这台机器该用的那一条命令，Linux、Windows、Mac 不一样，已经按国内海外选好）、`upgrade_where`（在哪里运行）。`available` 是 `false` 就不用升。
+2. 用一句话告诉用户：现在是 X 版，线上有 Y 版，发行说明在 `notes_url`，升级会让命令行和控制台暂时连不上几秒；**问他要不要现在升**。不问就升、替他挑时间都不行。
+3. 用户同意：照 `upgrade_command` 原样在 `upgrade_where` 说的地方运行，再按下面“升级、卸载”看结果和故障编号；想先看会做什么：Linux、Mac 把命令末尾的 `upgrade` 换成 `upgrade --plan`，Windows 在命令里 `-Action upgrade` 后面加 ` -Plan`。
+4. 用户说“先不升”：什么都不做，也不要反复提醒；他想看时再运行 `acornfox update`。
+
+`platform_update.enabled` 是 `false`：服务器上关掉了这个提醒（环境变量 `ACORNFOX_UPDATE_CHECK=off`），不会有“有新版本”，用户要升级自己说；不要替他打开。`update check` 报 `platform_update.ok` 是 `false`：照 `acornfox faults PLAT-UPD-02` 查（先看 `error`），它不影响任何应用。
 
 ## 升级、卸载
 

@@ -322,6 +322,8 @@ curl -fsSL https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.s
 
 Windows 电脑本机：把安装那一整行末尾加 ` -Action upgrade`（先加 ` -Plan` 看会做什么）。
 
+服务器每 6 小时会自己看一次线上有没有新的正式版（v0.7.1 起；国内先查 Gitee、其他地区先查 GitHub；只提醒，不会自己升级）：控制台“设置 › 这台机器”的升级一行、铃铛、`acornfox update` 和 `acornfox status` 都会告诉你，并给出这台机器该用的升级命令。不想要这个提醒：给服务设环境变量 `ACORNFOX_UPDATE_CHECK=off`。
+
 通过管道运行（包括 AI 工作台代为执行）就视为同意升级，脚本开头会先列出要做的事。已经是最新版本时直接退出，不停服务、不重装，重复运行也没关系。只有要重装同一版本时才加 `-y`（`| sudo bash -s -- -y`）。
 
 升级过程：
