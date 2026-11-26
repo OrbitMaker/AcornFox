@@ -72,6 +72,10 @@ type Options struct {
 	CPUs        int
 	IdleMinutes int // -1 = not given
 	PublicHost  string
+	// From is the install source tag (internal/installfrom): passed to the install script in the
+	// virtual machine as --from on a fresh install, never on upgrade or uninstall. "" = none;
+	// an unusable one is dropped before it gets here (cmd/acornfox/mac.go).
+	From string
 	// LocalPackage is a folder with install.sh, upgrade.sh, acornfox_linux_arm64 and the
 	// edge package: used instead of downloading them (tests).
 	LocalPackage string

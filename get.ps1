@@ -8,6 +8,9 @@
 #   海外： powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.ps1')).TrimStart([char]0xFEFF)))"
 #   （这样写是为了按 UTF-8 读文件：直接用 irm | iex 时，英文系统上中文提示可能乱码，但功能不受影响。）
 #   要带参数：在最后一个括号后面接参数，例如  … ) -Action upgrade   或   … ) -Action uninstall -Purge -Yes
+#   来源标记（官网链接带来的，装好后向下载网关报一次、只报它）：…) -From bili-1201     只认小写字母、数字、-，最长 32；
+#     不合规的当没有（提醒一句、照常安装）；只在安装时有用（-Action install、resume），升级、卸载等不带；
+#     要装的那个版本的 install-windows.ps1 还不认它（老版本）时不往下传，照常安装。不写就什么都不报。
 #   已经下载到本地：powershell -NoProfile -ExecutionPolicy Bypass -File get.ps1 [参数]
 #
 # 参数（不写 -Action 就是安装）：
@@ -47,7 +50,8 @@ param(
     [switch]$NoOpen,
     [string]$LocalPackage = '',
     [string]$Distro = 'AcornFox',
-    [string]$Gateway = ''
+    [string]$Gateway = '',
+    [string]$From = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +61,11 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 $GithubRepo = $env:ACORNFOX_REPO; if (-not $GithubRepo) { $GithubRepo = 'OrbitMaker/AcornFox' }
 $GiteeRepo = [Environment]::GetEnvironmentVariable('ACORNFOX_GITEE_REPO'); if ($null -eq $GiteeRepo) { $GiteeRepo = 'VIP13390/AcornFox' }
 $Base = $ReleaseBase; if (-not $Base) { $Base = $env:ACORNFOX_RELEASE_BASE }
+# 来源标记：写法和官网统计、下载网关一样（a-z、0-9、-，1～32 个；-cmatch 区分大小写，\z 不放过结尾的换行）；不合规的当没有，提醒一句，照常安装
+if ($From -and $From -cnotmatch '^[a-z0-9-]{1,32}\z') {
+    if (-not $Json) { Write-Host "[引导] 来源标记 -From $From 不合规（只认小写字母、数字、-，最长 32 个字符），已忽略，照常安装" }
+    $From = ''
+}
 
 # -Json 时标准输出只留 install-windows.ps1 最后输出的那一行 JSON：引导的进度话不打印（出错的话 Fail 照常打印，那时还没有 JSON）
 function Say([string]$t) { if (-not $Json) { Write-Host "[引导] $t" } }
@@ -268,6 +277,13 @@ try {
     if ($LocalPackage) { $a += @('-LocalPackage', $LocalPackage) }
     if ($Distro -ne 'AcornFox') { $a += @('-Distro', $Distro) }
     if ($Gateway) { $a += @('-Gateway', $Gateway) }
+    # 来源标记：只在安装时往下传（-Action install、resume）。老版本的 install-windows.ps1 没有 -From 参数（会报错），
+    # 所以先看下载到的这份里有没有“AFX-FEATURE: install-from”这一行，没有就不传
+    if ($From) {
+        if (@('install', 'resume') -notcontains $Action) { Say "来源标记只在安装时用，$Action 不带它，已忽略" }
+        elseif (([IO.File]::ReadAllText($script)) -match 'AFX-FEATURE: install-from') { $a += @('-From', $From) }
+        else { Say "$Version 的 install-windows.ps1 还不认来源标记（-From），没往下传，照常安装" }
+    }
     Say "交给 $Version 的 install-windows.ps1（$Action）"
     & powershell.exe @a
     $rc = $LASTEXITCODE

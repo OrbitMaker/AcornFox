@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/cli"
+	"github.com/acornfox/acornfox/internal/installfrom"
 	"github.com/acornfox/acornfox/internal/macvm"
 )
 
@@ -59,6 +60,8 @@ install / upgrade / uninstall 的选项：
   --gateway 地址|off 下载网关（默认 https://dl.acornfox.com；off 不用）
   --release-base 地址  测试或自建镜像：从 <地址>/releases/download/<版本>/ 取文件
   --local-package 目录 测试：用目录里的 install.sh、acornfox_linux_arm64、入口包，不下载
+  --from 名字        来源标记（官网链接带来的，例如 bili-1201；只认小写字母、数字、-，最长 32；不合规的当没有，提醒一句、照常安装）：
+                     只在安装时交给虚拟机里的安装脚本，装好后向下载网关报一次、只报这个标记；升级、卸载不带；不写就什么都不报
 
 退出码：0 成功；1 出错（屏幕上有故障编号，acornfox faults 编号 看办法）；2 用法不对；5 要管理员密码而这里没有终端，请自己在终端里输。
 环境变量：ACORNFOX_MAC_HOME（状态目录，默认 ~/Library/Application Support/AcornFox/mac）、ACORNFOX_MAC_VM（虚拟机名字，默认 acornfox）、
@@ -117,6 +120,7 @@ type macCommon struct {
 	idle       string
 	noLAN      bool
 	releaseVer string
+	badFrom    string // an unusable --from, dropped by finish
 }
 
 func macFlags(name string, c *macCommon, stderr io.Writer) *flag.FlagSet {
@@ -141,6 +145,7 @@ func macFlags(name string, c *macCommon, stderr io.Writer) *flag.FlagSet {
 	fs.StringVar(&o.LocalPackage, "local-package", "", "本地安装包目录")
 	fs.StringVar(&o.Gateway, "gateway", "", "下载网关")
 	fs.StringVar(&o.InstallDir, "install-dir", "", "acornfox 命令装到哪")
+	fs.StringVar(&o.From, "from", "", "来源标记")
 	return fs
 }
 
@@ -173,6 +178,9 @@ func (c *macCommon) finish() error {
 	if o.China && o.Global {
 		return fmt.Errorf("--china 和 --global 只能写一个")
 	}
+	if o.From != "" && !installfrom.Valid(o.From) {
+		c.badFrom, o.From = o.From, "" // not usable: treated as not given (macInstall says so)
+	}
 	return nil
 }
 
@@ -187,6 +195,12 @@ func macInstall(verb string, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	c.opt.Action = verb
+	if c.badFrom != "" && verb == "install" {
+		fmt.Fprintf(stderr, "来源标记 --from %s 不合规（只认小写字母、数字、-，最长 32 个字符），已忽略，照常安装\n", c.badFrom)
+	}
+	if verb != "install" {
+		c.opt.From = "" // the source tag belongs to a fresh install only
+	}
 	if verb == "upgrade" && c.opt.Version == "" && c.opt.LocalPackage == "" {
 		fmt.Fprintln(stderr, "升级要从发行版取新版本的程序：用一行命令（它会取最新版、校验后再交给这里）：\n  curl -fsSL https://gitee.com/VIP13390/AcornFox/raw/main/get.sh | bash -s -- upgrade\n（海外把地址换成 https://github.com/OrbitMaker/AcornFox/releases/latest/download/get.sh；先加 --plan 看会做什么）。直接运行 acornfox mac upgrade 要写 --version vX.Y.Z")
 		return 2

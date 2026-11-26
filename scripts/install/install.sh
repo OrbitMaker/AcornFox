@@ -13,6 +13,11 @@
 # 参数用 | sudo bash -s -- --china 这样传。
 # 安装过程中不会询问；-y 可以加也可以不加（与 upgrade.sh 一致）。
 #
+# 来源标记 --from 名字（官网链接带来的：只认小写字母、数字、-，最长 32；不合规的当没有，提醒一句、照常安装）：
+# 装的时候写进 /var/lib/acornfox/install-from（0600，已有就不覆盖）；装好后 acornfox 服务看到它，向下载网关登记一次、
+# 只报这个标记（internal/installfrom）。没带 --from 的安装和以前完全一样，不因为这件事联系网关。升级、卸载不带它。
+# AFX-FEATURE: install-from   （get.sh 靠这一行知道这份脚本认 --from；老版本的脚本没有，get.sh 就不往下传）
+#
 # 可选环境变量 ACORNFOX_DOCKER_CE_MIRROR：自己指定 docker-ce 软件源地址（企业内网镜像，
 # 或用 apt 缓存代理时用 http 地址，例如 http://mirrors.aliyun.com/docker-ce）。设了就排在
 # 所有 docker-ce 候选源最前面，同样先探测能不能用，用不了再按实测顺序换源。传法:
@@ -989,6 +994,36 @@ check_ports() {
     return 0
 }
 
+# 来源标记（--from）的写法：和官网统计、下载网关用同一条规矩，不合规的当没有
+INSTALL_FROM_RE='^[a-z0-9-]{1,32}$'
+# set_install_from 值：合规就记进 INSTALL_FROM，不合规（含空）就清空并提醒一句，安装照常进行
+set_install_from() {
+    if [[ "$1" =~ $INSTALL_FROM_RE ]]; then
+        INSTALL_FROM="$1"
+    else
+        INSTALL_FROM=""
+        log_warn "来源标记 --from ${1:-（空）} 不合规（只认小写字母、数字、-，最长 32 个字符），已忽略，照常安装"
+    fi
+}
+
+# record_install_from：把来源标记写进数据目录里的 install-from（属主 acornfox、0600，acornfox 服务读它和改它旁边的状态文件）。
+# 已有就不覆盖（重装不改最早的来源）；没带标记什么都不做；写不进去只提醒，不影响安装。
+# 文件路径 AFX_INSTALL_FROM_FILE 只给测试用（scripts/install/from.test.sh）。
+record_install_from() {
+    [ -n "${INSTALL_FROM:-}" ] || return 0
+    local f="${AFX_INSTALL_FROM_FILE:-/var/lib/acornfox/install-from}"
+    if [ -e "$f" ]; then
+        log_info "这台机器已经记过来源标记（${f}），不覆盖"
+        return 0
+    fi
+    if printf '%s\n' "$INSTALL_FROM" > "${f}.tmp" && chown acornfox:acornfox-ipc "${f}.tmp" && chmod 0600 "${f}.tmp" && mv -f "${f}.tmp" "$f"; then
+        log_info "来源标记 ${INSTALL_FROM}：装好后会向下载网关报一次（只报这个标记）；不想报就删掉 ${f}"
+    else
+        rm -f "${f}.tmp"
+        log_warn "来源标记没记下来（${f} 写不进去），不影响安装"
+    fi
+}
+
 # 处理命令行参数
 parse_args() {
     FORCE_CHINA=false
@@ -1013,9 +1048,19 @@ parse_args() {
     # --mac-vm：这台“服务器”是 Mac 上苹果 container 开的 Debian 虚拟机，由 Mac 安装程序运行（acornfox mac install）。
     # 网络上和 WSL 同一回事（虚拟机在 Mac 后面，Mac 上的常驻程序转发端口），所以也当成 WSL_MODE 处理，只是摘要不同。
     MAC_VM_MODE=false
+    # 官网链接带来的来源标记：空 = 没有；不合规的当没有（提醒一句，照常安装）
+    INSTALL_FROM=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --from)
+                # 后面没有值（或紧跟着另一个选项）：当没写，不吞掉下一个选项
+                if [[ $# -ge 2 && "$2" != -* ]]; then set_install_from "$2"; shift 2; else set_install_from ""; shift; fi
+                ;;
+            --from=*)
+                set_install_from "${1#--from=}"
+                shift
+                ;;
             --wsl)
                 WSL_MODE=true
                 shift
@@ -1159,6 +1204,9 @@ AcornFox 安装脚本（Linux 服务器：Ubuntu 22.04/24.04、Debian 12/13）
     --mac-vm               这台机器是 Mac 上苹果 container 开的 Debian 虚拟机（Mac 的安装程序 acornfox mac install
                            会加这个参数，自己手工装用不到）：网络上同 --wsl（按“局域网服务器”处理，应用访问地址用
                            --public-host 传进来的 Mac 局域网地址），装完摘要写 Mac 上怎么用
+    --from 名字            来源标记（官网链接带来的，例如 bili-1201；只认小写字母、数字、-，最长 32）：装好后
+                           向下载网关报一次这个标记，只报它，用来知道哪个链接带来了多少台。不写就不报；
+                           写得不合规的当没写（提醒一句，照常安装）。升级、卸载不用它
     --force-os             在不在支持列表里的 Ubuntu/Debian 版本上也继续安装（自行承担风险）；
                            对 CentOS、Alibaba Cloud Linux、OpenCloudOS 等其他系统无效
     --cloud 名称           只用于测试：把本机当作某个云厂商的大陆地域，跳过元数据探测；
@@ -2219,6 +2267,9 @@ EOF
 
 # show_plan：开头说明将要做什么（安装不询问，运行即开始）
 show_plan() {
+    local FROM_PLAN_LINE=""
+    [ -z "${INSTALL_FROM:-}" ] || FROM_PLAN_LINE="  8. 来源标记 ${INSTALL_FROM}：装好后向下载网关报一次（只报这个标记），不想报就不要在命令后面写 --from
+"
     cat << EOF
 将要做的事:
   1. 检查系统版本、CPU 架构、磁盘空间和端口占用（不满足就停下，不改动系统）
@@ -2231,7 +2282,7 @@ show_plan() {
      第一次打开时在浏览器里设密码）。不想开加 --no-lan-console；云主机不会开
   7. 新应用默认的对外方式：局域网服务器第一次安装时是局域网（同一局域网里的电脑、手机直接能打开），
      云主机上应用中心装的应用只本机能打开。想只本机加 --default-exposure local
-
+${FROM_PLAN_LINE}
 EOF
 }
 
@@ -2292,6 +2343,7 @@ main() {
     install_docker
     create_accounts
     create_directories
+    record_install_from
     download_acornfox
     import_edge_image /usr/local/bin/acornfox "${VERSION:-$ACORNFOX_VERSION}"
     # 镜像加速地址取自程序（acornfox sources --daemon-mirrors），所以放在装好程序之后

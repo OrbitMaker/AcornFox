@@ -249,6 +249,9 @@ func startServer(parent context.Context, o serverOptions, runnerAPI serverRunner
 	updater := newPlatformUpdater(o)
 	go updater.Run(ctx)
 	apiCfg.PlatformUpdate = updater
+	// An install that came from a website link with a source tag reports it to the
+	// download gateway once (nothing happens without the install-from file).
+	go newInstallFromReporter(o, stdout).Run(ctx)
 	if o.CheckPorts {
 		admin, lan := o.EdgeAdminPort, o.LANConsolePort
 		if admin == 0 {

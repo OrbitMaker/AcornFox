@@ -27,6 +27,8 @@ type fakeGateway struct {
 	issues     int
 	lastIssue  map[string]any
 	lastClient map[string]any
+	// knowsFrom makes the fake behave like a new gateway: a valid client.from is answered with "from_recorded": true
+	knowsFrom bool
 	// next errors to return from /v1/issue (code, status, retry_after); popped in order
 	issueErrs []fakeErr
 	sha       string
@@ -115,7 +117,11 @@ func (g *fakeGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/register" {
 		g.keys[iid] = pubB64
 		g.registers++
-		writeJSON(w, 200, map[string]any{"ok": true, "install_id": iid, "limits": map[string]any{"per_day": 20}})
+		ans := map[string]any{"ok": true, "install_id": iid, "limits": map[string]any{"per_day": 20}}
+		if f, _ := g.lastClient["from"].(string); g.knowsFrom && f != "" {
+			ans["from_recorded"] = true
+		}
+		writeJSON(w, 200, ans)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1/catalog/") {
@@ -418,5 +424,60 @@ func TestDefaultTimeoutLeavesRoomForASlowGateway(t *testing.T) {
 	c.HTTP = &http.Client{Timeout: 2 * time.Second}
 	if _, err := c.Issue(context.Background(), "x", "runtime"); err != nil {
 		t.Fatalf("a slow answer within the timeout must be taken: %v", err)
+	}
+}
+
+// The install source tag (ClientInfo.From, internal/installfrom) goes into
+// the W1 request's client object only when there is one: without a tag the
+// request has no "from" key at all (so it is what it was before the field
+// existed), with a tag the gateway sees it as client.from.
+func TestRegisterCarriesTheSourceTagOnlyWhenThereIsOne(t *testing.T) {
+	g := newFake()
+	srv := httptest.NewServer(g)
+	defer srv.Close()
+	c := newClient(t, srv.URL)
+
+	if _, err := c.Register(context.Background(), c.Info); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := g.lastClient["from"]; has {
+		t.Fatalf("no tag: the request must not carry a from key, got %v", g.lastClient)
+	}
+
+	info := c.Info
+	info.From = "bili-1201"
+	if _, err := c.Register(context.Background(), info); err != nil {
+		t.Fatal(err)
+	}
+	if g.lastClient["from"] != "bili-1201" {
+		t.Fatalf("with a tag the request carries client.from, got %v", g.lastClient)
+	}
+	// The rest of the client object is unchanged.
+	if g.lastClient["via"] != "acornfox" || g.lastClient["version"] != "0.4.0-test" {
+		t.Fatalf("client object changed: %v", g.lastClient)
+	}
+}
+
+// from_recorded is the gateway's "I have the tag" (new gateways); an old gateway answers 200 without it.
+func TestRegisterReportsWhetherTheGatewayRecordedTheTag(t *testing.T) {
+	for _, knows := range []bool{false, true} {
+		g := newFake()
+		g.knowsFrom = knows
+		srv := httptest.NewServer(g)
+		c := newClient(t, srv.URL)
+		info := c.Info
+		info.From = "bili-1201"
+		r, err := c.Register(context.Background(), info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.FromRecorded != knows {
+			t.Fatalf("gateway knows the field=%v: FromRecorded=%v", knows, r.FromRecorded)
+		}
+		// Without a tag it is never "recorded".
+		if r, _ := c.Register(context.Background(), c.Info); r.FromRecorded {
+			t.Fatal("no tag sent: nothing recorded")
+		}
+		srv.Close()
 	}
 }

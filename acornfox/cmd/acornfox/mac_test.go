@@ -70,3 +70,24 @@ func TestMacLocalStopLetsDoctorThroughWhenInstalled(t *testing.T) {
 		t.Error("装了 Mac 本机版时 doctor 不该被拦")
 	}
 }
+
+// --from (the install source tag) is a known option of acornfox mac install; a bad one is dropped with a
+// line on standard error and the command still runs (here as a dry run).
+func TestMacInstallAcceptsTheSourceTag(t *testing.T) {
+	t.Setenv("ACORNFOX_MAC_HOME", t.TempDir())
+	if code, _, errb := runMacCmd(t, "install", "--plan", "--json", "--from", "bili-1201"); code == 2 || strings.Contains(errb, "flag provided but not defined") {
+		t.Fatalf("--from 应该是认得的选项：%d %q", code, errb)
+	}
+	_, _, errb := runMacCmd(t, "install", "--plan", "--json", "--from", "Bad_Tag")
+	if !strings.Contains(errb, "不合规") || !strings.Contains(errb, "照常安装") {
+		t.Fatalf("不合规的来源标记要提醒一句：%q", errb)
+	}
+	var c macCommon
+	fs := macFlags("install", &c, &bytes.Buffer{})
+	if err := fs.Parse([]string{"--from", "Bad_Tag"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.finish(); err != nil || c.opt.From != "" {
+		t.Fatalf("不合规的标记当没有：%v %q", err, c.opt.From)
+	}
+}

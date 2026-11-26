@@ -475,3 +475,23 @@ func TestVMLockSerializes(t *testing.T) {
 		t.Fatal("放开以后另一个应当拿到")
 	}
 }
+
+// The install source tag goes to the install script in the machine as --from, on a fresh install only
+// and only when it is usable (it ends up in a shell command line).
+func TestLinuxRunCommandPassesTheSourceTagOnlyOnInstall(t *testing.T) {
+	inst := linuxRunCommand(false, "edge.tar.gz", " --china", "192.168.1.5", "bili-1201")
+	if !strings.HasPrefix(inst, "bash ./install.sh ") || !strings.Contains(inst, " --mac-vm --public-host 192.168.1.5 --china") || !strings.HasSuffix(inst, " --from bili-1201") {
+		t.Fatalf("install: %s", inst)
+	}
+	if got := linuxRunCommand(false, "edge.tar.gz", "", "127.0.0.1", ""); strings.Contains(got, "--from") {
+		t.Fatalf("no tag, no --from: %s", got)
+	}
+	for _, bad := range []string{"Bad", "a b", "a;b", "$(x)", strings.Repeat("a", 33), "a\nb"} {
+		if got := linuxRunCommand(false, "edge.tar.gz", "", "127.0.0.1", bad); strings.Contains(got, "--from") {
+			t.Fatalf("bad tag %q must not reach the command line: %s", bad, got)
+		}
+	}
+	if up := linuxRunCommand(true, "edge.tar.gz", "", "127.0.0.1", "bili-1201"); strings.Contains(up, "--from") || !strings.HasPrefix(up, "bash ./upgrade.sh ") {
+		t.Fatalf("upgrade never takes the tag: %s", up)
+	}
+}

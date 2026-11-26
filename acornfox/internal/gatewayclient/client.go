@@ -91,6 +91,12 @@ type ClientInfo struct {
 	Platform string `json:"platform"` // windows | darwin | linux
 	Arch     string `json:"arch"`     // amd64 | arm64
 	Via      string `json:"via"`      // acornfox | install-ps1 | install-sh
+	// From is the install source tag (internal/installfrom): the short name a
+	// website link put at the end of the install command, "" when there was
+	// none. Optional: it is left out of the request when empty, so a request
+	// without a tag is byte for byte what it was before this field existed,
+	// and a gateway that does not know the field ignores it.
+	From string `json:"from,omitempty"`
 }
 
 // DefaultInfo is ClientInfo for this acornfox binary.
@@ -126,6 +132,12 @@ func (c *Client) ClockOffset() time.Duration {
 type Registered struct {
 	InstallID string `json:"install_id"`
 	PerDay    int    `json:"per_day"`
+	// FromRecorded is true when the gateway answered "from_recorded": true,
+	// i.e. it knows the source tag and has it on this machine's record. A
+	// gateway that does not know the field accepts the request (200) but
+	// leaves this out, so false after sending a tag means "not recorded
+	// (yet)": the caller keeps the tag to report again later.
+	FromRecorded bool `json:"from_recorded"`
 }
 
 // Issued is W2's answer: where to download one file until ExpiresAt.
@@ -253,6 +265,7 @@ func (c *Client) Register(ctx context.Context, info ClientInfo) (Registered, err
 		Limits    struct {
 			PerDay int `json:"per_day"`
 		} `json:"limits"`
+		FromRecorded bool `json:"from_recorded"`
 	}
 	if err := c.call(ctx, "/v1/register", body, &out, maxAnswer); err != nil {
 		return Registered{}, err
@@ -260,7 +273,7 @@ func (c *Client) Register(ctx context.Context, info ClientInfo) (Registered, err
 	if out.InstallID != c.Identity.InstallID {
 		return Registered{}, &Error{Code: "GW-RESP-01", Message: "网关返回的安装编号和本机算的不一样：" + out.InstallID}
 	}
-	return Registered{InstallID: out.InstallID, PerDay: out.Limits.PerDay}, nil
+	return Registered{InstallID: out.InstallID, PerDay: out.Limits.PerDay, FromRecorded: out.FromRecorded}, nil
 }
 
 var hexSHA256 = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)

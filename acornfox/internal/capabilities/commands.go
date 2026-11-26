@@ -108,7 +108,7 @@ var Commands = []Command{
 	c("sources", "--probe --image --daemon-mirrors --json", false, "local"),
 	c("capabilities", "--json", false, "local", "new"),
 	// Mac: the whole Linux edition in a virtual machine (internal/macvm).
-	c("mac install", "--plan --json --yes --china --global --no-open --no-lan --memory --cpus --idle --public-host --version --release-base --local-package --gateway --install-dir", true, "local", "new"),
+	c("mac install", "--plan --json --yes --china --global --no-open --no-lan --memory --cpus --idle --public-host --version --release-base --local-package --gateway --install-dir --from", true, "local", "new"),
 	c("mac upgrade", "--plan --json --yes --china --global --version --release-base --local-package --gateway", true, "local", "new"),
 	c("mac uninstall", "--plan --json --yes -y --purge", true, "local", "new"),
 	c("mac status", "--json", false, "local", "new"),

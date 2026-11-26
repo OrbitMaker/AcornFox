@@ -241,6 +241,10 @@ func checkInterfaces(s ifaceSources) []string {
 			}
 			winExtra[verb] = fl
 		}
+		// 装的时候才有的选项接在后面：$extra = "$extra --from $From"（来源标记）
+		for _, am := range regexp.MustCompile(`\$extra = "\$extra([^"]*)"`).FindAllStringSubmatch(s.installWin, -1) {
+			winExtra["install"] = append(winExtra["install"], dashTokens(am[1])...)
+		}
 	}
 	localRE := regexp.MustCompile(`\$run = "bash '\$pkg/\$Verb\.sh'([^"]*)"`)
 	viaGetRE := regexp.MustCompile(`\$run = "bash '" \+ \(ConvertTo-WslPath \$gs\) \+ "' \$Verb([^"]*)"`)
@@ -293,6 +297,12 @@ func checkInterfaces(s ifaceSources) []string {
 		}
 		if strings.Contains(m[1], "region") {
 			fl = append(fl, macRegion...)
+		}
+		if m[2] == "install" {
+			// 装的时候才有的选项写在后面的 run += "…" 里（例如来源标记 --from）
+			for _, add := range regexp.MustCompile(`(?m)run \+= ("[^"\n]*")`).FindAllStringSubmatch(s.macvmGo, -1) {
+				fl = append(fl, dashTokens(add[1])...)
+			}
 		}
 		foundMacRun[m[2]] = true
 		checkSubset("Mac（internal/macvm 在虚拟机里）"+m[2], m[2]+".sh", fl, verbScript[m[2]])

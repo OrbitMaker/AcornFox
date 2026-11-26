@@ -18,6 +18,9 @@
 #   并把判断用 --china/--global 传给 acornfox mac，虚拟机里的安装脚本也照同一个判断下载。
 #   其余参数原样交给 acornfox mac：--china、--global、--memory 6、--idle 30、--no-lan、--no-open、--json、--version vX.Y.Z …
 #   （acornfox mac --help 看全部）
+#   来源标记：安装时可以加 --from 名字（官网链接带来的，只认小写字母、数字、-，最长 32；不合规的当没有，提醒一句、照常安装），
+#   一路交给虚拟机里的安装脚本，装好后向下载网关报一次、只报这个标记。升级、卸载不带它。不写就什么都不报。
+# AFX-FEATURE: install-from   （get.sh 靠这一行知道这份脚本认 --from；老版本没有，get.sh 就不往下传）
 # 前提：Apple 芯片的 Mac、macOS 26 或更新、磁盘剩 12 GB 以上、能联网。第一次装且没有苹果的 container 时，会让你输一次这台
 #   Mac 的登录密码（装苹果签名的 container 安装包要管理员权限）；这一步 AI 工作台不会代输，由你自己在终端里输。
 # 验证：装完 acornfox mac status 显示虚拟机、常驻程序都正常；acornfox mac doctor 逐项检查。
@@ -52,10 +55,17 @@ fail() {  # fail 故障编号 说明 [处理办法…]
 usage() { awk 'NR>1 && !/^#/ {exit} NR>1' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 # ---------- 参数：第一个动作词归我，其余都交给 acornfox mac ----------
-VERB=""; VERSION=""; PREFER=""
+VERB=""; VERSION=""; PREFER=""; FROM=""
 PASS=()
+# 来源标记的写法：和官网统计、下载网关用同一条规矩，不合规的当没有（提醒一句，照常安装）
+FROM_RE='^[a-z0-9-]{1,32}$'
+set_from() {
+    if [[ "$1" =~ $FROM_RE ]]; then FROM="$1"; else FROM=""; echo "[AcornFox] 来源标记 --from ${1:-（空）} 不合规（只认小写字母、数字、-，最长 32 个字符），已忽略，照常安装" >&2; fi
+}
 while [ $# -gt 0 ]; do
     case "$1" in
+        --from) if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then set_from "$2"; shift; else set_from ""; fi;;
+        --from=*) set_from "${1#--from=}";;
         install|upgrade|uninstall)
             if [ -z "$VERB" ]; then VERB="$1"; else PASS+=("$1"); fi;;
         --version) [ $# -ge 2 ] || fail MAC-SRC-01 "--version 后面要跟版本号，例如 --version v0.7.0"; VERSION="$2"; shift;;
@@ -69,6 +79,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$VERB" ] || VERB=install
+# 来源标记只在安装时带下去；升级、卸载不带
+if [ -n "$FROM" ]; then
+    if [ "$VERB" = install ]; then PASS+=("--from" "$FROM"); else say "来源标记只在安装时用，$VERB 不带它，已忽略"; fi
+fi
 
 # ---------- 这是不是能装的 Mac ----------
 [ "$(uname -s)" = Darwin ] || fail MAC-OS-01 "这不是 Mac。Linux 服务器请用 get.sh 装在服务器上，Windows 请用 get.ps1"

@@ -40,6 +40,9 @@
 #     -LocalPackage 目录  测试：用目录里的 install.sh、acornfox_linux_amd64、入口包，不下载
 #     -Distro 名字     发行版名字（默认 AcornFox；只在测试时改）
 #     -Gateway 地址    下载网关地址（默认 https://dl.acornfox.com；也可设环境变量 ACORNFOX_GATEWAY）
+#     -From 名字       来源标记（官网链接带来的，例如 bili-1201；只认小写字母、数字、-，最长 32；不合规的当没有，提醒一句、照常安装）：
+#       只在安装（install、resume）时用，交给 WSL 里的 get.sh 的 --from，装好后 AcornFox 向下载网关报一次、只报这个标记；
+#       升级、卸载等不带；不写就什么都不报
 # 退出码：0 成功；1 出错（屏幕上有故障编号 WIN-…，说明和处理办法见 acornfox faults WIN-xx）；
 #   2 用法不对；3 需要重启电脑（重启后登录会自动接着装）；5 管理员确认被取消。
 #
@@ -61,6 +64,8 @@
 #   ACORNFOX_PROBE_SECONDS（测速最多等几秒，默认 5）、ACORNFOX_PROBE_VERSION（只给测试：用哪个版本的文件测速，默认就是要装的版本）、
 #   ACORNFOX_GITEE_HOST、ACORNFOX_GITHUB_HOST（只给测试：换成假服务器）、ACORNFOX_REPO、ACORNFOX_GITEE_REPO（换发布仓库）、AFX_WIN_DL_PARALLEL（分段下载起始路数，默认 16，最多 32）；
 #   AFX_WIN_LIB=1（只给测试用：点引入本脚本时只定义函数、不执行，用来单独测下载这类函数）。
+#
+# AFX-FEATURE: install-from   （get.ps1 靠这一行知道这份脚本认 -From；老版本没有，get.ps1 就不往下传）
 #
 # 本文件含中文，必须存成带 BOM 的 UTF-8（英文 Windows 的 PowerShell 5.1 读无 BOM 的中文会解析错）。
 # 局域网转发的做法（WSL 2 默认是 NAT 网络，Windows 局域网地址上没人监听，要自己转）：
@@ -88,7 +93,8 @@ param(
     [string]$ReleaseBase = '',
     [string]$LocalPackage = '',
     [string]$Distro = 'AcornFox',
-    [string]$Gateway = ''
+    [string]$Gateway = '',
+    [string]$From = ''
 )
 
 # 发行版里这一行在构建时被写成它所属的版本号（scripts/build-release.sh）；源码里是 dev：没有绑定版本，要写 -Version 或 -LocalPackage
@@ -99,6 +105,13 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch { }
 $env:WSL_UTF8 = '1'
+
+# 来源标记：写法和官网统计、下载网关一样（a-z、0-9、-，1～32 个；-cmatch 区分大小写，\z 不放过结尾的换行）；
+# 不合规的当没有，提醒一句，照常安装。只有安装（install、resume）用它，别的动作一律不带
+if ($From -and $From -cnotmatch '^[a-z0-9-]{1,32}\z') {
+    if (-not $Json) { Write-Host "[AcornFox] 来源标记 -From $From 不合规（只认小写字母、数字、-，最长 32 个字符），已忽略，照常安装" }
+    $From = ''
+}
 
 # ---------------------------------------------------------------------------------------------------------
 # 常量
@@ -1335,7 +1348,9 @@ use_orig_apt() {
 '@
     if (-not ($china -and $Verb -eq 'install')) { $aptChina = "APT_FILES=''`nuse_china_apt() { return 0; }`nuse_orig_apt() { return 0; }`n" }
     else { $aptChina += "`nuse_china_apt`n" }
+    # 来源标记（-From，已在文件开头校验过：只有 a-z、0-9、-，所以直接拼进命令是安全的）：只在安装时交给 WSL 里的 get.sh --from
     $extra = $(if ($Verb -eq 'install') { "--wsl --public-host $PublicHost $region" } else { "-y $region" }).Trim()
+    if ($Verb -eq 'install' -and $From) { $extra = "$extra --from $From" }
     if ($LocalPackage) {
         $pkg = ConvertTo-WslPath (Resolve-Path -LiteralPath $LocalPackage).ProviderPath
         $run = "bash '$pkg/$Verb.sh' --binary '$pkg/acornfox_linux_amd64' $extra"
@@ -1394,7 +1409,7 @@ function Install-LinuxSide([string]$PublicHost, [string]$Ver) {
         Add-Step 'linux-install' 'skip' ("已装 " + (Get-DistroAcornFoxVersion))
         return
     }
-    if ($Plan) { Say "（试跑）会在 $Distro 里运行 get.sh install --version $Ver --wsl --public-host $PublicHost，装 Docker 和 AcornFox（要几分钟）"; return }
+    if ($Plan) { Say "（试跑）会在 $Distro 里运行 get.sh install --version $Ver --wsl --public-host $PublicHost$(if ($From) { " --from $From" })，装 Docker 和 AcornFox（要几分钟）"; return }
     Say "在 $Distro 里安装 AcornFox（要装 Docker，几分钟；输出同时记在 WSL 里的 /root/acornfox-install.log）…"
     $sec = Invoke-InsideRun 'install' $PublicHost $Ver
     Add-Step 'linux-install' 'done' "用时=${sec}s"
@@ -1475,6 +1490,7 @@ function Set-ResumeAfterReboot {
     if ($LocalPackage) { $a += @('-LocalPackage', $LocalPackage) }
     if ($Distro -ne 'AcornFox') { $a += @('-Distro', $Distro) }
     if ($Gateway) { $a += @('-Gateway', $Gateway) }
+    if ($From) { $a += @('-From', $From) }
     $src = $script:SelfCopy
     if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { Copy-Item -LiteralPath $PSCommandPath -Destination $src -Force }
     $cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $src + '" ' + (($a | ForEach-Object { ConvertTo-WinArg $_ }) -join ' ')

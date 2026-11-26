@@ -16,6 +16,9 @@
 #   只装命令行（Mac 或 Linux 电脑上，不用 sudo）： … | bash -s -- cli
 #   指定版本（含预发布版）： … | sudo bash -s -- --version v0.6.0
 #   其余参数原样交给那个版本的脚本，例如： … | sudo bash -s -- --china --no-lan-console
+#   来源标记（官网链接带来的，装好后向下载网关报一次、只报它）： … | sudo bash -s -- --from bili-1201      （Mac：… | bash -s -- --from bili-1201）
+#     只认小写字母、数字、-，最长 32；不合规的当没有（提醒一句、照常安装）；只在安装时有用，升级、卸载、装命令行不带；
+#     要装的那个版本的脚本还不认它（老版本）时不往下传，照常安装。不写就什么都不报。
 #   已经下载到本地：bash get.sh [install|upgrade|cli|uninstall] [--version vX.Y.Z] [参数…]；bash get.sh --help
 #
 # 选源：加 --china 先用 Gitee，加 --global 先用 GitHub；都不加时先看这台机器以前安装时记下的判断（/etc/acornfox/install.env），
@@ -56,10 +59,15 @@ fail() {  # fail 退出码 故障编号 说明 [处理办法…]
 usage() { awk 'NR>1 && !/^#/ {exit} NR>1' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 # ---------- 参数 ----------
-VERB=""; VERSION=""; PREFER=""; VERSION_GIVEN=0
+VERB=""; VERSION=""; PREFER=""; VERSION_GIVEN=0; FROM_RAW=""; FROM_GIVEN=0
 PASS=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --from)
+            # 后面没有值（或紧跟着另一个选项）：当没写，不吞掉下一个选项
+            FROM_GIVEN=1
+            if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then FROM_RAW="$2"; shift; else FROM_RAW=""; fi;;
+        --from=*) FROM_GIVEN=1; FROM_RAW="${1#--from=}";;
         install|upgrade|cli|uninstall)
             if [ -z "$VERB" ]; then VERB="$1"; else PASS+=("$1"); fi;;
         --version) [ $# -ge 2 ] || fail 2 INSTALL-GET-04 "--version 后面要跟版本号，例如 --version v0.6.0"; VERSION="$2"; VERSION_GIVEN=1; shift;;
@@ -75,6 +83,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$VERB" ] || VERB=install
+# 来源标记：写法和官网统计、下载网关一样（a-z、0-9、-，1～32 个）；不合规的当没有，提醒一句，照常安装
+FROM=""
+if [ "$FROM_GIVEN" = 1 ]; then
+    FROM_RE='^[a-z0-9-]{1,32}$'
+    if [[ "$FROM_RAW" =~ $FROM_RE ]]; then FROM="$FROM_RAW"
+    else say "来源标记 --from ${FROM_RAW:-（空）} 不合规（只认小写字母、数字、-，最长 32 个字符），已忽略，照常安装"; fi
+fi
 case "$VERB" in
     install) SCRIPT=install.sh;;
     upgrade) SCRIPT=upgrade.sh;;
@@ -308,6 +323,17 @@ if [ -n "$PROBE_DECIDED" ]; then
         install|upgrade|cli) if [ "$PROBE_DECIDED" = gitee ]; then PASS+=("--china"); else PASS+=("--global"); fi;;
     esac
     export ACORNFOX_GET_PROBE_NOTE="$PROBE_NOTE"
+fi
+# 来源标记：只在安装时往下传；升级、卸载、装命令行不带。老版本的脚本不认 --from（会报未知参数），
+# 所以先看要交出去的这份脚本里有没有“AFX-FEATURE: install-from”这一行，没有就不传
+if [ -n "$FROM" ]; then
+    if [ "$VERB" != install ]; then
+        say "来源标记只在安装时用，$VERB 不带它，已忽略"
+    elif grep -q 'AFX-FEATURE: install-from' "$TMP/$SCRIPT" 2>/dev/null; then
+        PASS+=("--from" "$FROM")
+    else
+        say "$VERSION 的 $SCRIPT 还不认来源标记（--from），没往下传，照常安装"
+    fi
 fi
 if $MAC; then
     # install-mac.sh 的第一个参数是动作；版本一律交给它（卸载时它会优先用已经装着的程序）

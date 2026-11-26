@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/acornfox/acornfox/internal/appinstall"
+	"github.com/acornfox/acornfox/internal/installfrom"
 )
 
 // ---------------------------------------------------------------- the machine
@@ -386,14 +387,8 @@ func (in *Installer) stepLinux(ctx context.Context) (string, string, error) {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	var run, verb string
-	if upgrade {
-		verb = "升级"
-		run = "bash ./upgrade.sh -y --binary ./acornfox_linux_arm64 --edge-package ./" + filepath.Base(rf.Edge) + region
-	} else {
-		verb = "安装"
-		run = "bash ./install.sh --binary ./acornfox_linux_arm64 --edge-package ./" + filepath.Base(rf.Edge) + " --mac-vm --public-host " + host + region
-	}
+	verb := ifs(upgrade, "升级", "安装")
+	run := linuxRunCommand(upgrade, filepath.Base(rf.Edge), region, host, in.Opt.From)
 	script := strings.NewReplacer("@VERB@", verb, "@VERSION@", in.releaseVersion(), "@RUN@", run).Replace(linuxRunScript)
 	in.say("在虚拟机里%s AcornFox（%s；输出同时记在虚拟机里的 /root/acornfox-install.log）…", verb, ifs(upgrade, "应用不停，约十几秒", "要装 Docker，几分钟"))
 	t0 := time.Now()
@@ -411,6 +406,23 @@ func (in *Installer) stepLinux(ctx context.Context) (string, string, error) {
 	}
 	in.Cfg.Version = in.releaseVersion()
 	return StateDone, fmt.Sprintf("用时 %d 秒", int(time.Since(t0).Seconds())), nil
+}
+
+// linuxRunCommand is the command line that runs the Linux install or upgrade script inside the machine.
+// region is "" or " --china" / " --global". from is the install source tag: only a fresh install passes it
+// (--from), and only a usable one (the same shape as everywhere: a-z, 0-9, "-", 1 to 32 characters, so it is
+// safe to put in a shell command line).
+func linuxRunCommand(upgrade bool, edgeName, region, host, from string) string {
+	var run string
+	if upgrade {
+		run = "bash ./upgrade.sh -y --binary ./acornfox_linux_arm64 --edge-package ./" + edgeName + region
+		return run
+	}
+	run = "bash ./install.sh --binary ./acornfox_linux_arm64 --edge-package ./" + edgeName + " --mac-vm --public-host " + host + region
+	if installfrom.Valid(from) {
+		run += " --from " + from
+	}
+	return run
 }
 
 // lineTee prints what the machine says, line by line, with a prefix, and keeps the last lines.
